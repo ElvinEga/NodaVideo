@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
     "apps/desktop",
+    "crates/project",
+    "crates/media-engine",
 ]
 
 [workspace.package]
@@ -12,11 +14,18 @@ license = "Apache-2.0"
 authors = ["NodaVideo Contributors"]
 
 [workspace.dependencies]
+nodavideo-project = { path = "crates/project" }
+nodavideo-media-engine = { path = "crates/media-engine" }
 gpui-kit = "0.9.0"
 anyhow = "1.0.95"
 thiserror = "2.0.11"
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.138"
+rusqlite = { version = "0.32", features = ["bundled"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+tempfile = "3.17"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -31,6 +40,9 @@ module_name_repetitions = "allow"
 cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"
+cast_lossless = "allow"
+cast_possible_wrap = "allow"
+unreadable_literal = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
@@ -43,6 +55,12 @@ future_not_send = "allow"
 derive_partial_eq_without_eq = "allow"
 redundant_closure_for_method_calls = "allow"
 unused_self = "allow"
+significant_drop_tightening = "allow"
+option_if_let_else = "allow"
+manual_let_else = "allow"
+collapsible_if = "allow"
+chunks_exact_to_as_chunks = "allow"
+assert_is_empty = "allow"
 
 [profile.dev]
 opt-level = 0

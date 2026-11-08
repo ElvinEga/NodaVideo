@@ -74,7 +74,9 @@ cargo fmt --all -- --check
 NodaVideo/
 ├── apps/
 │   └── desktop/                 # Native GPUI desktop application (nodavideo-desktop)
-├── crates/                      # Core domain and protocol libraries (landing in M1–M4)
+├── crates/
+│   ├── project/                 # Versioned project document, atomic save/load (nodavideo-project)
+│   └── media-engine/            # FFmpeg probing, thumbnails, waveforms, SQLite cache (nodavideo-media-engine)
 ├── docs/                        # Architecture & GPUI Kit guidelines
 ├── skills/                      # Reference and extensible production skills
 ├── AGENTS.md                    # Canonical instructions and contracts for AI agents
@@ -89,7 +91,7 @@ NodaVideo/
 
 - [x] **M0 (Foundation - Bootstrap):** Root workspace, centralized dependencies, MSRV 1.92+, GPUI Kit 0.9.0 desktop entry, clean startup & shutdown.
 - [x] **M0 (Desktop Shell):** Native menus with shortcuts, top toolbar, workspace tabs (Edit/Color/Audio/AI Studio), 5 resizable panels (Media Browser, Preview Monitor, Inspector, Timeline, dockable AI Assistant), session persistence, and dark NLE theme.
-- [ ] **M1 (Media Management):** Asset bin, FFmpeg probing, thumbnails, audio waveforms, SQLite index cache.
+- [x] **M1 (Media Management):** Asset bin, FFmpeg/FFprobe probing, thumbnails, normalized audio waveforms, SQLite index cache, search/filtering, and persistent media references.
 - [ ] **M2 (Timeline Engine):** Multi-track editing, trimming, splitting, ripple edits, snapping, pure deterministic model.
 - [ ] **M3 (Preview & Export):** Playback sync, wgpu compositing, first vertical slice (import → edit → export MP4).
 - [ ] **M4 (AI Integration):** ACP adapter, Codex app-server adapter, Claude CLI stream, MCP tool surface.

@@ -28,6 +28,7 @@ pub struct WorkspaceView {
     pub assistant: Entity<AssistantPanel>,
     pub h_split_state: Entity<ResizableState>,
     pub v_split_state: Entity<ResizableState>,
+    _observe_sub: Subscription,
 }
 
 impl WorkspaceView {
@@ -41,6 +42,18 @@ impl WorkspaceView {
         let h_split_state = cx.new(|_| ResizableState::default());
         let v_split_state = cx.new(|_| ResizableState::default());
 
+        // Observe media browser updates to synchronize selected asset with Inspector
+        let observe_sub = cx.observe(&media_browser, |this, mb, cx| {
+            let selected_id = mb.read(cx).selected_asset_id;
+            let selected_asset =
+                selected_id.and_then(|id| mb.read(cx).project.get_asset(id).cloned());
+            this.inspector.update(cx, |insp, cx| {
+                if insp.selected_asset != selected_asset {
+                    insp.set_selected_asset(selected_asset, cx);
+                }
+            });
+        });
+
         Self {
             state: WorkspaceLayoutState::default(),
             media_browser,
@@ -50,6 +63,7 @@ impl WorkspaceView {
             assistant,
             h_split_state,
             v_split_state,
+            _observe_sub: observe_sub,
         }
     }
 
@@ -67,6 +81,85 @@ impl WorkspaceView {
         }
         cx.notify();
     }
+
+    pub fn new_project(&mut self, cx: &mut Context<Self>) {
+        self.media_browser.update(cx, |mb, cx| {
+            mb.project = nodavideo_project::ProjectDocument::default();
+            mb.selected_asset_id = None;
+            cx.notify();
+        });
+        self.state.project_name = "Untitled Project".into();
+        self.inspector.update(cx, |insp, cx| {
+            insp.set_selected_asset(None, cx);
+        });
+        cx.notify();
+    }
+
+    pub fn save_current_project(&mut self, cx: &mut Context<Self>) {
+        let mb = self.media_browser.read(cx);
+        let project = mb.project.clone();
+        let receiver = cx.prompt_for_new_path(
+            std::path::Path::new("."),
+            Some(&format!("{}.nodavideo", project.name)),
+        );
+
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = receiver.await {
+                if let Err(err) = project.save_to_file(&path) {
+                    eprintln!("Failed to save project: {err}");
+                } else {
+                    let name = path
+                        .file_stem()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("Project")
+                        .to_string();
+                    this.update(cx, |this, cx| {
+                        this.state.project_name = name.into();
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub fn open_project_prompt(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = receiver.await {
+                if let Some(path) = paths.into_iter().next() {
+                    match nodavideo_project::ProjectDocument::load_from_file(&path) {
+                        Ok(loaded_doc) => {
+                            this.update(cx, |this, cx| {
+                                this.state.project_name = loaded_doc.name.clone().into();
+                                this.media_browser.update(cx, |mb, cx| {
+                                    mb.project = loaded_doc;
+                                    mb.selected_asset_id = None;
+                                    cx.notify();
+                                });
+                                this.inspector.update(cx, |insp, cx| {
+                                    insp.set_selected_asset(None, cx);
+                                });
+                                cx.notify();
+                            })
+                            .ok();
+                        }
+                        Err(err) => {
+                            eprintln!("Failed to load project: {err}");
+                        }
+                    }
+                }
+            }
+        })
+        .detach();
+    }
 }
 
 impl Render for WorkspaceView {
@@ -83,6 +176,20 @@ impl Render for WorkspaceView {
             // Menu / Action Listeners
             .on_action(cx.listener(|_, _: &QuitAction, _, cx| {
                 cx.quit();
+            }))
+            .on_action(cx.listener(|this, _: &NewProject, _, cx| {
+                this.new_project(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SaveProject, _, cx| {
+                this.save_current_project(cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenProject, _, cx| {
+                this.open_project_prompt(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ImportMedia, _, cx| {
+                this.media_browser.update(cx, |mb, cx| {
+                    mb.prompt_import(cx);
+                });
             }))
             .on_action(cx.listener(|this, _: &ToggleMediaBrowser, _, cx| {
                 this.toggle_panel(PanelId::Media, cx);

@@ -11,6 +11,7 @@ actions!(
         NewProject,
         OpenProject,
         SaveProject,
+        ImportMedia,
         QuitAction,
         UndoAction,
         RedoAction,
@@ -42,6 +43,7 @@ pub fn init(cx: &mut App) {
             KeyBinding::new("cmd-n", NewProject, None),
             KeyBinding::new("cmd-o", OpenProject, None),
             KeyBinding::new("cmd-s", SaveProject, None),
+            KeyBinding::new("cmd-i", ImportMedia, None),
             KeyBinding::new("cmd-q", QuitAction, None),
             // Edit
             KeyBinding::new("cmd-z", UndoAction, None),
@@ -63,6 +65,7 @@ pub fn init(cx: &mut App) {
             KeyBinding::new("ctrl-n", NewProject, None),
             KeyBinding::new("ctrl-o", OpenProject, None),
             KeyBinding::new("ctrl-s", SaveProject, None),
+            KeyBinding::new("ctrl-i", ImportMedia, None),
             KeyBinding::new("ctrl-q", QuitAction, None),
             // Edit
             KeyBinding::new("ctrl-z", UndoAction, None),
@@ -90,6 +93,7 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("Open Project…", OpenProject),
                 MenuItem::separator(),
                 MenuItem::action("Save Project", SaveProject),
+                MenuItem::action("Import Media…", ImportMedia),
                 MenuItem::separator(),
                 MenuItem::action("Quit", QuitAction),
             ],

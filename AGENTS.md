@@ -17,13 +17,15 @@ Product direction, in priority order:
 
 Core identity: native Rust + GPUI, professional NLE, multi-provider agent support, AI-assisted editing with full user control.
 
-**Repo status: M0 desktop shell completed.** As of 2026-11-08, the foundational Cargo workspace and desktop shell have been implemented:
-- `apps/desktop` (`nodavideo-desktop` binary): native GPUI desktop application featuring the complete professional NLE shell (native menus with shortcuts, top toolbar, workspace mode tabs for Edit/Color/Audio/AI Studio, resizable dockable panel layout for Media Browser, Preview Monitor, Inspector, Timeline, and AI Assistant, session persistence, and dark NLE theme).
+**Repo status: M0 desktop shell & M1 media management completed.** As of 2026-11-08, the foundational Cargo workspace and media engine crates have been implemented:
+- `apps/desktop` (`nodavideo-desktop` binary): native GPUI desktop application featuring the complete professional NLE shell (native menus with shortcuts, top toolbar, workspace mode tabs for Edit/Color/Audio/AI Studio, resizable dockable panel layout for Media Browser, Preview Monitor, Inspector, Timeline, and AI Assistant, session persistence, and dark NLE theme) and a fully functioning Media Browser connected to real media imports, search, filters, drag-and-drop, and project saving/loading.
+- `crates/project` (`nodavideo-project` library): versioned JSON project document (`schema_version = 1`), atomic project persistence, missing media asset detection, strongly typed IDs (`AssetId`, `ProjectId`), and frame-accurate rational timing (`TimeRational`, `FrameRate`).
+- `crates/media-engine` (`nodavideo-media-engine` library): FFmpeg/FFprobe stream metadata probing, thumbnail generation, normalized audio waveform extraction, and SQLite-backed persistent media cache (`MediaCacheDb`).
 
 Pinned stack: `gpui-kit 0.9.0` (`gpui-pre 0.3.11`), Rust MSRV `1.92.0`, edition `2024`. Dependencies are centralized in workspace `Cargo.toml` with `Cargo.lock` committed.
 Repository scaffolding includes: `.gitignore`, `rustfmt.toml`, `README.md`, `LICENSE` (Apache-2.0), and GitHub Actions CI (`.github/workflows/ci.yml`).
 Current verification status: verified locally on macOS (`aarch64-apple-darwin`). Windows and Linux builds are configured in CI for automated cross-platform verification.
-No `crates/*` exist yet; domain logic, multi-track timeline, media engine, and agent adapters will be created in their respective milestones. The `skills/` folder holds two vendored GPUI Kit reference skills (`gpui-kit`, `gpui-kit-design-guides`) used as development documentation for GPUI and UI work. `docs/GPUI_KIT_GUIDELINES.md` is the practical guide for building GPUI views in this repo. Everything in §3 and §4 beyond `apps/desktop` is the agreed target layout, not existing code. When new crates land, update this file to reflect reality.
+Domain logic for multi-track timeline (M2), preview/export (M3), and agent adapters (M4) will be created in their respective milestones. The `skills/` folder holds two vendored GPUI Kit reference skills (`gpui-kit`, `gpui-kit-design-guides`) used as development documentation for GPUI and UI work. `docs/GPUI_KIT_GUIDELINES.md` is the practical guide for building GPUI views in this repo. When new crates land, update this file to reflect reality.
 
 ## 2. The architectural contract (non-negotiable)
 
@@ -185,8 +187,8 @@ Build a working editor **vertically**, then expand. Do not attempt the full CapC
 
 | Milestone | Scope | Acceptance test | Status |
 | --- | --- | --- | --- |
-| M0 | Native desktop foundation: GPUI + GPUI Kit, menus, dockable/resizable panels, keyboard shortcuts, themes, project management | App launches on macOS, Windows and Linux; panels resize and persist; a new project can be created and reopened | **In progress** (Desktop shell completed on macOS: native menus, top toolbar, 4 workspace tabs, 5 resizable panels with `h_resizable`/`v_resizable`, dark theme, and CI workflow; Windows/Linux pending CI run; project file persistence in project crate planned) |
-| M1 | Media management: import video/audio/images, thumbnails, metadata, waveform generation, media bin | Import a clip; see thumbnail, duration and waveform; relaunch retains the media index | Planned |
+| M0 | Native desktop foundation: GPUI + GPUI Kit, menus, dockable/resizable panels, keyboard shortcuts, themes, project management | App launches on macOS, Windows and Linux; panels resize and persist; a new project can be created and reopened | **Completed on macOS** (CI configured for Windows/Linux) |
+| M1 | Media management: import video/audio/images, thumbnails, metadata, waveform generation, media bin | Import a clip; see thumbnail, duration and waveform; relaunch retains the media index | **Completed on macOS** (Real file imports, drag-and-drop, FFprobe metadata, thumbnailing, 100-pt/sec waveform cache, SQLite index, and atomic project persistence; CI configured for Windows/Linux) |
 | M2 | Timeline engine: multi-track editing, drag and drop, trim, split, snapping, playhead, selection, undo/redo | Drag a clip to a track, trim both edges, split at playhead, ripple delete; undo/redo restores exact state; times are exact at frame boundaries | Planned |
 | M3 | Preview and export: playback, scrubbing, A/V sync, effects pipeline, MP4 export | **First vertical slice: import video → drag to timeline → trim → preview → export MP4**, with output playable in a third-party player | Planned |
 | M4 | AI integration: ACP, Codex app-server, Claude CLI adapter, provider selector, conversation UI, skill picker, MCP editor tools | Two different providers can run the same task; every agent mutation appears in undo history; disconnecting an agent leaves the editor fully functional | Planned |

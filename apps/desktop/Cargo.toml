@@ -11,6 +11,8 @@ name = "nodavideo-desktop"
 path = "src/main.rs"
 
 [dependencies]
+nodavideo-project.workspace = true
+nodavideo-media-engine.workspace = true
 gpui-kit.workspace = true
 anyhow.workspace = true
 
