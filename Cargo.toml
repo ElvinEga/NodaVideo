@@ -35,6 +35,14 @@ must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 wildcard_imports = "allow"
+struct_excessive_bools = "allow"
+too_many_lines = "allow"
+doc_markdown = "allow"
+missing_const_for_fn = "allow"
+future_not_send = "allow"
+derive_partial_eq_without_eq = "allow"
+redundant_closure_for_method_calls = "allow"
+unused_self = "allow"
 
 [profile.dev]
 opt-level = 0

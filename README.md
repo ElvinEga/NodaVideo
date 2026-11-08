@@ -88,7 +88,7 @@ NodaVideo/
 ## Milestone Roadmap
 
 - [x] **M0 (Foundation - Bootstrap):** Root workspace, centralized dependencies, MSRV 1.92+, GPUI Kit 0.9.0 desktop entry, clean startup & shutdown.
-- [ ] **M0 (Desktop Foundation Complete):** Menus, dockable/resizable panels, keyboard shortcuts, themes, project persistence.
+- [x] **M0 (Desktop Shell):** Native menus with shortcuts, top toolbar, workspace tabs (Edit/Color/Audio/AI Studio), 5 resizable panels (Media Browser, Preview Monitor, Inspector, Timeline, dockable AI Assistant), session persistence, and dark NLE theme.
 - [ ] **M1 (Media Management):** Asset bin, FFmpeg probing, thumbnails, audio waveforms, SQLite index cache.
 - [ ] **M2 (Timeline Engine):** Multi-track editing, trimming, splitting, ripple edits, snapping, pure deterministic model.
 - [ ] **M3 (Preview & Export):** Playback sync, wgpu compositing, first vertical slice (import → edit → export MP4).
