@@ -3849,6 +3849,7 @@ dependencies = [
  "chrono",
  "image",
  "nodavideo-project",
+ "nodavideo-timeline",
  "rusqlite",
  "serde",
  "serde_json",

@@ -32,6 +32,7 @@ pub struct ToolbarActions {
     pub on_redo: Rc<dyn Fn(&mut Window, &mut App)>,
     pub on_tab_change: Rc<dyn Fn(&WorkspaceTab, &mut Window, &mut App)>,
     pub on_toggle: Rc<dyn Fn(&PanelId, &mut Window, &mut App)>,
+    pub on_export: Rc<dyn Fn(&mut Window, &mut App)>,
 }
 
 impl std::fmt::Debug for ToolbarActions {
@@ -59,6 +60,7 @@ pub fn render_top_toolbar(
     let on_undo = actions.on_undo;
     let on_redo = actions.on_redo;
     let on_tab_change = actions.on_tab_change;
+    let on_export = actions.on_export;
     let can_undo = actions.can_undo;
     let can_redo = actions.can_redo;
 
@@ -146,11 +148,24 @@ pub fn render_top_toolbar(
                 )),
         )
         .child(
-            // Right region: Panel visibility toggles
+            // Right region: Export & Panel visibility toggles
             div()
                 .flex()
                 .items_center()
                 .gap_1()
+                .child({
+                    let export = on_export;
+                    Button::new("tb-export")
+                        .primary()
+                        .xsmall()
+                        .icon(IconName::Share2)
+                        .label("Export")
+                        .tooltip("Export Video (Cmd+E / Ctrl+E)")
+                        .on_click(move |_, window, cx| {
+                            export(window, cx);
+                        })
+                })
+                .child(div().h_4().w(px(1.0)).bg(theme.border).mx_1())
                 .child({
                     let toggle = on_toggle.clone();
                     Button::new("toggle-media-bin")

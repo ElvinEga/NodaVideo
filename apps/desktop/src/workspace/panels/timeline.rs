@@ -99,6 +99,11 @@ impl TimelinePanel {
         }
     }
 
+    /// Current playhead position in frames.
+    pub fn playhead(&self) -> i64 {
+        self.selection.playhead_frame
+    }
+
     /// Move playhead to specified frame.
     pub fn set_playhead(&mut self, frame: i64, cx: &mut Context<Self>) {
         let target = if self.snapping_enabled {

@@ -95,4 +95,33 @@ mod tests {
         assert_eq!(panel.sequence.tracks[1].clips.len(), 1);
         assert_eq!(panel.sequence.duration_frames(), 72);
     }
+
+    #[core::prelude::v1::test]
+    fn test_preview_monitor_panel_state() {
+        use workspace::panels::preview_monitor::PreviewMonitorPanel;
+
+        let panel = PreviewMonitorPanel::new();
+        assert!(!panel.is_playing);
+        assert!(!panel.is_looping);
+        assert_eq!(panel.timecode, "00:00:00:00");
+        assert_eq!(panel.duration, "00:00:00:00");
+        assert_eq!(panel.sequence_name, "Main Sequence");
+        assert_eq!(panel.sequence_info, "1920×1080 24fps");
+        assert!(panel.current_frame_path.is_none());
+    }
+
+    #[core::prelude::v1::test]
+    fn test_export_settings_defaults() {
+        use nodavideo_media_engine::ExportSettings;
+        use nodavideo_project::FrameRate;
+
+        let settings = ExportSettings::default();
+        assert_eq!(settings.width, 1920);
+        assert_eq!(settings.height, 1080);
+        assert_eq!(settings.fps, FrameRate::FPS_24);
+        assert_eq!(settings.video_bitrate_kbps, 8000);
+        assert_eq!(settings.audio_bitrate_kbps, 192);
+        assert_eq!(settings.video_codec, "libx264");
+        assert_eq!(settings.audio_codec, "aac");
+    }
 }

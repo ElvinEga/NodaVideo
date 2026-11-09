@@ -41,4 +41,13 @@ pub enum MediaEngineError {
 
     #[error("Image processing error for {path:?}: {reason}")]
     ImageError { path: PathBuf, reason: String },
+
+    #[error("Video export failed: {reason}")]
+    ExportFailed { reason: String },
+
+    #[error("Frame extraction failed for {path:?}: {reason}")]
+    FrameExtractionFailed { path: PathBuf, reason: String },
+
+    #[error("Timeline error: {0}")]
+    Timeline(#[from] nodavideo_timeline::TimelineError),
 }

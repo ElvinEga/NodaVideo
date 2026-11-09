@@ -6,9 +6,16 @@ pub mod navigation;
 pub mod panels;
 pub mod toolbar;
 
+use std::sync::Arc;
+
+use gpui_kit::assets::IconName;
+use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::Icon;
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use nodavideo_media_engine::MediaProcessor;
 
 use crate::theme::metrics;
 use crate::workspace::layout::WorkspaceLayoutState;
@@ -18,7 +25,6 @@ use crate::workspace::panels::*;
 use crate::workspace::toolbar::{PanelId, ToolbarActions, render_top_toolbar};
 
 /// Root workspace view managing panels, docking/resizing, and active workspace tab.
-#[derive(Debug)]
 pub struct WorkspaceView {
     pub state: WorkspaceLayoutState,
     pub media_browser: Entity<MediaBrowserPanel>,
@@ -28,7 +34,22 @@ pub struct WorkspaceView {
     pub assistant: Entity<AssistantPanel>,
     pub h_split_state: Entity<ResizableState>,
     pub v_split_state: Entity<ResizableState>,
+    pub processor: Arc<MediaProcessor>,
+    pub export_status: Option<String>,
     _observe_sub: Subscription,
+    _preview_sub: Subscription,
+    _timeline_sub: Subscription,
+    playback_task: Option<Task<()>>,
+    preview_frame_task: Option<Task<()>>,
+}
+
+impl std::fmt::Debug for WorkspaceView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkspaceView")
+            .field("state", &self.state)
+            .field("export_status", &self.export_status)
+            .finish_non_exhaustive()
+    }
 }
 
 impl WorkspaceView {
@@ -38,11 +59,24 @@ impl WorkspaceView {
         let inspector = cx.new(|_| InspectorPanel::new());
         let timeline = cx.new(|_| TimelinePanel::new());
         let assistant = cx.new(|cx| AssistantPanel::new(window, cx));
+        let processor = media_browser.read(cx).processor.clone();
+
+        // Wire transport buttons on Preview Monitor
+        let tl_back = timeline.clone();
+        let tl_fwd = timeline.clone();
+        preview_monitor.update(cx, |mon, _| {
+            mon.on_step_backward = Some(std::rc::Rc::new(move |_, cx| {
+                tl_back.update(cx, |tl, cx| tl.step_backward(1, cx));
+            }));
+            mon.on_step_forward = Some(std::rc::Rc::new(move |_, cx| {
+                tl_fwd.update(cx, |tl, cx| tl.step_forward(1, cx));
+            }));
+        });
 
         let h_split_state = cx.new(|_| ResizableState::default());
         let v_split_state = cx.new(|_| ResizableState::default());
 
-        // Observe media browser updates to synchronize selected asset with Inspector
+        // Observe media browser updates to synchronize selected asset with Inspector and refresh preview
         let observe_sub = cx.observe(&media_browser, |this, mb, cx| {
             let selected_id = mb.read(cx).selected_asset_id;
             let selected_asset =
@@ -52,9 +86,25 @@ impl WorkspaceView {
                     insp.set_selected_asset(selected_asset, cx);
                 }
             });
+            this.refresh_preview_frame(cx);
         });
 
-        Self {
+        // Observe preview monitor for playback state changes
+        let preview_sub = cx.observe(&preview_monitor, |this, pm, cx| {
+            let is_playing = pm.read(cx).is_playing;
+            if is_playing && this.playback_task.is_none() {
+                this.start_playback_loop(cx);
+            } else if !is_playing && this.playback_task.is_some() {
+                this.stop_playback_loop();
+            }
+        });
+
+        // Observe timeline for changes in playhead, clips, tracks, or sequence
+        let timeline_sub = cx.observe(&timeline, |this, _, cx| {
+            this.refresh_preview_frame(cx);
+        });
+
+        let mut view = Self {
             state: WorkspaceLayoutState::default(),
             media_browser,
             preview_monitor,
@@ -63,8 +113,182 @@ impl WorkspaceView {
             assistant,
             h_split_state,
             v_split_state,
+            processor,
+            export_status: None,
             _observe_sub: observe_sub,
+            _preview_sub: preview_sub,
+            _timeline_sub: timeline_sub,
+            playback_task: None,
+            preview_frame_task: None,
+        };
+
+        view.refresh_preview_frame(cx);
+        view
+    }
+
+    /// Refresh current frame and timecodes on Preview Monitor based on current timeline state.
+    pub fn refresh_preview_frame(&mut self, cx: &mut Context<Self>) {
+        let sequence = self.timeline.read(cx).sequence.clone();
+        let playhead = self.timeline.read(cx).playhead();
+        let project = self.media_browser.read(cx).project.clone();
+        let processor = self.processor.clone();
+
+        let timecode = sequence.frame_to_timecode(playhead);
+        let duration = sequence.duration_timecode();
+        let seq_name = sequence.name.clone();
+        let seq_info = format!(
+            "{}×{} {}fps",
+            sequence.width,
+            sequence.height,
+            sequence.fps.to_f64().round() as u64
+        );
+
+        self.preview_frame_task = Some(cx.spawn(async move |this, cx| {
+            let frame_result = cx
+                .background_spawn(
+                    async move { processor.render_preview(&sequence, &project, playhead) },
+                )
+                .await;
+
+            this.update(cx, |this, cx| {
+                let frame_path = frame_result.ok().flatten();
+                this.preview_monitor.update(cx, |mon, cx| {
+                    mon.sequence_name = seq_name.into();
+                    mon.sequence_info = seq_info.into();
+                    mon.update_frame(frame_path, timecode, duration, cx);
+                });
+            })
+            .ok();
+        }));
+    }
+
+    /// Start the real-time playback timer advancing the playhead.
+    pub fn start_playback_loop(&mut self, cx: &mut Context<Self>) {
+        let fps = self.timeline.read(cx).sequence.fps;
+        let fps_f64 = fps.to_f64().max(1.0);
+        let interval_ms = (1000.0 / fps_f64).round() as u64;
+
+        self.playback_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(interval_ms))
+                    .await;
+
+                let keep_running = this
+                    .update(cx, |this, cx| {
+                        if !this.preview_monitor.read(cx).is_playing {
+                            return false;
+                        }
+
+                        let seq_duration = this.timeline.read(cx).sequence.duration_frames();
+                        let current_playhead = this.timeline.read(cx).playhead();
+                        let is_looping = this.preview_monitor.read(cx).is_looping;
+
+                        if current_playhead >= seq_duration {
+                            if is_looping && seq_duration > 0 {
+                                this.timeline.update(cx, |tl, cx| tl.set_playhead(0, cx));
+                                true
+                            } else {
+                                this.preview_monitor
+                                    .update(cx, |mon, cx| mon.set_playing(false, cx));
+                                false
+                            }
+                        } else {
+                            this.timeline.update(cx, |tl, cx| tl.step_forward(1, cx));
+                            true
+                        }
+                    })
+                    .unwrap_or(false);
+
+                if !keep_running {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Stop the playback loop.
+    pub fn stop_playback_loop(&mut self) {
+        self.playback_task = None;
+    }
+
+    /// Prompt user for export path and launch asynchronous MP4 export pipeline.
+    pub fn export_video_prompt(&mut self, cx: &mut Context<Self>) {
+        let sequence = self.timeline.read(cx).sequence.clone();
+        let project = self.media_browser.read(cx).project.clone();
+
+        if sequence.duration_frames() == 0 {
+            self.export_status =
+                Some("Cannot export empty sequence (add clips to timeline)".into());
+            cx.notify();
+            return;
         }
+
+        let default_filename = format!("{}.mp4", sequence.name.replace(' ', "_").to_lowercase());
+        let receiver = cx.prompt_for_new_path(std::path::Path::new("."), Some(&default_filename));
+
+        let processor = self.processor.clone();
+        self.export_status = Some("Selecting export destination...".into());
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(mut output_path))) = receiver.await {
+                if output_path.extension().is_none() {
+                    output_path.set_extension("mp4");
+                }
+
+                let filename = output_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+
+                this.update(cx, |this, cx| {
+                    this.export_status = Some(format!("Exporting: {filename}..."));
+                    cx.notify();
+                })
+                .ok();
+
+                let settings = nodavideo_media_engine::ExportSettings {
+                    output_path: output_path.clone(),
+                    width: sequence.width,
+                    height: sequence.height,
+                    fps: sequence.fps,
+                    ..Default::default()
+                };
+
+                let start_time = std::time::Instant::now();
+                let export_result = cx
+                    .background_spawn(
+                        async move { processor.export(&sequence, &project, &settings) },
+                    )
+                    .await;
+                let elapsed = start_time.elapsed().as_secs_f64();
+
+                this.update(cx, |this, cx| {
+                    match export_result {
+                        Ok(report) => {
+                            let size_mb = (report.file_size_bytes as f64) / (1024.0 * 1024.0);
+                            this.export_status = Some(format!(
+                                "Export complete: {filename} ({size_mb:.1} MB in {elapsed:.1}s)"
+                            ));
+                        }
+                        Err(err) => {
+                            this.export_status = Some(format!("Export failed: {err}"));
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            } else {
+                this.update(cx, |this, cx| {
+                    this.export_status = None;
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     pub fn set_workspace_tab(&mut self, tab: WorkspaceTab, cx: &mut Context<Self>) {
@@ -207,6 +431,9 @@ impl Render for WorkspaceView {
                     mb.prompt_import(cx);
                 });
             }))
+            .on_action(cx.listener(|this, _: &ExportVideoAction, _, cx| {
+                this.export_video_prompt(cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleMediaBrowser, _, cx| {
                 this.toggle_panel(PanelId::Media, cx);
             }))
@@ -280,6 +507,7 @@ impl Render for WorkspaceView {
                 let can_redo = self.timeline.read(cx).can_redo();
                 let tl_undo = self.timeline.clone();
                 let tl_redo = self.timeline.clone();
+                let this_export = cx.entity();
 
                 let tab_listener = cx.listener(|this, tab: &WorkspaceTab, _, cx| {
                     this.set_workspace_tab(*tab, cx);
@@ -302,6 +530,11 @@ impl Render for WorkspaceView {
                     }),
                     on_toggle: std::rc::Rc::new(move |panel, win, app| {
                         toggle_listener(panel, win, app);
+                    }),
+                    on_export: std::rc::Rc::new(move |_, cx| {
+                        this_export.update(cx, |this, cx| {
+                            this.export_video_prompt(cx);
+                        });
                     }),
                 };
 
@@ -392,6 +625,7 @@ impl WorkspaceView {
     fn render_status_bar(&self, cx: &App) -> impl IntoElement {
         let theme = cx.theme();
         let mono_font = theme.mono_font_family.clone();
+        let export_status = self.export_status.clone();
 
         div()
             .flex()
@@ -425,7 +659,24 @@ impl WorkspaceView {
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child("48 kHz 24-bit Stereo"),
-                    ),
+                    )
+                    .when_some(export_status, |this, status| {
+                        this.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(theme.muted)
+                                .text_xs()
+                                .font_medium()
+                                .text_color(theme.primary)
+                                .child(Icon::new(IconName::Share2))
+                                .child(status),
+                        )
+                    }),
             )
             .child(
                 div()

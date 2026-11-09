@@ -5,16 +5,21 @@
 
 pub mod cache;
 pub mod error;
+pub mod export;
+pub mod preview;
 pub mod probe;
 pub mod thumbnail;
 pub mod waveform;
 
 use std::path::{Path, PathBuf};
 
-use nodavideo_project::{MediaAsset, MediaType};
+use nodavideo_project::{MediaAsset, MediaType, ProjectDocument};
+use nodavideo_timeline::Sequence;
 
 pub use cache::{CachedMediaRecord, MediaCacheDb};
 pub use error::MediaEngineError;
+pub use export::{ExportReport, ExportSettings, export_sequence};
+pub use preview::{extract_preview_frame, render_sequence_frame, resolve_active_video_clip};
 pub use probe::{is_ffmpeg_available, is_ffprobe_available, probe_media_file};
 pub use thumbnail::generate_thumbnail;
 pub use waveform::{WaveformData, generate_waveform};
@@ -96,6 +101,26 @@ impl MediaProcessor {
         }
 
         Ok(asset)
+    }
+
+    /// Render the preview frame for a timeline sequence at a given playhead frame.
+    pub fn render_preview(
+        &self,
+        sequence: &Sequence,
+        project: &ProjectDocument,
+        frame: i64,
+    ) -> Result<Option<PathBuf>, MediaEngineError> {
+        render_sequence_frame(sequence, project, frame, &self.cache_dir)
+    }
+
+    /// Export a timeline sequence to an MP4 video file.
+    pub fn export(
+        &self,
+        sequence: &Sequence,
+        project: &ProjectDocument,
+        settings: &ExportSettings,
+    ) -> Result<ExportReport, MediaEngineError> {
+        export_sequence(sequence, project, settings)
     }
 }
 
@@ -201,5 +226,91 @@ mod tests {
 
         let wave_data = WaveformData::load_from_file(&wave_path).unwrap();
         assert!(!wave_data.peaks.is_empty());
+    }
+
+    #[test]
+    fn test_preview_and_export_pipeline() {
+        if !is_ffmpeg_available() || !is_ffprobe_available() {
+            eprintln!("Skipping export pipeline test: ffmpeg/ffprobe not available");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("cache");
+        let processor = MediaProcessor::new(&cache_dir).unwrap();
+
+        // 1. Generate a small synthetic 2-second video with FFmpeg for testing
+        let video_path = dir.path().join("source.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .arg("-f")
+            .arg("lavfi")
+            .arg("-i")
+            .arg("testsrc=size=320x240:rate=24:duration=2")
+            .arg("-f")
+            .arg("lavfi")
+            .arg("-i")
+            .arg("sine=frequency=440:duration=2")
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg("-c:a")
+            .arg("aac")
+            .arg("-t")
+            .arg("2")
+            .arg("-y")
+            .arg(&video_path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        // 2. Process file into asset & add to project
+        let asset = processor.process_file(&video_path).unwrap();
+        let mut project = ProjectDocument::new("Export Test");
+        let asset_id = asset.id;
+        project.add_asset(asset).unwrap();
+
+        // 3. Create sequence and place clip on V1
+        let mut sequence = Sequence::default_1080p24();
+        let v1_id = sequence.tracks[1].id;
+        let clip_id = nodavideo_timeline::ClipId::new();
+
+        // 24 frames (1 second), trimmed from source in=0 to source out=24
+        let clip = nodavideo_timeline::Clip::new(clip_id, asset_id, v1_id, "Video Clip", 0, 0, 24)
+            .unwrap();
+        sequence.add_clip(v1_id, clip).unwrap();
+
+        // 4. Test preview extraction at frame 12
+        let preview_opt = processor.render_preview(&sequence, &project, 12).unwrap();
+        assert!(preview_opt.is_some());
+        let preview_path = preview_opt.unwrap();
+        assert!(preview_path.exists());
+
+        // 5. Test export to MP4
+        let export_path = dir.path().join("exported_timeline.mp4");
+        let export_settings = ExportSettings {
+            output_path: export_path.clone(),
+            width: 320,
+            height: 240,
+            fps: nodavideo_project::FrameRate::FPS_24,
+            video_bitrate_kbps: 1000,
+            audio_bitrate_kbps: 128,
+            video_codec: "libx264".into(),
+            audio_codec: "aac".into(),
+        };
+
+        let report = processor
+            .export(&sequence, &project, &export_settings)
+            .unwrap();
+        assert_eq!(report.output_path, export_path);
+        assert!(report.file_size_bytes > 0);
+        assert!(export_path.exists());
+
+        // 6. Verify exported MP4 via ffprobe
+        let probed = probe_media_file(&export_path).unwrap();
+        assert_eq!(probed.media_type, MediaType::Video);
+        assert_eq!(probed.width, Some(320));
+        assert_eq!(probed.height, Some(240));
+        assert!(probed.duration.is_some());
     }
 }
