@@ -15,7 +15,7 @@ use crate::workspace::layout::WorkspaceLayoutState;
 use crate::workspace::menus::*;
 use crate::workspace::navigation::WorkspaceTab;
 use crate::workspace::panels::*;
-use crate::workspace::toolbar::{PanelId, render_top_toolbar};
+use crate::workspace::toolbar::{PanelId, ToolbarActions, render_top_toolbar};
 
 /// Root workspace view managing panels, docking/resizing, and active workspace tab.
 #[derive(Debug)]
@@ -88,6 +88,9 @@ impl WorkspaceView {
             mb.selected_asset_id = None;
             cx.notify();
         });
+        self.timeline.update(cx, |tl, cx| {
+            tl.set_sequence(nodavideo_timeline::Sequence::default_1080p24(), cx);
+        });
         self.state.project_name = "Untitled Project".into();
         self.inspector.update(cx, |insp, cx| {
             insp.set_selected_asset(None, cx);
@@ -97,7 +100,11 @@ impl WorkspaceView {
 
     pub fn save_current_project(&mut self, cx: &mut Context<Self>) {
         let mb = self.media_browser.read(cx);
-        let project = mb.project.clone();
+        let mut project = mb.project.clone();
+        let sequence = self.timeline.read(cx).sequence.clone();
+        if let Err(err) = sequence.attach_to_project(&mut project) {
+            eprintln!("Failed to attach sequence to project: {err}");
+        }
         let receiver = cx.prompt_for_new_path(
             std::path::Path::new("."),
             Some(&format!("{}.nodavideo", project.name)),
@@ -137,8 +144,17 @@ impl WorkspaceView {
                 if let Some(path) = paths.into_iter().next() {
                     match nodavideo_project::ProjectDocument::load_from_file(&path) {
                         Ok(loaded_doc) => {
+                            let loaded_seq =
+                                nodavideo_timeline::Sequence::extract_from_project(&loaded_doc)
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or_else(nodavideo_timeline::Sequence::default_1080p24);
+
                             this.update(cx, |this, cx| {
                                 this.state.project_name = loaded_doc.name.clone().into();
+                                this.timeline.update(cx, |tl, cx| {
+                                    tl.set_sequence(loaded_seq, cx);
+                                });
                                 this.media_browser.update(cx, |mb, cx| {
                                     mb.project = loaded_doc;
                                     mb.selected_asset_id = None;
@@ -229,19 +245,69 @@ impl Render for WorkspaceView {
                     mon.toggle_loop(cx);
                 });
             }))
-            .child(
+            .on_action(cx.listener(|this, _: &UndoAction, _, cx| {
+                this.timeline.update(cx, |tl, cx| {
+                    tl.undo(cx);
+                });
+            }))
+            .on_action(cx.listener(|this, _: &RedoAction, _, cx| {
+                this.timeline.update(cx, |tl, cx| {
+                    tl.redo(cx);
+                });
+            }))
+            .on_action(cx.listener(|this, _: &SplitClipAction, _, cx| {
+                this.timeline.update(cx, |tl, cx| {
+                    tl.split_at_playhead(cx);
+                });
+            }))
+            .on_action(cx.listener(|this, _: &DeleteClipAction, _, cx| {
+                this.timeline.update(cx, |tl, cx| {
+                    tl.delete_selected(cx);
+                });
+            }))
+            .on_action(cx.listener(|this, _: &StepForwardAction, _, cx| {
+                this.timeline.update(cx, |tl, cx| {
+                    tl.step_forward(1, cx);
+                });
+            }))
+            .on_action(cx.listener(|this, _: &StepBackwardAction, _, cx| {
+                this.timeline.update(cx, |tl, cx| {
+                    tl.step_backward(1, cx);
+                });
+            }))
+            .child({
+                let can_undo = self.timeline.read(cx).can_undo();
+                let can_redo = self.timeline.read(cx).can_redo();
+                let tl_undo = self.timeline.clone();
+                let tl_redo = self.timeline.clone();
+
+                let tab_listener = cx.listener(|this, tab: &WorkspaceTab, _, cx| {
+                    this.set_workspace_tab(*tab, cx);
+                });
+                let toggle_listener = cx.listener(|this, panel: &PanelId, _, cx| {
+                    this.toggle_panel(*panel, cx);
+                });
+
+                let actions = ToolbarActions {
+                    can_undo,
+                    can_redo,
+                    on_undo: std::rc::Rc::new(move |_, cx| {
+                        tl_undo.update(cx, |tl, cx| tl.undo(cx));
+                    }),
+                    on_redo: std::rc::Rc::new(move |_, cx| {
+                        tl_redo.update(cx, |tl, cx| tl.redo(cx));
+                    }),
+                    on_tab_change: std::rc::Rc::new(move |tab, win, app| {
+                        tab_listener(tab, win, app);
+                    }),
+                    on_toggle: std::rc::Rc::new(move |panel, win, app| {
+                        toggle_listener(panel, win, app);
+                    }),
+                };
+
                 // Top Toolbar
-                render_top_toolbar(
-                    &self.state,
-                    cx.listener(|this, tab: &WorkspaceTab, _, cx| {
-                        this.set_workspace_tab(*tab, cx);
-                    }),
-                    cx.listener(|this, panel: &PanelId, _, cx| {
-                        this.toggle_panel(*panel, cx);
-                    }),
-                    cx,
-                ),
-            )
+                render_top_toolbar(&self.state, actions, cx)
+            })
             .child(
                 // Workspace Body (Edit vs Other modes)
                 div()

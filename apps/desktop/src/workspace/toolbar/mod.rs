@@ -24,11 +24,29 @@ pub enum PanelId {
     Assistant,
 }
 
+/// Actions and callback dispatchers for the top toolbar.
+pub struct ToolbarActions {
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub on_undo: Rc<dyn Fn(&mut Window, &mut App)>,
+    pub on_redo: Rc<dyn Fn(&mut Window, &mut App)>,
+    pub on_tab_change: Rc<dyn Fn(&WorkspaceTab, &mut Window, &mut App)>,
+    pub on_toggle: Rc<dyn Fn(&PanelId, &mut Window, &mut App)>,
+}
+
+impl std::fmt::Debug for ToolbarActions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolbarActions")
+            .field("can_undo", &self.can_undo)
+            .field("can_redo", &self.can_redo)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Render the compact top toolbar.
 pub fn render_top_toolbar(
     state: &WorkspaceLayoutState,
-    on_tab_change: impl Fn(&WorkspaceTab, &mut Window, &mut App) + 'static,
-    on_toggle: impl Fn(&PanelId, &mut Window, &mut App) + 'static,
+    actions: ToolbarActions,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
@@ -37,7 +55,12 @@ pub fn render_top_toolbar(
     let show_inspector = state.show_inspector;
     let show_timeline = state.show_timeline;
     let show_assistant = state.show_assistant;
-    let on_toggle = Rc::new(on_toggle);
+    let on_toggle = actions.on_toggle;
+    let on_undo = actions.on_undo;
+    let on_redo = actions.on_redo;
+    let on_tab_change = actions.on_tab_change;
+    let can_undo = actions.can_undo;
+    let can_redo = actions.can_redo;
 
     div()
         .flex()
@@ -96,14 +119,18 @@ pub fn render_top_toolbar(
                                 .ghost()
                                 .xsmall()
                                 .icon(IconName::Undo)
-                                .on_click(|_, _, _| {}),
+                                .tooltip("Undo (Cmd+Z)")
+                                .when(!can_undo, |btn| btn.ghost())
+                                .on_click(move |_, window, cx| on_undo(window, cx)),
                         )
                         .child(
                             Button::new("tb-redo")
                                 .ghost()
                                 .xsmall()
                                 .icon(IconName::Redo)
-                                .on_click(|_, _, _| {}),
+                                .tooltip("Redo (Cmd+Shift+Z)")
+                                .when(!can_redo, |btn| btn.ghost())
+                                .on_click(move |_, window, cx| on_redo(window, cx)),
                         ),
                 ),
         )
@@ -113,7 +140,10 @@ pub fn render_top_toolbar(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(render_workspace_tabs(state.active_tab, on_tab_change)),
+                .child(render_workspace_tabs(
+                    state.active_tab,
+                    move |tab, win, app| on_tab_change(tab, win, app),
+                )),
         )
         .child(
             // Right region: Panel visibility toggles

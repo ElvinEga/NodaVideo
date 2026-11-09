@@ -26,6 +26,42 @@ pub enum MediaCategory {
     Graphics,
 }
 
+/// Drag preview element displayed while dragging an asset into the timeline.
+#[derive(Debug, Clone)]
+pub struct DragAssetPreview {
+    pub name: String,
+    pub media_type: MediaType,
+}
+
+impl Render for DragAssetPreview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_1p5()
+            .rounded_md()
+            .bg(theme.secondary)
+            .border_1()
+            .border_color(theme.accent)
+            .shadow_md()
+            .child(Icon::new(match self.media_type {
+                MediaType::Video => IconName::Film,
+                MediaType::Audio => IconName::Volume2,
+                MediaType::Image => IconName::Image,
+            }))
+            .child(
+                div()
+                    .text_xs()
+                    .font_medium()
+                    .text_color(theme.foreground)
+                    .child(self.name.clone()),
+            )
+    }
+}
+
 /// Format file size into human-readable representation.
 fn format_file_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -482,6 +518,12 @@ impl MediaBrowserPanel {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select_asset(Some(asset_id), cx);
             }))
+            .on_drag(asset.clone(), |dragged_asset, _, _, cx| {
+                cx.new(|_| DragAssetPreview {
+                    name: dragged_asset.original_filename.clone(),
+                    media_type: dragged_asset.media_type,
+                })
+            })
             .child(
                 // Thumbnail or Type Icon preview box
                 div()

@@ -4,6 +4,8 @@ members = [
     "apps/desktop",
     "crates/project",
     "crates/media-engine",
+    "crates/timeline",
+    "crates/command-system",
 ]
 
 [workspace.package]
@@ -16,6 +18,8 @@ authors = ["NodaVideo Contributors"]
 [workspace.dependencies]
 nodavideo-project = { path = "crates/project" }
 nodavideo-media-engine = { path = "crates/media-engine" }
+nodavideo-timeline = { path = "crates/timeline" }
+nodavideo-command-system = { path = "crates/command-system" }
 gpui-kit = "0.9.0"
 anyhow = "1.0.95"
 thiserror = "2.0.11"
@@ -61,6 +65,8 @@ manual_let_else = "allow"
 collapsible_if = "allow"
 chunks_exact_to_as_chunks = "allow"
 assert_is_empty = "allow"
+large_stack_frames = "allow"
+type_complexity = "allow"
 
 [profile.dev]
 opt-level = 0

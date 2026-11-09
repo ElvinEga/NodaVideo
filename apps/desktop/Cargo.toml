@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 nodavideo-project.workspace = true
 nodavideo-media-engine.workspace = true
+nodavideo-timeline.workspace = true
+nodavideo-command-system.workspace = true
 gpui-kit.workspace = true
 anyhow.workspace = true
 

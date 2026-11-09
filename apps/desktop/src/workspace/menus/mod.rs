@@ -28,6 +28,8 @@ actions!(
         StepForwardAction,
         StepBackwardAction,
         LoopPlaybackAction,
+        SplitClipAction,
+        DeleteClipAction,
         AboutNodaVideo,
     ]
 );
@@ -48,6 +50,8 @@ pub fn init(cx: &mut App) {
             // Edit
             KeyBinding::new("cmd-z", UndoAction, None),
             KeyBinding::new("cmd-shift-z", RedoAction, None),
+            KeyBinding::new("cmd-k", SplitClipAction, None),
+            KeyBinding::new("backspace", DeleteClipAction, None),
             // View / Panels
             KeyBinding::new("cmd-1", ToggleMediaBrowser, None),
             KeyBinding::new("cmd-2", ToggleInspector, None),
@@ -70,6 +74,8 @@ pub fn init(cx: &mut App) {
             // Edit
             KeyBinding::new("ctrl-z", UndoAction, None),
             KeyBinding::new("ctrl-shift-z", RedoAction, None),
+            KeyBinding::new("ctrl-k", SplitClipAction, None),
+            KeyBinding::new("backspace", DeleteClipAction, None),
             // View / Panels
             KeyBinding::new("ctrl-1", ToggleMediaBrowser, None),
             KeyBinding::new("ctrl-2", ToggleInspector, None),
@@ -105,6 +111,9 @@ pub fn init(cx: &mut App) {
             items: vec![
                 MenuItem::action("Undo", UndoAction),
                 MenuItem::action("Redo", RedoAction),
+                MenuItem::separator(),
+                MenuItem::action("Split Clip at Playhead", SplitClipAction),
+                MenuItem::action("Delete Selected Clip", DeleteClipAction),
             ],
             disabled: false,
         },

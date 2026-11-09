@@ -119,6 +119,9 @@ pub struct ProjectDocument {
     pub modified_at: String,
     /// Imported media assets.
     pub assets: Vec<MediaAsset>,
+    /// Optional serialized timeline sequence data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<serde_json::Value>,
 }
 
 impl ProjectDocument {
@@ -132,6 +135,7 @@ impl ProjectDocument {
             created_at: now.clone(),
             modified_at: now,
             assets: Vec::new(),
+            timeline: None,
         }
     }
 

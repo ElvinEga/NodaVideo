@@ -3816,13 +3816,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodavideo-command-system"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "nodavideo-project",
+ "nodavideo-timeline",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
 name = "nodavideo-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
+ "nodavideo-command-system",
  "nodavideo-media-engine",
  "nodavideo-project",
+ "nodavideo-timeline",
 ]
 
 [[package]]
@@ -3845,6 +3861,18 @@ name = "nodavideo-project"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "nodavideo-timeline"
+version = "0.1.0"
+dependencies = [
+ "nodavideo-project",
  "serde",
  "serde_json",
  "tempfile",
