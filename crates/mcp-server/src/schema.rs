@@ -276,6 +276,37 @@ impl McpToolDefinition {
                 is_mutation: true,
                 requires_approval: false,
             },
+            Self {
+                name: "add_transition".into(),
+                description: "Add a visual or audio transition (crossfade, dissolve, fade to black, wipe) across an edit cut between two adjacent clips on a track.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "track_id": { "type": "string", "description": "UUID of track containing the edit cut" },
+                        "from_clip_id": { "type": "string", "description": "UUID of the outgoing clip" },
+                        "to_clip_id": { "type": "string", "description": "UUID of the incoming clip" },
+                        "transition_type": {
+                            "type": "string",
+                            "enum": ["crossfade", "dissolve", "fade_to_black", "dip_to_white", "wipe_left", "wipe_right"],
+                            "description": "Type of transition effect"
+                        },
+                        "alignment": {
+                            "type": "string",
+                            "enum": ["centered", "start_at_cut", "end_at_cut"],
+                            "description": "Alignment of the transition duration relative to cut frame (default: centered)"
+                        },
+                        "duration_frames": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Duration of the transition in frames (default: 24)"
+                        }
+                    },
+                    "required": ["track_id", "from_clip_id", "to_clip_id"],
+                    "additionalProperties": false
+                }),
+                is_mutation: true,
+                requires_approval: false,
+            },
         ]
     }
 }

@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::clip::Clip;
 use crate::error::TimelineError;
-use crate::id::{ClipId, SequenceId, TrackId};
+use crate::id::{ClipId, SequenceId, TrackId, TransitionId};
 use crate::track::{Track, TrackType};
+use crate::transition::Transition;
 
 /// Editable video composition sequence containing multitrack lanes and timing settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +258,55 @@ impl Sequence {
             .find_track_for_clip_mut(clip_id)
             .ok_or(TimelineError::ClipNotFound(clip_id))?;
         track.ripple_remove_clip(clip_id)
+    }
+
+    /// Add a transition to a specific track.
+    pub fn add_transition(
+        &mut self,
+        track_id: TrackId,
+        transition: Transition,
+    ) -> Result<(), TimelineError> {
+        let track = self
+            .get_track_mut(track_id)
+            .ok_or(TimelineError::TrackNotFound(track_id))?;
+        track.add_transition(transition)
+    }
+
+    /// Remove a transition by ID from its track.
+    pub fn remove_transition(
+        &mut self,
+        transition_id: TransitionId,
+    ) -> Result<(TrackId, Transition), TimelineError> {
+        let track = self
+            .find_track_for_transition_mut(transition_id)
+            .ok_or(TimelineError::TransitionNotFound(transition_id))?;
+        let track_id = track.id;
+        let trans = track.remove_transition(transition_id)?;
+        Ok((track_id, trans))
+    }
+
+    /// Find the track containing a specific transition.
+    pub fn find_track_for_transition(&self, transition_id: TransitionId) -> Option<&Track> {
+        self.tracks
+            .iter()
+            .find(|t| t.transitions.iter().any(|tr| tr.id == transition_id))
+    }
+
+    /// Find mutable track containing a specific transition.
+    pub fn find_track_for_transition_mut(
+        &mut self,
+        transition_id: TransitionId,
+    ) -> Option<&mut Track> {
+        self.tracks
+            .iter_mut()
+            .find(|t| t.transitions.iter().any(|tr| tr.id == transition_id))
+    }
+
+    /// Get a transition by ID across all tracks.
+    pub fn get_transition(&self, transition_id: TransitionId) -> Option<&Transition> {
+        self.tracks
+            .iter()
+            .find_map(|t| t.get_transition(transition_id))
     }
 
     /// Attach this sequence to a project document as its timeline payload.

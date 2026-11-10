@@ -343,4 +343,80 @@ mod tests {
         let clip_restored = sequence.tracks[1].clips.first().unwrap();
         assert!(clip_restored.transform.is_identity());
     }
+
+    #[test]
+    fn test_add_transition_tool() {
+        let project = ProjectDocument::new("Test Project");
+        let mut sequence = Sequence::default_1080p24();
+        let mut history = CommandHistory::new(10);
+        let v1_id = sequence.tracks[1].id;
+        let asset_id = AssetId::new();
+
+        // Add 2 adjacent clips: [0..48) and [48..96)
+        let c1 = McpExecutor::execute(
+            "add_clip",
+            &serde_json::json!({
+                "track_id": v1_id.to_string(),
+                "asset_id": asset_id.to_string(),
+                "start_frame": 0,
+                "source_in": 0,
+                "source_out": 48,
+                "name": "Scene 1"
+            }),
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        )
+        .unwrap();
+
+        let c2 = McpExecutor::execute(
+            "add_clip",
+            &serde_json::json!({
+                "track_id": v1_id.to_string(),
+                "asset_id": asset_id.to_string(),
+                "start_frame": 48,
+                "source_in": 0,
+                "source_out": 48,
+                "name": "Scene 2"
+            }),
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        )
+        .unwrap();
+
+        let c1_id = c1["clip_id"].as_str().unwrap();
+        let c2_id = c2["clip_id"].as_str().unwrap();
+
+        // Add a Crossfade transition
+        let trans_res = McpExecutor::execute(
+            "add_transition",
+            &serde_json::json!({
+                "track_id": v1_id.to_string(),
+                "from_clip_id": c1_id,
+                "to_clip_id": c2_id,
+                "transition_type": "crossfade",
+                "alignment": "centered",
+                "duration_frames": 24
+            }),
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(trans_res["status"], "success");
+        assert_eq!(trans_res["cut_frame"], 48);
+        assert_eq!(trans_res["duration_frames"], 24);
+        assert_eq!(sequence.tracks[1].transitions.len(), 1);
+
+        // Undo removes the transition
+        assert!(history.can_undo());
+        let undone = history.undo(&mut sequence).unwrap();
+        assert_eq!(undone, Some("Add Crossfade Transition".to_string()));
+        assert_eq!(sequence.tracks[1].transitions.len(), 0);
+    }
 }

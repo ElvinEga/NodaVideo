@@ -445,4 +445,87 @@ mod tests {
             ClipTransform::default()
         );
     }
+
+    #[core::prelude::v1::test]
+    fn test_mcp_transition_workflow() {
+        use nodavideo_command_system::CommandHistory;
+        use nodavideo_mcp_server::McpExecutor;
+        use nodavideo_project::{AssetId, ProjectDocument};
+        use nodavideo_timeline::Sequence;
+        use serde_json::json;
+
+        let project = ProjectDocument::new("Transition Test");
+        let mut sequence = Sequence::default_1080p24();
+        let mut history = CommandHistory::new(10);
+        let v1_id = sequence.tracks[1].id.to_string();
+        let asset_id = AssetId::new().to_string();
+
+        // 1. Add two adjacent clips
+        let clip1_res = McpExecutor::execute(
+            "add_clip",
+            &json!({
+                "track_id": v1_id,
+                "asset_id": asset_id,
+                "start_frame": 0,
+                "source_in": 0,
+                "source_out": 48
+            }),
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        )
+        .unwrap();
+
+        let clip2_res = McpExecutor::execute(
+            "add_clip",
+            &json!({
+                "track_id": v1_id,
+                "asset_id": asset_id,
+                "start_frame": 48,
+                "source_in": 0,
+                "source_out": 48
+            }),
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        )
+        .unwrap();
+
+        let c1_id = clip1_res["clip_id"].as_str().unwrap();
+        let c2_id = clip2_res["clip_id"].as_str().unwrap();
+
+        // 2. Add transition across the cut
+        let trans_res = McpExecutor::execute(
+            "add_transition",
+            &json!({
+                "track_id": v1_id,
+                "from_clip_id": c1_id,
+                "to_clip_id": c2_id,
+                "transition_type": "fade_to_black",
+                "alignment": "centered",
+                "duration_frames": 16
+            }),
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(trans_res["status"], "success");
+        assert_eq!(trans_res["cut_frame"], 48);
+        assert_eq!(trans_res["duration_frames"], 16);
+        assert_eq!(sequence.tracks[1].transitions.len(), 1);
+
+        // 3. Undo and redo
+        assert!(history.can_undo());
+        history.undo(&mut sequence).unwrap();
+        assert_eq!(sequence.tracks[1].transitions.len(), 0);
+
+        assert!(history.can_redo());
+        history.redo(&mut sequence).unwrap();
+        assert_eq!(sequence.tracks[1].transitions.len(), 1);
+    }
 }

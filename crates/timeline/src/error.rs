@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::id::{ClipId, TrackId};
+use crate::id::{ClipId, TrackId, TransitionId};
 
 /// Errors encountered in pure timeline operations.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -15,6 +15,10 @@ pub enum TimelineError {
     #[error("Clip with ID '{0}' not found")]
     ClipNotFound(ClipId),
 
+    /// Referenced transition was not found.
+    #[error("Transition with ID '{0}' not found")]
+    TransitionNotFound(TransitionId),
+
     /// Track with this ID already exists in sequence.
     #[error("Track with ID '{0}' already exists")]
     DuplicateTrackId(TrackId),
@@ -22,6 +26,14 @@ pub enum TimelineError {
     /// Clip with this ID already exists in track.
     #[error("Clip with ID '{0}' already exists")]
     DuplicateClipId(ClipId),
+
+    /// Transition with this ID already exists in track.
+    #[error("Transition with ID '{0}' already exists")]
+    DuplicateTransitionId(TransitionId),
+
+    /// Invalid transition placement or non-adjacent clips.
+    #[error("Invalid transition: {0}")]
+    InvalidTransitionClips(String),
 
     /// Track is locked and cannot be mutated.
     #[error("Track '{0}' is locked")]

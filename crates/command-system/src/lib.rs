@@ -9,9 +9,9 @@ pub mod history;
 pub mod staged;
 
 pub use command::{
-    AddClip, AddComposition, AddTrack, BatchCommand, DeleteClip, DeleteTrack, EditorCommand,
-    MoveClip, SetClipAudio, SetClipTransform, SplitClip, ToggleLock, ToggleMute, ToggleSolo,
-    TrimClip, UnsplitClip,
+    AddClip, AddComposition, AddTrack, AddTransition, BatchCommand, DeleteClip, DeleteTrack,
+    EditorCommand, MoveClip, RemoveTransition, SetClipAudio, SetClipTransform, SplitClip,
+    ToggleLock, ToggleMute, ToggleSolo, TrimClip, UnsplitClip,
 };
 pub use error::CommandError;
 pub use history::{CommandHistory, HistoryEntry};
@@ -305,5 +305,80 @@ mod tests {
         // 5. Undo SetClipAudio
         history.undo(&mut sequence).unwrap();
         assert_eq!(sequence.tracks[1].clips[0].audio_params, initial_audio);
+    }
+
+    #[test]
+    fn test_add_and_remove_transition_undo_redo() {
+        use nodavideo_timeline::{Transition, TransitionAlignment, TransitionId, TransitionType};
+
+        let mut sequence = Sequence::default_1080p24();
+        let mut history = CommandHistory::new(10);
+        let track_id = sequence.tracks[1].id;
+
+        let clip1_id = ClipId::new();
+        let clip2_id = ClipId::new();
+        let clip1 = Clip::new(clip1_id, AssetId::new(), track_id, "Clip 1", 0, 0, 48).unwrap();
+        let clip2 = Clip::new(clip2_id, AssetId::new(), track_id, "Clip 2", 48, 0, 48).unwrap();
+
+        history
+            .execute(
+                EditorCommand::AddClip(AddClip {
+                    track_id,
+                    clip: clip1,
+                }),
+                &mut sequence,
+            )
+            .unwrap();
+        history
+            .execute(
+                EditorCommand::AddClip(AddClip {
+                    track_id,
+                    clip: clip2,
+                }),
+                &mut sequence,
+            )
+            .unwrap();
+
+        let trans_id = TransitionId::new();
+        let trans = Transition::new(
+            trans_id,
+            TransitionType::Dissolve,
+            TransitionAlignment::Centered,
+            clip1_id,
+            clip2_id,
+            track_id,
+            48,
+            24,
+        )
+        .unwrap();
+
+        // 1. AddTransition
+        let add_trans_cmd = EditorCommand::AddTransition(AddTransition {
+            track_id,
+            transition: trans.clone(),
+        });
+        history.execute(add_trans_cmd, &mut sequence).unwrap();
+        assert_eq!(sequence.tracks[1].transitions.len(), 1);
+        assert_eq!(sequence.get_transition(trans_id), Some(&trans));
+
+        // 2. Undo AddTransition
+        history.undo(&mut sequence).unwrap();
+        assert_eq!(sequence.tracks[1].transitions.len(), 0);
+
+        // 3. Redo AddTransition
+        history.redo(&mut sequence).unwrap();
+        assert_eq!(sequence.tracks[1].transitions.len(), 1);
+
+        // 4. RemoveTransition
+        let remove_trans_cmd = EditorCommand::RemoveTransition(RemoveTransition {
+            track_id,
+            transition: trans,
+        });
+        history.execute(remove_trans_cmd, &mut sequence).unwrap();
+        assert_eq!(sequence.tracks[1].transitions.len(), 0);
+
+        // 5. Undo RemoveTransition
+        history.undo(&mut sequence).unwrap();
+        assert_eq!(sequence.tracks[1].transitions.len(), 1);
     }
 }

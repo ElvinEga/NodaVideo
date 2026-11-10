@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::clip::Clip;
 use crate::error::TimelineError;
-use crate::id::{ClipId, TrackId};
+use crate::id::{ClipId, TrackId, TransitionId};
+use crate::transition::Transition;
 
 /// Classification of timeline track content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -37,6 +38,9 @@ pub struct Track {
     pub visible: bool,
     /// Ordered list of clips placed on this track.
     pub clips: Vec<Clip>,
+    /// Transitions placed on edit cuts between adjacent clips in this track.
+    #[serde(default)]
+    pub transitions: Vec<Transition>,
 }
 
 impl Track {
@@ -52,6 +56,7 @@ impl Track {
             locked: false,
             visible: true,
             clips: Vec::new(),
+            transitions: Vec::new(),
         }
     }
 
@@ -100,6 +105,10 @@ impl Track {
             .position(|c| c.id == id)
             .ok_or(TimelineError::ClipNotFound(id))?;
 
+        // Clean up attached transitions
+        self.transitions
+            .retain(|t| t.from_clip_id != id && t.to_clip_id != id);
+
         Ok(self.clips.remove(pos))
     }
 
@@ -114,6 +123,10 @@ impl Track {
             .position(|c| c.id == id)
             .ok_or(TimelineError::ClipNotFound(id))?;
 
+        // Clean up attached transitions
+        self.transitions
+            .retain(|t| t.from_clip_id != id && t.to_clip_id != id);
+
         let removed = self.clips.remove(pos);
         let duration = removed.duration_frames();
         let removed_end = removed.end_frame();
@@ -126,6 +139,64 @@ impl Track {
 
         self.sort_clips();
         Ok(removed)
+    }
+
+    /// Add a transition between two adjacent clips on this track.
+    pub fn add_transition(&mut self, transition: Transition) -> Result<(), TimelineError> {
+        if self.locked {
+            return Err(TimelineError::TrackLocked(self.id));
+        }
+        if self.transitions.iter().any(|t| t.id == transition.id) {
+            return Err(TimelineError::DuplicateTransitionId(transition.id));
+        }
+
+        // Verify from_clip and to_clip exist and are adjacent
+        let from_clip = self
+            .get_clip(transition.from_clip_id)
+            .ok_or(TimelineError::ClipNotFound(transition.from_clip_id))?;
+        let to_clip = self
+            .get_clip(transition.to_clip_id)
+            .ok_or(TimelineError::ClipNotFound(transition.to_clip_id))?;
+
+        if from_clip.end_frame() != to_clip.start_frame {
+            return Err(TimelineError::InvalidTransitionClips(format!(
+                "Clips '{}' and '{}' are not adjacent (gap from {} to {})",
+                from_clip.id,
+                to_clip.id,
+                from_clip.end_frame(),
+                to_clip.start_frame
+            )));
+        }
+
+        if transition.cut_frame != from_clip.end_frame() {
+            return Err(TimelineError::InvalidTransitionClips(format!(
+                "Cut frame {} does not match boundary {}",
+                transition.cut_frame,
+                from_clip.end_frame()
+            )));
+        }
+
+        self.transitions.push(transition);
+        Ok(())
+    }
+
+    /// Remove a transition by ID from this track.
+    pub fn remove_transition(&mut self, id: TransitionId) -> Result<Transition, TimelineError> {
+        if self.locked {
+            return Err(TimelineError::TrackLocked(self.id));
+        }
+        let pos = self
+            .transitions
+            .iter()
+            .position(|t| t.id == id)
+            .ok_or(TimelineError::TransitionNotFound(id))?;
+
+        Ok(self.transitions.remove(pos))
+    }
+
+    /// Find an immutable reference to a transition by ID.
+    pub fn get_transition(&self, id: TransitionId) -> Option<&Transition> {
+        self.transitions.iter().find(|t| t.id == id)
     }
 
     /// Return the clip at a specific timeline frame, if one exists.

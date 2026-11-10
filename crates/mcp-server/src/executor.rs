@@ -3,12 +3,14 @@
 use std::str::FromStr;
 
 use nodavideo_command_system::{
-    AddClip, AddComposition, CommandHistory, DeleteClip, EditorCommand, MoveClip, SetClipAudio,
-    SetClipTransform, SplitClip, StagedChangeset, TrimClip,
+    AddClip, AddComposition, AddTransition, CommandHistory, DeleteClip, EditorCommand, MoveClip,
+    SetClipAudio, SetClipTransform, SplitClip, StagedChangeset, TrimClip,
 };
 use nodavideo_hyperframes_bridge::{Composition, CompositionRenderer, TemplateRegistry};
 use nodavideo_project::{AssetId, MediaType, ProjectDocument};
-use nodavideo_timeline::{Clip, ClipId, Sequence, TrackId};
+use nodavideo_timeline::{
+    Clip, ClipId, Sequence, TrackId, Transition, TransitionAlignment, TransitionId, TransitionType,
+};
 
 use crate::error::McpError;
 use crate::schema::McpToolDefinition;
@@ -803,6 +805,113 @@ impl McpExecutor {
                 }))
             }
 
+            "add_transition" => {
+                let track_id_str =
+                    args.get("track_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| McpError::InvalidArguments {
+                            tool: tool_name.into(),
+                            details: "Missing 'track_id'".into(),
+                        })?;
+                let from_clip_id_str = args
+                    .get("from_clip_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| McpError::InvalidArguments {
+                        tool: tool_name.into(),
+                        details: "Missing 'from_clip_id'".into(),
+                    })?;
+                let to_clip_id_str =
+                    args.get("to_clip_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| McpError::InvalidArguments {
+                            tool: tool_name.into(),
+                            details: "Missing 'to_clip_id'".into(),
+                        })?;
+
+                let track_id =
+                    TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
+                        tool: tool_name.into(),
+                        details: format!("Invalid track UUID: {e}"),
+                    })?;
+                let from_clip_id =
+                    ClipId::from_str(from_clip_id_str).map_err(|e| McpError::InvalidArguments {
+                        tool: tool_name.into(),
+                        details: format!("Invalid from_clip_id: {e}"),
+                    })?;
+                let to_clip_id =
+                    ClipId::from_str(to_clip_id_str).map_err(|e| McpError::InvalidArguments {
+                        tool: tool_name.into(),
+                        details: format!("Invalid to_clip_id: {e}"),
+                    })?;
+
+                let trans_type_str = args
+                    .get("transition_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("crossfade");
+                let transition_type = match trans_type_str {
+                    "dissolve" => TransitionType::Dissolve,
+                    "fade_to_black" => TransitionType::FadeToBlack,
+                    "dip_to_white" => TransitionType::DipToWhite,
+                    "wipe_left" => TransitionType::WipeLeft,
+                    "wipe_right" => TransitionType::WipeRight,
+                    _ => TransitionType::Crossfade,
+                };
+
+                let alignment_str = args
+                    .get("alignment")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("centered");
+                let alignment = match alignment_str {
+                    "start_at_cut" => TransitionAlignment::StartAtCut,
+                    "end_at_cut" => TransitionAlignment::EndAtCut,
+                    _ => TransitionAlignment::Centered,
+                };
+
+                let duration_frames = args
+                    .get("duration_frames")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(24);
+
+                let track = sequence.get_track(track_id).ok_or_else(|| {
+                    McpError::ExecutionFailed(format!("Track '{track_id}' not found"))
+                })?;
+                let from_clip = track.get_clip(from_clip_id).ok_or_else(|| {
+                    McpError::ExecutionFailed(format!("Clip '{from_clip_id}' not found"))
+                })?;
+                let cut_frame = from_clip.end_frame();
+
+                let transition_id = TransitionId::new();
+                let transition = Transition::new(
+                    transition_id,
+                    transition_type,
+                    alignment,
+                    from_clip_id,
+                    to_clip_id,
+                    track_id,
+                    cut_frame,
+                    duration_frames,
+                )
+                .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+                let cmd = EditorCommand::AddTransition(AddTransition {
+                    track_id,
+                    transition,
+                });
+
+                history
+                    .execute(cmd, sequence)
+                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "transition_id": transition_id.to_string(),
+                    "track_id": track_id.to_string(),
+                    "cut_frame": cut_frame,
+                    "duration_frames": duration_frames,
+                    "transition_type": trans_type_str,
+                }))
+            }
+
             _ => Err(McpError::ToolNotFound(tool_name.to_string())),
         }
     }
@@ -1232,6 +1341,99 @@ fn parse_command_spec(
                 clip_id,
                 old_audio,
                 new_audio,
+            }))
+        }
+
+        "add_transition" => {
+            let track_id_str = spec
+                .get("track_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "add_transition".into(),
+                    details: "Missing 'track_id'".into(),
+                })?;
+            let from_clip_id_str = spec
+                .get("from_clip_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "add_transition".into(),
+                    details: "Missing 'from_clip_id'".into(),
+                })?;
+            let to_clip_id_str =
+                spec.get("to_clip_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| McpError::InvalidArguments {
+                        tool: "add_transition".into(),
+                        details: "Missing 'to_clip_id'".into(),
+                    })?;
+
+            let track_id =
+                TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "add_transition".into(),
+                    details: format!("Invalid track UUID: {e}"),
+                })?;
+            let from_clip_id =
+                ClipId::from_str(from_clip_id_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "add_transition".into(),
+                    details: format!("Invalid from_clip_id: {e}"),
+                })?;
+            let to_clip_id =
+                ClipId::from_str(to_clip_id_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "add_transition".into(),
+                    details: format!("Invalid to_clip_id: {e}"),
+                })?;
+
+            let trans_type_str = spec
+                .get("transition_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("crossfade");
+            let transition_type = match trans_type_str {
+                "dissolve" => TransitionType::Dissolve,
+                "fade_to_black" => TransitionType::FadeToBlack,
+                "dip_to_white" => TransitionType::DipToWhite,
+                "wipe_left" => TransitionType::WipeLeft,
+                "wipe_right" => TransitionType::WipeRight,
+                _ => TransitionType::Crossfade,
+            };
+
+            let alignment_str = spec
+                .get("alignment")
+                .and_then(|v| v.as_str())
+                .unwrap_or("centered");
+            let alignment = match alignment_str {
+                "start_at_cut" => TransitionAlignment::StartAtCut,
+                "end_at_cut" => TransitionAlignment::EndAtCut,
+                _ => TransitionAlignment::Centered,
+            };
+
+            let duration_frames = spec
+                .get("duration_frames")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(24);
+
+            let track = sequence.get_track(track_id).ok_or_else(|| {
+                McpError::ExecutionFailed(format!("Track '{track_id}' not found"))
+            })?;
+            let from_clip = track.get_clip(from_clip_id).ok_or_else(|| {
+                McpError::ExecutionFailed(format!("Clip '{from_clip_id}' not found"))
+            })?;
+            let cut_frame = from_clip.end_frame();
+
+            let transition = Transition::new(
+                TransitionId::new(),
+                transition_type,
+                alignment,
+                from_clip_id,
+                to_clip_id,
+                track_id,
+                cut_frame,
+                duration_frames,
+            )
+            .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+            Ok(EditorCommand::AddTransition(AddTransition {
+                track_id,
+                transition,
             }))
         }
 

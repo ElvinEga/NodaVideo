@@ -2,6 +2,7 @@
 
 use nodavideo_timeline::{
     Clip, ClipAudioParams, ClipId, ClipTransform, Sequence, TimelineError, Track, TrackId,
+    Transition,
 };
 use serde::{Deserialize, Serialize};
 
@@ -125,6 +126,20 @@ pub struct SetClipAudio {
     pub new_audio: ClipAudioParams,
 }
 
+/// Parameters for adding a transition between two adjacent clips on a track.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddTransition {
+    pub track_id: TrackId,
+    pub transition: Transition,
+}
+
+/// Parameters for removing a transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoveTransition {
+    pub track_id: TrackId,
+    pub transition: Transition,
+}
+
 /// Canonical editor commands governing all project and timeline mutations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EditorCommand {
@@ -143,6 +158,8 @@ pub enum EditorCommand {
     AddComposition(AddComposition),
     SetClipTransform(SetClipTransform),
     SetClipAudio(SetClipAudio),
+    AddTransition(AddTransition),
+    RemoveTransition(RemoveTransition),
 }
 
 impl EditorCommand {
@@ -165,6 +182,12 @@ impl EditorCommand {
             Self::SetClipTransform(cmd) => format!("Update Transform for Clip '{}'", cmd.clip_id),
             Self::SetClipAudio(cmd) => {
                 format!("Update Audio Parameters for Clip '{}'", cmd.clip_id)
+            }
+            Self::AddTransition(cmd) => {
+                format!("Add {:?} Transition", cmd.transition.transition_type)
+            }
+            Self::RemoveTransition(cmd) => {
+                format!("Remove {:?} Transition", cmd.transition.transition_type)
             }
         }
     }
@@ -240,6 +263,14 @@ impl EditorCommand {
                 clip_id: cmd.clip_id,
                 old_audio: cmd.new_audio,
                 new_audio: cmd.old_audio,
+            }),
+            Self::AddTransition(cmd) => Self::RemoveTransition(RemoveTransition {
+                track_id: cmd.track_id,
+                transition: cmd.transition.clone(),
+            }),
+            Self::RemoveTransition(cmd) => Self::AddTransition(AddTransition {
+                track_id: cmd.track_id,
+                transition: cmd.transition.clone(),
             }),
         }
     }
@@ -339,6 +370,12 @@ impl EditorCommand {
                     .get_clip_mut(cmd.clip_id)
                     .ok_or(TimelineError::ClipNotFound(cmd.clip_id))?;
                 clip.set_audio_params(cmd.new_audio);
+            }
+            Self::AddTransition(cmd) => {
+                sequence.add_transition(cmd.track_id, cmd.transition.clone())?;
+            }
+            Self::RemoveTransition(cmd) => {
+                sequence.remove_transition(cmd.transition.id)?;
             }
         }
         Ok(())

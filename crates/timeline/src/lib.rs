@@ -13,14 +13,16 @@ pub mod selection;
 pub mod sequence;
 pub mod snap;
 pub mod track;
+pub mod transition;
 
 pub use clip::{Clip, ClipAudioParams, ClipTransform};
 pub use error::TimelineError;
-pub use id::{ClipId, SequenceId, TrackId};
+pub use id::{ClipId, SequenceId, TrackId, TransitionId};
 pub use selection::TimelineSelection;
 pub use sequence::Sequence;
 pub use snap::{SnapResult, SnapTarget, snap_clip_move, snap_frame};
 pub use track::{Track, TrackType};
+pub use transition::{Transition, TransitionAlignment, TransitionType};
 
 #[cfg(test)]
 mod tests {
@@ -326,5 +328,77 @@ mod tests {
         assert_eq!(right.transform, transform);
         assert_eq!(left.audio_params, audio);
         assert_eq!(right.audio_params, audio);
+    }
+
+    #[test]
+    fn test_transitions_lifecycle() {
+        let mut sequence = Sequence::default_1080p24();
+        let v1_id = sequence.tracks[1].id;
+        let clip1_id = ClipId::new();
+        let clip2_id = ClipId::new();
+
+        // Place two adjacent clips on V1: [0..48) and [48..96)
+        let clip1 = test_clip(clip1_id, AssetId::new(), v1_id, 0, 0, 48);
+        let clip2 = test_clip(clip2_id, AssetId::new(), v1_id, 48, 0, 48);
+        sequence.add_clip(v1_id, clip1).unwrap();
+        sequence.add_clip(v1_id, clip2).unwrap();
+
+        // 1. Add Centered Crossfade transition across the cut at frame 48
+        let trans_id = TransitionId::new();
+        let trans = Transition::new(
+            trans_id,
+            TransitionType::Crossfade,
+            TransitionAlignment::Centered,
+            clip1_id,
+            clip2_id,
+            v1_id,
+            48,
+            24,
+        )
+        .unwrap();
+
+        assert_eq!(trans.start_frame(), 36);
+        assert_eq!(trans.end_frame(), 60);
+        assert!(trans.contains_timeline_frame(48));
+        assert!(trans.contains_timeline_frame(36));
+        assert!(!trans.contains_timeline_frame(60));
+
+        sequence.add_transition(v1_id, trans.clone()).unwrap();
+        assert_eq!(sequence.tracks[1].transitions.len(), 1);
+        assert_eq!(sequence.get_transition(trans_id), Some(&trans));
+
+        // 2. Reject non-adjacent clips
+        let clip3_id = ClipId::new();
+        let clip3 = test_clip(clip3_id, AssetId::new(), v1_id, 120, 0, 48);
+        sequence.add_clip(v1_id, clip3).unwrap();
+
+        let bad_trans = Transition::new(
+            TransitionId::new(),
+            TransitionType::FadeToBlack,
+            TransitionAlignment::Centered,
+            clip2_id,
+            clip3_id,
+            v1_id,
+            96,
+            12,
+        )
+        .unwrap();
+        let add_bad = sequence.add_transition(v1_id, bad_trans);
+        assert!(matches!(
+            add_bad,
+            Err(TimelineError::InvalidTransitionClips(_))
+        ));
+
+        // 3. Remove transition
+        let (removed_track, removed_trans) = sequence.remove_transition(trans_id).unwrap();
+        assert_eq!(removed_track, v1_id);
+        assert_eq!(removed_trans.id, trans_id);
+        assert_eq!(sequence.tracks[1].transitions.len(), 0);
+
+        // 4. Deleting a clip cleans up attached transitions automatically
+        sequence.add_transition(v1_id, trans).unwrap();
+        assert_eq!(sequence.tracks[1].transitions.len(), 1);
+        sequence.delete_clip(clip1_id).unwrap();
+        assert_eq!(sequence.tracks[1].transitions.len(), 0);
     }
 }

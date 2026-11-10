@@ -140,6 +140,12 @@ impl StagedChangeset {
                         affected_tracks.insert(track.id);
                     }
                 }
+                EditorCommand::AddTransition(c) => {
+                    affected_tracks.insert(c.track_id);
+                }
+                EditorCommand::RemoveTransition(c) => {
+                    affected_tracks.insert(c.track_id);
+                }
                 EditorCommand::Batch(_) => {}
             }
         }

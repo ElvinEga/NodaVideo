@@ -138,3 +138,47 @@ impl FromStr for ClipId {
             .map_err(|err| TimelineError::InvalidId(format!("Invalid ClipId: {err}")))
     }
 }
+
+/// Unique identifier for an edit cut transition between adjacent clips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TransitionId(Uuid);
+
+impl TransitionId {
+    /// Generate a new unique TransitionId.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Construct a TransitionId from an existing UUID.
+    pub const fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
+    /// Return the underlying UUID.
+    pub const fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for TransitionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for TransitionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for TransitionId {
+    type Err = TimelineError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(s)
+            .map(Self)
+            .map_err(|err| TimelineError::InvalidId(format!("Invalid TransitionId: {err}")))
+    }
+}
