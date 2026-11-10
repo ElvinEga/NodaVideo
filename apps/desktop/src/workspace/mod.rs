@@ -6,7 +6,8 @@ pub mod navigation;
 pub mod panels;
 pub mod toolbar;
 
-use std::sync::Arc;
+use std::rc::Rc;
+use std::sync::{Arc, RwLock};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
@@ -15,7 +16,11 @@ use gpui_kit::component::Icon;
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use nodavideo_agent_acp::AcpAgentProvider;
+use nodavideo_agent_runtime::{AgentRuntime, MockAgentProvider};
+use nodavideo_mcp_server::McpExecutor;
 use nodavideo_media_engine::MediaProcessor;
+use nodavideo_skill_registry::SkillRegistry;
 
 use crate::theme::metrics;
 use crate::workspace::layout::WorkspaceLayoutState;
@@ -35,10 +40,13 @@ pub struct WorkspaceView {
     pub h_split_state: Entity<ResizableState>,
     pub v_split_state: Entity<ResizableState>,
     pub processor: Arc<MediaProcessor>,
+    pub runtime: Arc<AgentRuntime>,
+    pub skill_registry: Arc<RwLock<SkillRegistry>>,
     pub export_status: Option<String>,
     _observe_sub: Subscription,
     _preview_sub: Subscription,
     _timeline_sub: Subscription,
+    _assistant_sub: Subscription,
     playback_task: Option<Task<()>>,
     preview_frame_task: Option<Task<()>>,
 }
@@ -58,8 +66,60 @@ impl WorkspaceView {
         let preview_monitor = cx.new(|_| PreviewMonitorPanel::new());
         let inspector = cx.new(|_| InspectorPanel::new());
         let timeline = cx.new(|_| TimelinePanel::new());
-        let assistant = cx.new(|cx| AssistantPanel::new(window, cx));
         let processor = media_browser.read(cx).processor.clone();
+
+        // Initialize AgentRuntime and register pluggable providers
+        let runtime = Arc::new(AgentRuntime::new());
+        let rt_clone = runtime.clone();
+        cx.spawn(async move |_, _| {
+            rt_clone
+                .register_provider(Arc::new(AcpAgentProvider::antigravity()))
+                .await;
+            rt_clone
+                .register_provider(Arc::new(AcpAgentProvider::gemini()))
+                .await;
+            rt_clone
+                .register_provider(Arc::new(MockAgentProvider::new()))
+                .await;
+        })
+        .detach();
+
+        // Discover available skills from skills/ directory
+        let mut skill_reg = SkillRegistry::new();
+        let _ = skill_reg.discover_from_dir(std::path::Path::new("skills"));
+        let skill_registry = Arc::new(RwLock::new(skill_reg));
+
+        let assistant =
+            cx.new(|cx| AssistantPanel::new(runtime.clone(), skill_registry.clone(), window, cx));
+
+        // Wire assistant tool execution callback to apply approved edits directly to the timeline
+        let tl_for_tool = timeline.clone();
+        let mb_for_tool = media_browser.clone();
+        assistant.update(cx, |asst, _| {
+            asst.on_tool_call = Some(Rc::new(move |tool_name, params, _, cx| {
+                let mut result = None;
+                tl_for_tool.update(cx, |tl, cx| {
+                    let project = mb_for_tool.read(cx).project.clone();
+                    match McpExecutor::execute(
+                        tool_name,
+                        params,
+                        &project,
+                        &mut tl.sequence,
+                        &mut tl.history,
+                        true,
+                    ) {
+                        Ok(val) => {
+                            cx.notify();
+                            result = Some(Ok(val));
+                        }
+                        Err(err) => {
+                            result = Some(Err(err.to_string()));
+                        }
+                    }
+                });
+                result.unwrap_or_else(|| Err("Timeline unavailable".into()))
+            }));
+        });
 
         // Wire transport buttons on Preview Monitor
         let tl_back = timeline.clone();
@@ -104,6 +164,11 @@ impl WorkspaceView {
             this.refresh_preview_frame(cx);
         });
 
+        // Observe assistant panel to update bottom status bar
+        let assistant_sub = cx.observe(&assistant, |_, _, cx| {
+            cx.notify();
+        });
+
         let mut view = Self {
             state: WorkspaceLayoutState::default(),
             media_browser,
@@ -114,10 +179,13 @@ impl WorkspaceView {
             h_split_state,
             v_split_state,
             processor,
+            runtime,
+            skill_registry,
             export_status: None,
             _observe_sub: observe_sub,
             _preview_sub: preview_sub,
             _timeline_sub: timeline_sub,
+            _assistant_sub: assistant_sub,
             playback_task: None,
             preview_frame_task: None,
         };
@@ -627,6 +695,18 @@ impl WorkspaceView {
         let mono_font = theme.mono_font_family.clone();
         let export_status = self.export_status.clone();
 
+        let (dot_color, ai_text) = {
+            let asst = self.assistant.read(cx);
+            if asst.is_processing {
+                (gpui::rgb(0xf59e0b), asst.status_text.clone())
+            } else {
+                (
+                    gpui::rgb(0x22c55e),
+                    format!("AI Ready ({})", asst.provider_display_name()),
+                )
+            }
+        };
+
         div()
             .flex()
             .items_center()
@@ -688,13 +768,8 @@ impl WorkspaceView {
                             .flex()
                             .items_center()
                             .gap_1p5()
-                            .child(div().w_2().h_2().rounded_full().bg(theme.muted_foreground))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("AI Offline (M4)"),
-                            ),
+                            .child(div().w_2().h_2().rounded_full().bg(dot_color))
+                            .child(div().text_xs().text_color(theme.foreground).child(ai_text)),
                     )
                     .child(
                         div()

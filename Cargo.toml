@@ -6,6 +6,10 @@ members = [
     "crates/media-engine",
     "crates/timeline",
     "crates/command-system",
+    "crates/agent-runtime",
+    "crates/mcp-server",
+    "crates/agent-acp",
+    "crates/skill-registry",
 ]
 
 [workspace.package]
@@ -20,6 +24,10 @@ nodavideo-project = { path = "crates/project" }
 nodavideo-media-engine = { path = "crates/media-engine" }
 nodavideo-timeline = { path = "crates/timeline" }
 nodavideo-command-system = { path = "crates/command-system" }
+nodavideo-agent-runtime = { path = "crates/agent-runtime" }
+nodavideo-mcp-server = { path = "crates/mcp-server" }
+nodavideo-agent-acp = { path = "crates/agent-acp" }
+nodavideo-skill-registry = { path = "crates/skill-registry" }
 gpui-kit = "0.9.0"
 anyhow = "1.0.95"
 thiserror = "2.0.11"
@@ -30,6 +38,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 tempfile = "3.17"
+async-trait = "0.1.92"
+tokio = { version = "1.43", features = ["sync", "rt", "process", "io-util", "time", "macros"] }
+futures = "0.3.34"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

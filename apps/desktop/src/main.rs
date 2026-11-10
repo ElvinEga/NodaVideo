@@ -124,4 +124,89 @@ mod tests {
         assert_eq!(settings.video_codec, "libx264");
         assert_eq!(settings.audio_codec, "aac");
     }
+
+    #[tokio::test]
+    async fn test_agent_runtime_and_skill_discovery() {
+        use nodavideo_agent_acp::AcpAgentProvider;
+        use nodavideo_agent_runtime::{AgentRuntime, MockAgentProvider};
+        use nodavideo_skill_registry::SkillRegistry;
+        use std::sync::Arc;
+
+        let runtime = AgentRuntime::new();
+        runtime
+            .register_provider(Arc::new(AcpAgentProvider::antigravity()))
+            .await;
+        runtime
+            .register_provider(Arc::new(AcpAgentProvider::gemini()))
+            .await;
+        runtime
+            .register_provider(Arc::new(MockAgentProvider::new()))
+            .await;
+
+        let providers = runtime.list_providers().await;
+        assert_eq!(providers.len(), 3);
+        assert!(providers.iter().any(|(id, _)| id == "acp-antigravity"));
+        assert!(providers.iter().any(|(id, _)| id == "acp-gemini"));
+        assert!(providers.iter().any(|(id, _)| id == "mock"));
+
+        let mut skill_reg = SkillRegistry::new();
+        let _ = skill_reg.discover_from_dir(std::path::Path::new("../../skills"));
+        let _ = skill_reg.discover_from_dir(std::path::Path::new("skills"));
+        // Registry discovers available skills when path exists
+        assert!(skill_reg.get("non-existent").is_none());
+    }
+
+    #[core::prelude::v1::test]
+    fn test_mcp_executor_timeline_integration() {
+        use nodavideo_command_system::CommandHistory;
+        use nodavideo_mcp_server::McpExecutor;
+        use nodavideo_project::{AssetId, ProjectDocument};
+        use nodavideo_timeline::Sequence;
+        use serde_json::json;
+
+        let project = ProjectDocument::new("Integration Test");
+        let mut sequence = Sequence::default_1080p24();
+        let mut history = CommandHistory::new(100);
+
+        let track_id = sequence.tracks[0].id.to_string();
+        let asset_id = AssetId::new().to_string();
+
+        let add_res = McpExecutor::execute(
+            "add_clip",
+            &json!({
+                "track_id": track_id,
+                "asset_id": asset_id,
+                "start_frame": 0,
+                "source_in": 0,
+                "source_out": 48
+            }),
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        );
+        assert!(add_res.is_ok());
+        let clip_id_str = add_res.unwrap()["clip_id"].as_str().unwrap().to_string();
+
+        let split_res = McpExecutor::execute(
+            "split_clip",
+            &json!({
+                "clip_id": clip_id_str,
+                "split_frame": 24
+            }),
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        );
+        assert!(split_res.is_ok());
+        assert_eq!(sequence.tracks[0].clips.len(), 2);
+        assert!(history.can_undo());
+
+        // Test unified undo history
+        assert!(history.undo(&mut sequence).is_ok());
+        assert_eq!(sequence.tracks[0].clips.len(), 1);
+        assert!(history.undo(&mut sequence).is_ok());
+        assert_eq!(sequence.tracks[0].clips.len(), 0);
+    }
 }

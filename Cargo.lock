@@ -3816,6 +3816,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodavideo-agent-acp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "nodavideo-agent-runtime",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "nodavideo-agent-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "nodavideo-command-system"
 version = "0.1.0"
 dependencies = [
@@ -3835,10 +3865,31 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
+ "nodavideo-agent-acp",
+ "nodavideo-agent-runtime",
  "nodavideo-command-system",
+ "nodavideo-mcp-server",
  "nodavideo-media-engine",
  "nodavideo-project",
+ "nodavideo-skill-registry",
  "nodavideo-timeline",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "nodavideo-mcp-server"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "nodavideo-command-system",
+ "nodavideo-project",
+ "nodavideo-timeline",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -3867,6 +3918,16 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "uuid",
+]
+
+[[package]]
+name = "nodavideo-skill-registry"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -6479,8 +6540,21 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
+ "tokio-macros",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]

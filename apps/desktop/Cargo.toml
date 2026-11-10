@@ -15,8 +15,14 @@ nodavideo-project.workspace = true
 nodavideo-media-engine.workspace = true
 nodavideo-timeline.workspace = true
 nodavideo-command-system.workspace = true
+nodavideo-agent-runtime.workspace = true
+nodavideo-mcp-server.workspace = true
+nodavideo-agent-acp.workspace = true
+nodavideo-skill-registry.workspace = true
 gpui-kit.workspace = true
 anyhow.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
