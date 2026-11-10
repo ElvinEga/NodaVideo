@@ -3872,6 +3872,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodavideo-audio-engine"
+version = "0.1.0"
+dependencies = [
+ "nodavideo-project",
+ "nodavideo-timeline",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nodavideo-command-system"
 version = "0.1.0"
 dependencies = [
@@ -3895,6 +3906,7 @@ dependencies = [
  "nodavideo-agent-claude",
  "nodavideo-agent-codex",
  "nodavideo-agent-runtime",
+ "nodavideo-audio-engine",
  "nodavideo-command-system",
  "nodavideo-hyperframes-bridge",
  "nodavideo-mcp-server",

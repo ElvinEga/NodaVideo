@@ -745,4 +745,73 @@ mod tests {
         assert!(inspector.selected_transition.is_some());
         assert!(inspector.selected_clip.is_none());
     }
+
+    #[core::prelude::v1::test]
+    fn test_audio_playback_sync_and_metering() {
+        use nodavideo_audio_engine::{
+            AudioClock, AudioFormat, AudioMeter, SequenceAudioMixer, SineToneSource,
+        };
+        use nodavideo_command_system::{AddClip, EditorCommand};
+        use nodavideo_project::AssetId;
+        use nodavideo_timeline::{Clip, ClipAudioParams, ClipId};
+        use std::sync::Arc;
+        use workspace::panels::timeline::TimelinePanel;
+
+        let mut timeline = TimelinePanel::new();
+        let a1_id = timeline.sequence.tracks[2].id;
+
+        // Add audio clip to A1 track
+        let clip_id = ClipId::new();
+        let mut audio_clip = Clip::new(
+            clip_id,
+            AssetId::new(),
+            a1_id,
+            "Background Ambience",
+            0,
+            0,
+            72,
+        )
+        .unwrap();
+        audio_clip.audio_params = ClipAudioParams {
+            volume_db: -3.0,
+            pan: 0.0,
+        };
+
+        timeline
+            .history
+            .execute(
+                EditorCommand::AddClip(AddClip {
+                    track_id: a1_id,
+                    clip: audio_clip,
+                }),
+                &mut timeline.sequence,
+            )
+            .unwrap();
+
+        // 1. Audio clock sync
+        let mut clock = AudioClock::new(48_000);
+        clock.seek_to_frame(0, timeline.sequence.fps);
+        assert_eq!(clock.current_timeline_frame(timeline.sequence.fps), 0);
+
+        clock.play();
+        // Advance clock by 24 video frames (48,000 samples at 48kHz / 24fps)
+        clock.advance_samples(48_000);
+        assert_eq!(clock.current_timeline_frame(timeline.sequence.fps), 24);
+        assert_eq!(clock.drift_frames(24, timeline.sequence.fps), 0); // Perfect sync
+
+        // 2. Mixdown and metering
+        let tone = Arc::new(SineToneSource::new(440.0, 48_000, 0.8));
+        let provider =
+            move |_| Some(tone.clone() as Arc<dyn nodavideo_audio_engine::AudioSampleSource>);
+
+        let mixer = SequenceAudioMixer::new(AudioFormat::stereo_48k());
+        let buffer = mixer
+            .mix_timeline_range(&timeline.sequence, 0, 24, &provider)
+            .unwrap();
+
+        assert_eq!(buffer.frame_count(), 48_000);
+        let levels = AudioMeter::compute_levels(&buffer);
+        assert!(levels.peak_db_left > -6.0 && levels.peak_db_left <= 0.0);
+        assert!(levels.peak_db_right > -6.0 && levels.peak_db_right <= 0.0);
+    }
 }

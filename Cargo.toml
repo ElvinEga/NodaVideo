@@ -13,6 +13,7 @@ members = [
     "crates/agent-claude",
     "crates/skill-registry",
     "crates/hyperframes-bridge",
+    "crates/audio-engine",
 ]
 
 [workspace.package]
@@ -34,6 +35,7 @@ nodavideo-agent-codex = { path = "crates/agent-codex" }
 nodavideo-agent-claude = { path = "crates/agent-claude" }
 nodavideo-skill-registry = { path = "crates/skill-registry" }
 nodavideo-hyperframes-bridge = { path = "crates/hyperframes-bridge" }
+nodavideo-audio-engine = { path = "crates/audio-engine" }
 gpui-kit = "0.9.0"
 anyhow = "1.0.95"
 thiserror = "2.0.11"
