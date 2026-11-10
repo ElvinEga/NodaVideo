@@ -934,4 +934,68 @@ mod tests {
         assert!((mid_px[1] as i32 - 128).abs() <= 2);
         assert_eq!(mid_px[2], 0);
     }
+
+    #[core::prelude::v1::test]
+    fn test_editor_core_session_integration() {
+        use nodavideo_command_system::{AddClip, EditorCommand};
+        use nodavideo_editor_core::EditorSession;
+        use nodavideo_project::{FrameRate, MediaType, TimeRational};
+        use nodavideo_timeline::{Clip, ClipId};
+        use std::path::PathBuf;
+
+        // Initialize central session
+        let mut session = EditorSession::new_empty("Desktop Core Integration");
+        assert_eq!(session.project.name, "Desktop Core Integration");
+        assert_eq!(session.sequence.tracks.len(), 4);
+
+        // Import asset through session
+        let asset = session.import_file(
+            PathBuf::from("/test/media.mp4"),
+            MediaType::Video,
+            2048,
+            Some(TimeRational::from_frames(100, FrameRate::FPS_24)),
+            Some((1920, 1080)),
+        );
+        assert_eq!(session.project.assets.len(), 1);
+        assert_eq!(
+            session.get_asset(asset.id).unwrap().original_filename,
+            "media.mp4"
+        );
+
+        // Add clip to timeline via session command
+        let v1_id = session.sequence.tracks[1].id;
+        let clip_id = ClipId::new();
+        let clip = Clip::new(clip_id, asset.id, v1_id, "Test Media", 0, 0, 72).unwrap();
+
+        session
+            .execute_command(EditorCommand::AddClip(AddClip {
+                track_id: v1_id,
+                clip,
+            }))
+            .unwrap();
+
+        assert_eq!(session.duration_frames(), 72);
+        assert!(session.can_undo());
+
+        // Test selection tracking
+        session.select_clip(clip_id);
+        assert!(session.selection.is_clip_selected(&clip_id));
+        let selected = session.get_selected_clips();
+        assert_eq!(selected.len(), 1);
+
+        // Test playback navigation
+        session.seek_frame(30);
+        assert_eq!(session.playback.current_frame(), 30);
+        assert_eq!(session.playback.current_timecode(), "00:00:01:06");
+
+        // Jump to cut points
+        session.jump_to_next_cut();
+        assert_eq!(session.playback.current_frame(), 72);
+        session.jump_to_previous_cut();
+        assert_eq!(session.playback.current_frame(), 0);
+
+        // Undo command
+        session.undo().unwrap();
+        assert_eq!(session.duration_frames(), 0);
+    }
 }

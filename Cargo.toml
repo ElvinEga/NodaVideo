@@ -15,6 +15,7 @@ members = [
     "crates/hyperframes-bridge",
     "crates/audio-engine",
     "crates/gpu-renderer",
+    "crates/editor-core",
 ]
 
 [workspace.package]
@@ -38,6 +39,7 @@ nodavideo-skill-registry = { path = "crates/skill-registry" }
 nodavideo-hyperframes-bridge = { path = "crates/hyperframes-bridge" }
 nodavideo-audio-engine = { path = "crates/audio-engine" }
 nodavideo-gpu-renderer = { path = "crates/gpu-renderer" }
+nodavideo-editor-core = { path = "crates/editor-core" }
 gpui-kit = "0.9.0"
 anyhow = "1.0.95"
 thiserror = "2.0.11"

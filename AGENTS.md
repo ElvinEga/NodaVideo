@@ -32,6 +32,7 @@ Core identity: native Rust + GPUI, professional NLE, multi-provider agent suppor
 - `crates/hyperframes-bridge` (`nodavideo-hyperframes-bridge` library): broadcast motion graphics engine, template registry (`lower-third-modern`, `title-minimal`, `social-caption-card`, `branded-transition`), parameter validation, HTML/SVG vector composition rendering, and MCP tool bridge.
 - `crates/audio-engine` (`nodavideo-audio-engine` library): multitrack audio processing and playback sync engine, interleaved float PCM buffers (`AudioBuffer`), stereo panning, volume gain conversion (`db_to_linear`), track solo/mute gating, peak/RMS level metering in dBFS (`AudioMeter`), and master sample clock synchronization (`AudioClock`).
 - `crates/gpu-renderer` (`nodavideo-gpu-renderer` library): wgpu video compositing and effects pipeline, WGSL clip 2D transform and edit cut transition shaders, and deterministic pure software fallback compositor (`SoftwareCompositor`).
+- `crates/editor-core` (`nodavideo-editor-core` library): central application state container (`EditorSession`), timeline selection state, transport playback navigation, cut jumping, staged changeset lifecycle, and subsystem orchestration.
 
 
 Pinned stack: `gpui-kit 0.9.0` (`gpui-pre 0.3.11`), Rust MSRV `1.92.0`, edition `2024`. Dependencies are centralized in workspace `Cargo.toml` with `Cargo.lock` committed.
