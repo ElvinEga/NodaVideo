@@ -1,0 +1,19 @@
+{
+  "name": "@nodavideo/hyperframes-sidecar",
+  "version": "0.1.0",
+  "description": "HyperFrames vector motion graphics and animated HTML scene sidecar for NodaVideo",
+  "main": "renderer.js",
+  "scripts": {
+    "render": "node renderer.js",
+    "preview": "npx serve ."
+  },
+  "keywords": [
+    "motion-graphics",
+    "html5",
+    "svg",
+    "video-editor",
+    "sidecar"
+  ],
+  "author": "NodaVideo Contributors",
+  "license": "Apache-2.0"
+}

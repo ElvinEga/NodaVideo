@@ -71,4 +71,58 @@ mod tests {
             Err(HyperframesError::InvalidParameter { .. })
         ));
     }
+
+    #[test]
+    fn test_template_directory_loading() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("sub_templates");
+        std::fs::create_dir(&sub).unwrap();
+
+        let json_content = r#"{
+            "id": "custom-title",
+            "name": "Custom Title Card",
+            "category": "Titles",
+            "default_duration_frames": 72,
+            "parameters": [
+                {
+                    "name": "headline",
+                    "label": "Headline Text",
+                    "description": "Main title",
+                    "param_type": "text",
+                    "default_value": "Welcome"
+                }
+            ],
+            "html_template": "<h1>{{headline}}</h1>"
+        }"#;
+
+        std::fs::write(sub.join("custom.json"), json_content).unwrap();
+
+        let mut registry = TemplateRegistry::default();
+        let count = registry.load_from_directory(dir.path()).unwrap();
+        assert_eq!(count, 1);
+        assert!(registry.get("custom-title").is_some());
+        assert_eq!(
+            registry.get("custom-title").unwrap().name,
+            "Custom Title Card"
+        );
+    }
+
+    #[test]
+    fn test_load_workspace_templates_directory() {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let templates_path = std::path::Path::new(&manifest_dir).join("../../templates");
+        if templates_path.exists() {
+            let mut registry = TemplateRegistry::default();
+            let count = registry.load_from_directory(&templates_path).unwrap();
+            assert!(count >= 8, "Expected at least 8 templates, found {count}");
+            assert!(registry.get("title-minimal").is_some());
+            assert!(registry.get("kinetic-headline").is_some());
+            assert!(registry.get("lower-third-modern").is_some());
+            assert!(registry.get("broadcast-badge").is_some());
+            assert!(registry.get("social-caption-card").is_some());
+            assert!(registry.get("quote-callout").is_some());
+            assert!(registry.get("branded-wipe").is_some());
+            assert!(registry.get("geometric-iris").is_some());
+        }
+    }
 }

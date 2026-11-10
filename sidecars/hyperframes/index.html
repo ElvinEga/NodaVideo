@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HyperFrames Motion Graphics Preview Testbed</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #090d16;
+      color: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px;
+    }
+    .viewport {
+      width: 960px;
+      height: 540px;
+      position: relative;
+      background: #020617;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+    }
+    .badge {
+      display: inline-block;
+      background: #3b82f6;
+      color: white;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 4px 8px;
+      border-radius: 4px;
+      margin-bottom: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="badge">HyperFrames Sidecar Preview</div>
+  <div class="viewport" id="preview-canvas">
+    <!-- Compositions are dynamically injected here -->
+    <div style="position: absolute; bottom: 40px; left: 40px; display: flex; align-items: stretch; background: rgba(15, 23, 42, 0.85); border-radius: 8px; overflow: hidden; font-family: sans-serif;">
+      <div style="width: 6px; background-color: #3b82f6;"></div>
+      <div style="padding: 12px 20px;">
+        <div style="font-size: 20px; font-weight: 700; color: #ffffff;">Alex Rivera</div>
+        <div style="font-size: 12px; font-weight: 500; color: #94a3b8; text-transform: uppercase;">Lead Director &amp; Editor</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

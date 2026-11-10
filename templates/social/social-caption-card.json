@@ -1,0 +1,30 @@
+{
+  "id": "social-caption-card",
+  "name": "Social Video Caption Card",
+  "category": "Social",
+  "default_duration_frames": 144,
+  "parameters": [
+    {
+      "name": "quote",
+      "label": "Quote / Caption",
+      "description": "Engaging hook or quote",
+      "param_type": "text",
+      "default_value": "Great video editing is invisible. It feels like storytelling, not technique."
+    },
+    {
+      "name": "handle",
+      "label": "Social Handle",
+      "description": "Creator username or tag",
+      "param_type": "text",
+      "default_value": "@nodavideo"
+    },
+    {
+      "name": "card_bg",
+      "label": "Card Background",
+      "description": "Card background tint",
+      "param_type": "color",
+      "default_value": "#1e293b"
+    }
+  ],
+  "html_template": "<div style=\"position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 40px;\">\n  <div style=\"background: {{card_bg}}; border: 1px solid rgba(255,255,255,0.1); border-radius: 16px; padding: 32px; max-width: 720px; box-shadow: 0 20px 40px rgba(0,0,0,0.6); text-align: center;\">\n    <div style=\"font-size: 32px; font-weight: 600; line-height: 1.4; color: #ffffff; margin-bottom: 20px;\">\"{{quote}}\"</div>\n    <div style=\"font-size: 18px; font-weight: 700; color: #38bdf8; letter-spacing: 0.05em;\">{{handle}}</div>\n  </div>\n</div>"
+}

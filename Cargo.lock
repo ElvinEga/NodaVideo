@@ -3917,6 +3917,7 @@ dependencies = [
  "nodavideo-skill-registry",
  "nodavideo-timeline",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

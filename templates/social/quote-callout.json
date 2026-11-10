@@ -1,0 +1,30 @@
+{
+  "id": "quote-callout",
+  "name": "Quote Callout Box",
+  "category": "Social",
+  "default_duration_frames": 120,
+  "parameters": [
+    {
+      "name": "speaker",
+      "label": "Speaker",
+      "description": "Name of person quoted",
+      "param_type": "text",
+      "default_value": "Walter Murch"
+    },
+    {
+      "name": "quote",
+      "label": "Quote",
+      "description": "Quote body text",
+      "param_type": "text",
+      "default_value": "The rule of six: emotion, story, rhythm, eye-trace, two-dimensional plane of screen, three-dimensional space of action."
+    },
+    {
+      "name": "accent_color",
+      "label": "Accent Color",
+      "description": "Quote mark color",
+      "param_type": "color",
+      "default_value": "#f59e0b"
+    }
+  ],
+  "html_template": "<div style=\"position: absolute; bottom: 80px; left: 50%; transform: translateX(-50%); width: 85%; max-width: 900px; background: rgba(15, 23, 42, 0.9); border-left: 6px solid {{accent_color}}; border-radius: 8px; padding: 24px 32px; box-shadow: 0 16px 36px rgba(0,0,0,0.6); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\">\n  <div style=\"font-size: 22px; font-style: italic; color: #f1f5f9; line-height: 1.5; margin-bottom: 12px;\">\"{{quote}}\"</div>\n  <div style=\"font-size: 16px; font-weight: 700; color: {{accent_color}}; text-transform: uppercase; letter-spacing: 0.1em;\">— {{speaker}}</div>\n</div>"
+}

@@ -998,4 +998,72 @@ mod tests {
         session.undo().unwrap();
         assert_eq!(session.duration_frames(), 0);
     }
+
+    #[core::prelude::v1::test]
+    fn test_hyperframes_sidecar_and_templates_integration() {
+        use nodavideo_command_system::{AddComposition, EditorCommand};
+        use nodavideo_editor_core::EditorSession;
+        use nodavideo_hyperframes_bridge::{Composition, CompositionRenderer, TemplateRegistry};
+        use nodavideo_timeline::{Clip, ClipId};
+        use std::path::Path;
+
+        let templates_dir = Path::new("templates");
+        if templates_dir.exists() {
+            let mut registry = TemplateRegistry::builtin();
+            let loaded = registry.load_from_directory(templates_dir).unwrap();
+            assert!(loaded >= 8);
+
+            // Test Title Minimal
+            let template = registry
+                .get("title-minimal")
+                .expect("title-minimal template");
+            let mut comp = Composition::new(template, "Main Title");
+            comp.set_parameter("title", serde_json::json!("NodaVideo 2.0"));
+            comp.set_parameter("subtitle", serde_json::json!("Native Rust Video Editor"));
+            comp.set_parameter("accent_color", serde_json::json!("#8b5cf6"));
+
+            // Render HTML document
+            let renderer = CompositionRenderer::new();
+            let temp_dir = tempfile::tempdir().unwrap();
+            let html_path = renderer
+                .render_html_document(&comp, &registry, temp_dir.path())
+                .unwrap();
+            assert!(html_path.exists());
+            let html_content = std::fs::read_to_string(&html_path).unwrap();
+            assert!(html_content.contains("NodaVideo 2.0"));
+            assert!(html_content.contains("Native Rust Video Editor"));
+            assert!(html_content.contains("#8b5cf6"));
+
+            // Add composition into EditorSession timeline
+            let mut session = EditorSession::new_empty("Template Session");
+            let v2_id = session.sequence.tracks[0].id;
+            let clip = Clip::new(
+                ClipId::new(),
+                nodavideo_project::AssetId::new(),
+                v2_id,
+                "Opening Title",
+                0,
+                0,
+                72,
+            )
+            .unwrap();
+
+            let add_comp_cmd = EditorCommand::AddComposition(AddComposition {
+                track_id: v2_id,
+                clip,
+                composition_id: "comp-1".into(),
+                template_id: "title-minimal".into(),
+            });
+
+            session.execute_command(add_comp_cmd).unwrap();
+            assert_eq!(session.duration_frames(), 72);
+            assert_eq!(session.sequence.tracks[0].clips.len(), 1);
+            assert!(session.can_undo());
+
+            // Undo composition placement
+            session.undo().unwrap();
+            assert_eq!(session.duration_frames(), 0);
+            assert_eq!(session.sequence.tracks[0].clips.len(), 0);
+        }
+    }
 }

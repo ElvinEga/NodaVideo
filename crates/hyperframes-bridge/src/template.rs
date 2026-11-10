@@ -1,6 +1,7 @@
 //! Motion graphics template schemas and built-in template library.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -264,5 +265,46 @@ impl TemplateRegistry {
     /// List all registered templates.
     pub fn list(&self) -> Vec<&TemplateDefinition> {
         self.templates.values().collect()
+    }
+
+    /// Load a template definition from a JSON file and register it.
+    pub fn load_from_file(&mut self, path: impl AsRef<Path>) -> Result<(), HyperframesError> {
+        let content = std::fs::read_to_string(path)?;
+        let template: TemplateDefinition = serde_json::from_str(&content)?;
+        self.register(template);
+        Ok(())
+    }
+
+    /// Recursively scan a directory for JSON template definitions and register them.
+    pub fn load_from_directory(
+        &mut self,
+        dir: impl AsRef<Path>,
+    ) -> Result<usize, HyperframesError> {
+        let mut count = 0;
+        let dir_path = dir.as_ref();
+        if !dir_path.exists() {
+            return Ok(0);
+        }
+
+        Self::scan_dir(dir_path, self, &mut count)?;
+        Ok(count)
+    }
+
+    fn scan_dir(dir: &Path, reg: &mut Self, count: &mut usize) -> Result<(), HyperframesError> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                Self::scan_dir(&path, reg, count)?;
+            } else if path.extension().is_some_and(|ext| ext == "json") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(template) = serde_json::from_str::<TemplateDefinition>(&content) {
+                        reg.register(template);
+                        *count += 1;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }

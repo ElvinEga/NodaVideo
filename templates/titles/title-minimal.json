@@ -1,0 +1,30 @@
+{
+  "id": "title-minimal",
+  "name": "Title Minimal",
+  "category": "Titles",
+  "default_duration_frames": 72,
+  "parameters": [
+    {
+      "name": "title",
+      "label": "Title Text",
+      "description": "Primary display title",
+      "param_type": "text",
+      "default_value": "NODACON 2026"
+    },
+    {
+      "name": "subtitle",
+      "label": "Subtitle",
+      "description": "Secondary descriptive caption",
+      "param_type": "text",
+      "default_value": "The Next Era of Video Creation"
+    },
+    {
+      "name": "accent_color",
+      "label": "Accent Color",
+      "description": "Color for divider line",
+      "param_type": "color",
+      "default_value": "#3b82f6"
+    }
+  ],
+  "html_template": "<div style=\"position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; text-shadow: 0 4px 24px rgba(0,0,0,0.8);\">\n  <h1 style=\"font-size: 72px; font-weight: 800; letter-spacing: -0.02em; color: #ffffff; margin: 0 0 16px 0; text-transform: uppercase;\">{{title}}</h1>\n  <div style=\"width: 96px; height: 4px; background-color: {{accent_color}}; border-radius: 2px; margin-bottom: 16px;\"></div>\n  <p style=\"font-size: 24px; font-weight: 400; color: #94a3b8; letter-spacing: 0.1em; margin: 0; text-transform: uppercase;\">{{subtitle}}</p>\n</div>"
+}

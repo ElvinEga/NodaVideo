@@ -1,0 +1,30 @@
+{
+  "id": "broadcast-badge",
+  "name": "Broadcast News Badge",
+  "category": "Lower Thirds",
+  "default_duration_frames": 120,
+  "parameters": [
+    {
+      "name": "tag",
+      "label": "Live Tag",
+      "description": "Top pill tag",
+      "param_type": "text",
+      "default_value": "SPECIAL REPORT"
+    },
+    {
+      "name": "headline",
+      "label": "Headline",
+      "description": "Main breaking news caption",
+      "param_type": "text",
+      "default_value": "Global Tech Keynote Streaming Live"
+    },
+    {
+      "name": "tag_color",
+      "label": "Tag Color",
+      "description": "Live pill color",
+      "param_type": "color",
+      "default_value": "#ef4444"
+    }
+  ],
+  "html_template": "<div style=\"position: absolute; bottom: 64px; left: 64px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\">\n  <div style=\"display: inline-block; background-color: {{tag_color}}; color: #ffffff; font-size: 14px; font-weight: 800; padding: 4px 12px; border-radius: 4px 4px 0 0; text-transform: uppercase; letter-spacing: 0.1em;\">{{tag}}</div>\n  <div style=\"background: rgba(15, 23, 42, 0.95); color: #ffffff; font-size: 24px; font-weight: 700; padding: 12px 24px; border-radius: 0 6px 6px 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.6);\">{{headline}}</div>\n</div>"
+}

@@ -20,6 +20,7 @@ use nodavideo_agent_acp::AcpAgentProvider;
 use nodavideo_agent_claude::ClaudeAgentProvider;
 use nodavideo_agent_codex::CodexAgentProvider;
 use nodavideo_agent_runtime::{AgentRuntime, MockAgentProvider};
+use nodavideo_editor_core::EditorSession;
 use nodavideo_mcp_server::McpExecutor;
 use nodavideo_media_engine::MediaProcessor;
 use nodavideo_skill_registry::SkillRegistry;
@@ -33,6 +34,7 @@ use crate::workspace::toolbar::{PanelId, ToolbarActions, render_top_toolbar};
 
 /// Root workspace view managing panels, docking/resizing, and active workspace tab.
 pub struct WorkspaceView {
+    pub session: Arc<RwLock<EditorSession>>,
     pub state: WorkspaceLayoutState,
     pub media_browser: Entity<MediaBrowserPanel>,
     pub preview_monitor: Entity<PreviewMonitorPanel>,
@@ -95,14 +97,24 @@ impl WorkspaceView {
         // Discover available skills from skills/ directory
         let mut skill_reg = SkillRegistry::new();
         let _ = skill_reg.discover_from_dir(std::path::Path::new("skills"));
-        let skill_registry = Arc::new(RwLock::new(skill_reg));
+        let skill_registry = Arc::new(RwLock::new(skill_reg.clone()));
+
+        // Initialize central EditorSession
+        let session = Arc::new(RwLock::new(EditorSession::new_empty("Main Project")));
+        {
+            if let Ok(mut sess) = session.write() {
+                sess.agent_runtime = runtime.clone();
+                sess.skill_registry = Arc::new(skill_reg);
+            }
+        }
 
         let assistant =
             cx.new(|cx| AssistantPanel::new(runtime.clone(), skill_registry.clone(), window, cx));
 
-        // Wire assistant tool execution callback to apply approved edits directly to the timeline
+        // Wire assistant tool execution callback to apply approved edits directly to the timeline and session
         let tl_for_tool = timeline.clone();
         let mb_for_tool = media_browser.clone();
+        let session_for_tool = session.clone();
         assistant.update(cx, |asst, _| {
             asst.on_tool_call = Some(Rc::new(move |tool_name, params, _, cx| {
                 let mut result = None;
@@ -117,6 +129,10 @@ impl WorkspaceView {
                         true,
                     ) {
                         Ok(val) => {
+                            if let Ok(mut sess) = session_for_tool.write() {
+                                sess.sequence = tl.sequence.clone();
+                                sess.history = tl.history.clone();
+                            }
                             cx.notify();
                             result = Some(Ok(val));
                         }
@@ -145,10 +161,14 @@ impl WorkspaceView {
         let v_split_state = cx.new(|_| ResizableState::default());
 
         // Observe media browser updates to synchronize selected asset with Inspector and refresh preview
-        let observe_sub = cx.observe(&media_browser, |this, mb, cx| {
+        let session_for_mb = session.clone();
+        let observe_sub = cx.observe(&media_browser, move |this, mb, cx| {
             let selected_id = mb.read(cx).selected_asset_id;
             let selected_asset =
                 selected_id.and_then(|id| mb.read(cx).project.get_asset(id).cloned());
+            if let Ok(mut sess) = session_for_mb.write() {
+                sess.project = mb.read(cx).project.clone();
+            }
             this.inspector.update(cx, |insp, cx| {
                 if insp.selected_asset != selected_asset {
                     insp.set_selected_asset(selected_asset, cx);
@@ -168,9 +188,22 @@ impl WorkspaceView {
         });
 
         // Observe timeline for changes in playhead, clips, tracks, or sequence
-        let timeline_sub = cx.observe(&timeline, |this, tl, cx| {
+        let session_for_tl = session.clone();
+        let timeline_sub = cx.observe(&timeline, move |this, tl, cx| {
             let selected_clip = tl.read(cx).get_selected_clip();
             let selected_trans = tl.read(cx).get_selected_transition();
+            if let Ok(mut sess) = session_for_tl.write() {
+                sess.sequence = tl.read(cx).sequence.clone();
+                sess.history = tl.read(cx).history.clone();
+                sess.seek_frame(tl.read(cx).playhead().max(0) as u64);
+                if let Some(ref clip) = selected_clip {
+                    sess.select_clip(clip.id);
+                } else if let Some(trans_id) = selected_trans.as_ref().map(|t| t.id) {
+                    sess.select_transition(Some(trans_id));
+                } else {
+                    sess.clear_selection();
+                }
+            }
             this.inspector.update(cx, |insp, cx| {
                 if let Some(clip) = selected_clip {
                     if insp.selected_clip.as_ref().map(|c| c.id) != Some(clip.id) {
@@ -193,6 +226,7 @@ impl WorkspaceView {
         });
 
         let mut view = Self {
+            session,
             state: WorkspaceLayoutState::default(),
             media_browser,
             preview_monitor,
