@@ -29,6 +29,8 @@ Core identity: native Rust + GPUI, professional NLE, multi-provider agent suppor
 - `crates/agent-codex` (`nodavideo-agent-codex` library): native `codex app-server` JSON-RPC 2.0 stdio provider adapter with simulated fallback for tests.
 - `crates/agent-claude` (`nodavideo-agent-claude` library): Anthropic Claude Code CLI (`claude --output-format stream-json`) streaming adapter with simulated fallback for tests.
 - `crates/skill-registry` (`nodavideo-skill-registry` library): `SKILL.md` parser, recursive directory scanner, and dynamic prompt instruction composer for production video skills (`smart-cuts`, `auto-captions`, `social-video`, `animated-titles`).
+- `crates/hyperframes-bridge` (`nodavideo-hyperframes-bridge` library): broadcast motion graphics engine, template registry (`lower-third-modern`, `title-minimal`, `social-caption-card`, `branded-transition`), parameter validation, HTML/SVG vector composition rendering, and MCP tool bridge.
+
 
 Pinned stack: `gpui-kit 0.9.0` (`gpui-pre 0.3.11`), Rust MSRV `1.92.0`, edition `2024`. Dependencies are centralized in workspace `Cargo.toml` with `Cargo.lock` committed.
 Repository scaffolding includes: `.gitignore`, `rustfmt.toml`, `README.md`, `LICENSE` (Apache-2.0), and GitHub Actions CI (`.github/workflows/ci.yml`).
@@ -174,6 +176,7 @@ Expose these as typed tools through **both** the native Rust API and the MCP ser
 get_project · get_timeline · get_selected_clips · search_media
 add_clip · move_clip · trim_clip · split_clip · delete_clip
 add_audio_track · add_transition · add_text_overlay · generate_captions
+list_composition_templates · add_composition
 apply_effect · set_clip_transform · render_preview · export_video
 ```
 

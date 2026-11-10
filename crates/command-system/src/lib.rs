@@ -9,8 +9,8 @@ pub mod history;
 pub mod staged;
 
 pub use command::{
-    AddClip, AddTrack, BatchCommand, DeleteClip, DeleteTrack, EditorCommand, MoveClip, SplitClip,
-    ToggleLock, ToggleMute, ToggleSolo, TrimClip, UnsplitClip,
+    AddClip, AddComposition, AddTrack, BatchCommand, DeleteClip, DeleteTrack, EditorCommand,
+    MoveClip, SplitClip, ToggleLock, ToggleMute, ToggleSolo, TrimClip, UnsplitClip,
 };
 pub use error::CommandError;
 pub use history::{CommandHistory, HistoryEntry};
@@ -207,5 +207,39 @@ mod tests {
         assert_eq!(redone, Some("Smart Cuts".to_string()));
         assert_eq!(sequence.tracks[1].clips.len(), 2);
         assert_eq!(sequence.duration_frames(), 100);
+    }
+
+    #[test]
+    fn test_add_composition_command() {
+        let mut sequence = Sequence::default_1080p24();
+        let mut history = CommandHistory::new(10);
+        let track_id = sequence.tracks[0].id; // V2 track for graphics overlay
+
+        let clip = Clip::new(
+            ClipId::new(),
+            AssetId::new(),
+            track_id,
+            "Lower Third - Alex",
+            0,
+            0,
+            72,
+        )
+        .unwrap();
+
+        let cmd = EditorCommand::AddComposition(AddComposition {
+            track_id,
+            clip,
+            composition_id: "comp-123".into(),
+            template_id: "lower-third-modern".into(),
+        });
+
+        history.execute(cmd, &mut sequence).unwrap();
+        assert_eq!(sequence.tracks[0].clips.len(), 1);
+        assert_eq!(sequence.duration_frames(), 72);
+
+        // Undo
+        history.undo(&mut sequence).unwrap();
+        assert_eq!(sequence.tracks[0].clips.len(), 0);
+        assert_eq!(sequence.duration_frames(), 0);
     }
 }

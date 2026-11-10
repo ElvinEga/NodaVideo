@@ -21,6 +21,7 @@ nodavideo-agent-acp.workspace = true
 nodavideo-agent-codex.workspace = true
 nodavideo-agent-claude.workspace = true
 nodavideo-skill-registry.workspace = true
+nodavideo-hyperframes-bridge.workspace = true
 gpui-kit.workspace = true
 anyhow.workspace = true
 tokio.workspace = true

@@ -98,6 +98,15 @@ pub struct BatchCommand {
     pub commands: Vec<EditorCommand>,
 }
 
+/// Parameters for adding a motion graphics composition clip to a track.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddComposition {
+    pub track_id: TrackId,
+    pub clip: Clip,
+    pub composition_id: String,
+    pub template_id: String,
+}
+
 /// Canonical editor commands governing all project and timeline mutations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EditorCommand {
@@ -113,6 +122,7 @@ pub enum EditorCommand {
     ToggleSolo(ToggleSolo),
     ToggleLock(ToggleLock),
     Batch(BatchCommand),
+    AddComposition(AddComposition),
 }
 
 impl EditorCommand {
@@ -131,6 +141,7 @@ impl EditorCommand {
             Self::ToggleSolo(_) => "Toggle Track Solo".to_string(),
             Self::ToggleLock(_) => "Toggle Track Lock".to_string(),
             Self::Batch(cmd) => cmd.name.clone(),
+            Self::AddComposition(cmd) => format!("Add Composition '{}'", cmd.clip.name),
         }
     }
 
@@ -192,6 +203,10 @@ impl EditorCommand {
                     commands: inverse_commands,
                 })
             }
+            Self::AddComposition(cmd) => Self::DeleteClip(DeleteClip {
+                track_id: cmd.track_id,
+                clip: cmd.clip.clone(),
+            }),
         }
     }
 
@@ -269,6 +284,9 @@ impl EditorCommand {
                     }
                     applied_inverses.push(c.inverse());
                 }
+            }
+            Self::AddComposition(cmd) => {
+                sequence.add_clip(cmd.track_id, cmd.clip.clone())?;
             }
         }
         Ok(())

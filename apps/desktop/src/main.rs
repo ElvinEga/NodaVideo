@@ -280,4 +280,64 @@ mod tests {
         assert!(history.undo(&mut sequence).is_ok());
         assert_eq!(sequence.tracks[1].clips.len(), 0);
     }
+
+    #[core::prelude::v1::test]
+    fn test_mcp_hyperframes_motion_graphics_workflow() {
+        use nodavideo_command_system::CommandHistory;
+        use nodavideo_mcp_server::McpExecutor;
+        use nodavideo_project::ProjectDocument;
+        use nodavideo_timeline::Sequence;
+        use serde_json::json;
+
+        let project = ProjectDocument::new("HyperFrames Test");
+        let mut sequence = Sequence::default_1080p24();
+        let mut history = CommandHistory::new(100);
+
+        // 1. List templates
+        let templates_res = McpExecutor::execute(
+            "list_composition_templates",
+            &json!({}),
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        );
+        assert!(templates_res.is_ok());
+        let templates_val = templates_res.unwrap();
+        let templates = templates_val["templates"].as_array().unwrap();
+        assert_eq!(templates.len(), 4);
+
+        // 2. Add composition directly to timeline via MCP
+        let track_id = sequence.tracks[0].id.to_string();
+        let add_res = McpExecutor::execute(
+            "add_composition",
+            &json!({
+                "template_id": "title-minimal",
+                "track_id": track_id,
+                "start_frame": 12,
+                "duration_frames": 72,
+                "name": "Opening Title Card",
+                "parameters": {
+                    "title": "Welcome to NodaVideo",
+                    "subtitle": "Professional Open-Source Video Editor",
+                    "accent_color": "#00f0ff"
+                }
+            }),
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        );
+        assert!(add_res.is_ok());
+        assert_eq!(sequence.tracks[0].clips.len(), 1);
+        let clip = &sequence.tracks[0].clips[0];
+        assert_eq!(clip.start_frame, 12);
+        assert_eq!(clip.duration_frames(), 72);
+        assert_eq!(clip.name, "Opening Title Card");
+
+        // 3. Undoing removes the composition clip
+        assert!(history.can_undo());
+        assert!(history.undo(&mut sequence).is_ok());
+        assert_eq!(sequence.tracks[0].clips.len(), 0);
+    }
 }

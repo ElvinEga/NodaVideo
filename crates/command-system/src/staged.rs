@@ -127,6 +127,9 @@ impl StagedChangeset {
                 EditorCommand::ToggleLock(c) => {
                     affected_tracks.insert(c.track_id);
                 }
+                EditorCommand::AddComposition(c) => {
+                    affected_tracks.insert(c.track_id);
+                }
                 EditorCommand::Batch(_) => {}
             }
         }

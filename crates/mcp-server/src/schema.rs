@@ -211,6 +211,35 @@ impl McpToolDefinition {
                 is_mutation: true,
                 requires_approval: true,
             },
+            Self {
+                name: "list_composition_templates".into(),
+                description: "List available HyperFrames motion graphics templates (lower thirds, titles, captions, transitions) with their parameter schemas.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+                is_mutation: false,
+                requires_approval: false,
+            },
+            Self {
+                name: "add_composition".into(),
+                description: "Instantiate a motion graphics composition template and place it on a timeline track.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "template_id": { "type": "string", "description": "ID of template (e.g. lower-third-modern, title-minimal, social-caption-card)" },
+                        "track_id": { "type": "string", "description": "UUID of video track (recommended: V2 or upper track)" },
+                        "start_frame": { "type": "integer", "minimum": 0, "description": "Timeline frame placement position" },
+                        "name": { "type": "string", "description": "Optional human-readable title" },
+                        "parameters": { "type": "object", "description": "Customizable template parameters (title, subtitle, colors, etc.)" }
+                    },
+                    "required": ["template_id", "track_id", "start_frame"],
+                    "additionalProperties": false
+                }),
+                is_mutation: true,
+                requires_approval: false,
+            },
         ]
     }
 }

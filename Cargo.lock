@@ -3896,6 +3896,7 @@ dependencies = [
  "nodavideo-agent-codex",
  "nodavideo-agent-runtime",
  "nodavideo-command-system",
+ "nodavideo-hyperframes-bridge",
  "nodavideo-mcp-server",
  "nodavideo-media-engine",
  "nodavideo-project",
@@ -3906,11 +3907,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodavideo-hyperframes-bridge"
+version = "0.1.0"
+dependencies = [
+ "nodavideo-project",
+ "nodavideo-timeline",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
 name = "nodavideo-mcp-server"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "nodavideo-command-system",
+ "nodavideo-hyperframes-bridge",
  "nodavideo-project",
  "nodavideo-timeline",
  "serde",

@@ -216,4 +216,63 @@ mod tests {
         assert_eq!(sequence.tracks[1].clips.len(), 0);
         assert_eq!(sequence.duration_frames(), 0);
     }
+
+    #[test]
+    fn test_list_and_add_composition_tools() {
+        let project = ProjectDocument::default();
+        let mut sequence = Sequence::default_1080p24();
+        let mut history = CommandHistory::new(50);
+        let v2_id = sequence.tracks[0].id; // V2 track for overlays
+
+        // 1. List composition templates
+        let list_res = McpExecutor::execute(
+            "list_composition_templates",
+            &serde_json::json!({}),
+            &project,
+            &mut sequence,
+            &mut history,
+            false,
+        )
+        .unwrap();
+
+        let templates = list_res["templates"].as_array().unwrap();
+        assert_eq!(templates.len(), 4);
+        assert!(templates.iter().any(|t| t["id"] == "lower-third-modern"));
+
+        // 2. Add composition clip
+        let add_res = McpExecutor::execute(
+            "add_composition",
+            &serde_json::json!({
+                "template_id": "lower-third-modern",
+                "track_id": v2_id.to_string(),
+                "start_frame": 10,
+                "name": "Guest Interview Lower Third",
+                "parameters": {
+                    "title": "Dr. Sarah Connor",
+                    "subtitle": "Lead AI Researcher",
+                    "accent_color": "#8b5cf6"
+                }
+            }),
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(add_res["status"], "success");
+        assert_eq!(add_res["duration_frames"], 96);
+        assert_eq!(sequence.tracks[0].clips.len(), 1);
+        assert_eq!(sequence.duration_frames(), 106);
+
+        // 3. Undo removes the composition clip
+        assert!(history.can_undo());
+        let undone = history.undo(&mut sequence).unwrap();
+        assert_eq!(
+            undone,
+            Some("Add Composition 'Guest Interview Lower Third'".to_string())
+        );
+        assert_eq!(sequence.tracks[0].clips.len(), 0);
+        assert_eq!(sequence.duration_frames(), 0);
+    }
 }

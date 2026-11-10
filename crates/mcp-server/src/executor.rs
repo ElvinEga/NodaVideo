@@ -3,9 +3,10 @@
 use std::str::FromStr;
 
 use nodavideo_command_system::{
-    AddClip, CommandHistory, DeleteClip, EditorCommand, MoveClip, SplitClip, StagedChangeset,
-    TrimClip,
+    AddClip, AddComposition, CommandHistory, DeleteClip, EditorCommand, MoveClip, SplitClip,
+    StagedChangeset, TrimClip,
 };
+use nodavideo_hyperframes_bridge::{Composition, CompositionRenderer, TemplateRegistry};
 use nodavideo_project::{AssetId, MediaType, ProjectDocument};
 use nodavideo_timeline::{Clip, ClipId, Sequence, TrackId};
 
@@ -563,6 +564,125 @@ impl McpExecutor {
                 }))
             }
 
+            "list_composition_templates" => {
+                let registry = TemplateRegistry::builtin();
+                let templates = registry
+                    .list()
+                    .into_iter()
+                    .map(|t| {
+                        serde_json::json!({
+                            "id": t.id,
+                            "name": t.name,
+                            "category": t.category,
+                            "default_duration_frames": t.default_duration_frames,
+                            "parameters": t.parameters.iter().map(|p| {
+                                serde_json::json!({
+                                    "name": p.name,
+                                    "label": p.label,
+                                    "description": p.description,
+                                    "default": p.default_value
+                                })
+                            }).collect::<Vec<_>>()
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+                Ok(serde_json::json!({ "templates": templates }))
+            }
+
+            "add_composition" => {
+                let template_id = args
+                    .get("template_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| McpError::InvalidArguments {
+                        tool: tool_name.into(),
+                        details: "Missing 'template_id'".into(),
+                    })?;
+                let track_id_str =
+                    args.get("track_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| McpError::InvalidArguments {
+                            tool: tool_name.into(),
+                            details: "Missing 'track_id'".into(),
+                        })?;
+                let start_frame = args
+                    .get("start_frame")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| McpError::InvalidArguments {
+                        tool: tool_name.into(),
+                        details: "Missing 'start_frame'".into(),
+                    })?;
+
+                let track_id =
+                    TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
+                        tool: tool_name.into(),
+                        details: format!("Invalid track UUID: {e}"),
+                    })?;
+
+                let registry = TemplateRegistry::builtin();
+                let template =
+                    registry
+                        .get(template_id)
+                        .ok_or_else(|| McpError::InvalidArguments {
+                            tool: tool_name.into(),
+                            details: format!("Unknown template ID: '{template_id}'"),
+                        })?;
+
+                let comp_name = args
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&template.name);
+
+                let mut comp = Composition::new(template, comp_name);
+                if let Some(params_map) = args.get("parameters").and_then(|v| v.as_object()) {
+                    for (k, v) in params_map {
+                        comp.set_parameter(k, v.clone());
+                    }
+                }
+
+                let renderer = CompositionRenderer::new();
+                let tmp_dir = tempfile::tempdir().map_err(|e| {
+                    McpError::ExecutionFailed(format!("Failed to create temp dir: {e}"))
+                })?;
+                let asset_path = renderer
+                    .render_media_asset(&mut comp, &registry, tmp_dir.path())
+                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+                let clip_id = ClipId::new();
+                let asset_id = AssetId::new();
+                let duration = comp.duration_frames;
+                let clip = Clip::new(
+                    clip_id,
+                    asset_id,
+                    track_id,
+                    comp_name,
+                    start_frame,
+                    0,
+                    duration,
+                )
+                .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+                let cmd = EditorCommand::AddComposition(AddComposition {
+                    track_id,
+                    clip,
+                    composition_id: comp.id.to_string(),
+                    template_id: template.id.clone(),
+                });
+
+                history
+                    .execute(cmd, sequence)
+                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "clip_id": clip_id.to_string(),
+                    "composition_id": comp.id.to_string(),
+                    "template_id": template.id,
+                    "rendered_asset": asset_path.display().to_string(),
+                    "duration_frames": duration
+                }))
+            }
+
             _ => Err(McpError::ToolNotFound(tool_name.to_string())),
         }
     }
@@ -835,6 +955,77 @@ fn parse_command_spec(
             };
 
             Ok(EditorCommand::DeleteClip(DeleteClip { track_id, clip }))
+        }
+
+        "add_composition" => {
+            let template_id = spec
+                .get("template_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "add_composition".into(),
+                    details: "Missing 'template_id'".into(),
+                })?;
+            let track_id_str = spec
+                .get("track_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "add_composition".into(),
+                    details: "Missing 'track_id'".into(),
+                })?;
+            let start_frame = spec
+                .get("start_frame")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "add_composition".into(),
+                    details: "Missing 'start_frame'".into(),
+                })?;
+
+            let track_id =
+                TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "add_composition".into(),
+                    details: format!("Invalid track UUID: {e}"),
+                })?;
+
+            let registry = TemplateRegistry::builtin();
+            let template = registry
+                .get(template_id)
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "add_composition".into(),
+                    details: format!("Unknown template ID: '{template_id}'"),
+                })?;
+
+            let comp_name = spec
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&template.name);
+
+            let mut comp = Composition::new(template, comp_name);
+            if let Some(params_map) = spec.get("parameters").and_then(|v| v.as_object()) {
+                for (k, v) in params_map {
+                    comp.set_parameter(k, v.clone());
+                }
+            }
+
+            let clip_id = ClipId::new();
+            let asset_id = AssetId::new();
+            let duration = comp.duration_frames;
+            let clip = Clip::new(
+                clip_id,
+                asset_id,
+                track_id,
+                comp_name,
+                start_frame,
+                0,
+                duration,
+            )
+            .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+            Ok(EditorCommand::AddComposition(AddComposition {
+                track_id,
+                clip,
+                composition_id: comp.id.to_string(),
+                template_id: template.id.clone(),
+            }))
         }
 
         other => Err(McpError::ToolNotFound(format!(
