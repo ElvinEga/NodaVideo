@@ -814,4 +814,124 @@ mod tests {
         assert!(levels.peak_db_left > -6.0 && levels.peak_db_left <= 0.0);
         assert!(levels.peak_db_right > -6.0 && levels.peak_db_right <= 0.0);
     }
+
+    #[core::prelude::v1::test]
+    fn test_gpu_renderer_and_compositor_workflow() {
+        use nodavideo_command_system::{AddClip, AddTransition, EditorCommand};
+        use nodavideo_gpu_renderer::{
+            PixelBuffer, RgbaColor, SoftwareCompositor, TransformUniform, TransitionUniform,
+            Viewport,
+        };
+        use nodavideo_project::AssetId;
+        use nodavideo_timeline::{
+            Clip, ClipId, ClipTransform, Transition, TransitionAlignment, TransitionId,
+            TransitionType,
+        };
+        use workspace::panels::timeline::TimelinePanel;
+
+        let mut timeline = TimelinePanel::new();
+        let v1_id = timeline.sequence.tracks[1].id;
+
+        // Add 2 video clips on V1
+        let c1_id = ClipId::new();
+        let c2_id = ClipId::new();
+        let mut c1 = Clip::new(c1_id, AssetId::new(), v1_id, "Scene Alpha", 0, 0, 48).unwrap();
+        c1.transform = ClipTransform {
+            position_x: 20.0,
+            position_y: -10.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            rotation_degrees: 0.0,
+            opacity: 0.85,
+        };
+        let c2 = Clip::new(c2_id, AssetId::new(), v1_id, "Scene Beta", 48, 0, 48).unwrap();
+
+        timeline
+            .history
+            .execute(
+                EditorCommand::AddClip(AddClip {
+                    track_id: v1_id,
+                    clip: c1,
+                }),
+                &mut timeline.sequence,
+            )
+            .unwrap();
+        timeline
+            .history
+            .execute(
+                EditorCommand::AddClip(AddClip {
+                    track_id: v1_id,
+                    clip: c2,
+                }),
+                &mut timeline.sequence,
+            )
+            .unwrap();
+
+        // Add Crossfade transition between them
+        let trans_id = TransitionId::new();
+        let transition = Transition::new(
+            trans_id,
+            TransitionType::Crossfade,
+            TransitionAlignment::Centered,
+            c1_id,
+            c2_id,
+            v1_id,
+            48,
+            24,
+        )
+        .unwrap();
+
+        timeline
+            .history
+            .execute(
+                EditorCommand::AddTransition(AddTransition {
+                    track_id: v1_id,
+                    transition,
+                }),
+                &mut timeline.sequence,
+            )
+            .unwrap();
+
+        // 1. GPU Uniform mapping
+        let vp = Viewport::new(1920, 1080);
+        let selected_clip = timeline.sequence.get_clip(c1_id).unwrap();
+        let transform_uniform = TransformUniform::from_clip_transform(&selected_clip.transform, vp);
+        assert_eq!(transform_uniform.opacity, 0.85);
+
+        let trans_uniform = TransitionUniform::new(TransitionType::Crossfade, 0.5, vp);
+        assert_eq!(trans_uniform.transition_type, 0);
+        assert_eq!(trans_uniform.progress, 0.5);
+
+        // 2. Software Compositor pipeline
+        let compositor = SoftwareCompositor;
+        let mut dest = PixelBuffer::from_color(64, 64, RgbaColor::new(0.0, 0.0, 0.0, 1.0));
+        let src = PixelBuffer::from_color(32, 32, RgbaColor::new(1.0, 1.0, 0.0, 1.0)); // Yellow
+
+        compositor
+            .composite_layer(&mut dest, &src, &selected_clip.transform)
+            .unwrap();
+        assert_eq!(dest.width, 64);
+        assert_eq!(dest.height, 64);
+
+        // Test transition compositing
+        let frame_a = PixelBuffer::from_color(16, 16, RgbaColor::new(1.0, 0.0, 0.0, 1.0)); // Red
+        let frame_b = PixelBuffer::from_color(16, 16, RgbaColor::new(0.0, 1.0, 0.0, 1.0)); // Green
+        let mut transition_dest = PixelBuffer::new(16, 16);
+
+        compositor
+            .composite_transition(
+                &mut transition_dest,
+                &frame_a,
+                &frame_b,
+                TransitionType::Crossfade,
+                0.5,
+            )
+            .unwrap();
+
+        // 50% Red + 50% Green = Yellow/Olive
+        let mid_px = transition_dest.get_pixel(8, 8);
+        assert!((mid_px[0] as i32 - 128).abs() <= 2);
+        assert!((mid_px[1] as i32 - 128).abs() <= 2);
+        assert_eq!(mid_px[2], 0);
+    }
 }

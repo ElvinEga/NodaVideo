@@ -3908,6 +3908,7 @@ dependencies = [
  "nodavideo-agent-runtime",
  "nodavideo-audio-engine",
  "nodavideo-command-system",
+ "nodavideo-gpu-renderer",
  "nodavideo-hyperframes-bridge",
  "nodavideo-mcp-server",
  "nodavideo-media-engine",
@@ -3916,6 +3917,20 @@ dependencies = [
  "nodavideo-timeline",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "nodavideo-gpu-renderer"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "nodavideo-project",
+ "nodavideo-timeline",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "wgpu",
 ]
 
 [[package]]
