@@ -168,7 +168,22 @@ impl WorkspaceView {
         });
 
         // Observe timeline for changes in playhead, clips, tracks, or sequence
-        let timeline_sub = cx.observe(&timeline, |this, _, cx| {
+        let timeline_sub = cx.observe(&timeline, |this, tl, cx| {
+            let selected_clip = tl.read(cx).get_selected_clip();
+            let selected_trans = tl.read(cx).get_selected_transition();
+            this.inspector.update(cx, |insp, cx| {
+                if let Some(clip) = selected_clip {
+                    if insp.selected_clip.as_ref().map(|c| c.id) != Some(clip.id) {
+                        insp.set_selected_clip(Some(clip), cx);
+                    }
+                } else if let Some(trans) = selected_trans {
+                    if insp.selected_transition.as_ref().map(|t| t.id) != Some(trans.id) {
+                        insp.set_selected_transition(Some(trans), cx);
+                    }
+                } else if insp.selected_clip.is_some() || insp.selected_transition.is_some() {
+                    insp.clear_timeline_selection(cx);
+                }
+            });
             this.refresh_preview_frame(cx);
         });
 

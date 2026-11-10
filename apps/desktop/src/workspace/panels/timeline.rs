@@ -8,13 +8,13 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use nodavideo_command_system::{
-    AddClip, CommandHistory, DeleteClip, EditorCommand, MoveClip, SplitClip, ToggleLock,
-    ToggleMute, ToggleSolo, TrimClip,
+    AddClip, CommandHistory, DeleteClip, EditorCommand, MoveClip, RemoveTransition, SplitClip,
+    ToggleLock, ToggleMute, ToggleSolo, TrimClip,
 };
 use nodavideo_project::{MediaAsset, MediaType};
 use nodavideo_timeline::{
-    Clip, ClipId, Sequence, TimelineSelection, Track, TrackId, TrackType, snap_clip_move,
-    snap_frame,
+    Clip, ClipId, Sequence, TimelineSelection, Track, TrackId, TrackType, Transition, TransitionId,
+    TransitionType, snap_clip_move, snap_frame,
 };
 
 use crate::theme::metrics;
@@ -33,6 +33,7 @@ pub struct TimelinePanel {
     pub sequence: Sequence,
     pub history: CommandHistory,
     pub selection: TimelineSelection,
+    pub selected_transition: Option<TransitionId>,
     pub current_tool: TimelineTool,
     pub snapping_enabled: bool,
     pub ripple_enabled: bool,
@@ -46,6 +47,7 @@ impl Default for TimelinePanel {
             sequence: Sequence::default_1080p24(),
             history: CommandHistory::new(100),
             selection: TimelineSelection::new(),
+            selected_transition: None,
             current_tool: TimelineTool::Select,
             snapping_enabled: true,
             ripple_enabled: false,
@@ -164,6 +166,7 @@ impl TimelinePanel {
     pub fn set_sequence(&mut self, sequence: Sequence, cx: &mut Context<Self>) {
         self.sequence = sequence;
         self.selection.clear_selection();
+        self.selected_transition = None;
         self.selection.set_playhead(0);
         self.history.clear();
         cx.notify();
@@ -231,8 +234,24 @@ impl TimelinePanel {
         cx.notify();
     }
 
-    /// Delete currently selected clip(s).
+    /// Delete currently selected clip(s) or transition.
     pub fn delete_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(trans_id) = self.selected_transition {
+            for track in &self.sequence.tracks {
+                if let Some(trans) = track.transitions.iter().find(|t| t.id == trans_id) {
+                    let cmd = EditorCommand::RemoveTransition(RemoveTransition {
+                        track_id: trans.track_id,
+                        transition: trans.clone(),
+                    });
+                    let _ = self.history.execute(cmd, &mut self.sequence);
+                    break;
+                }
+            }
+            self.selected_transition = None;
+            cx.notify();
+            return;
+        }
+
         let to_delete: Vec<(TrackId, Clip)> = self
             .selection
             .selected_clips
@@ -260,6 +279,17 @@ impl TimelinePanel {
     pub fn get_selected_clip(&self) -> Option<Clip> {
         let clip_id = self.selection.primary_selected()?;
         self.sequence.get_clip(clip_id).cloned()
+    }
+
+    /// Return the currently selected transition on the timeline, if any.
+    pub fn get_selected_transition(&self) -> Option<Transition> {
+        let trans_id = self.selected_transition?;
+        for track in &self.sequence.tracks {
+            if let Some(t) = track.transitions.iter().find(|t| t.id == trans_id) {
+                return Some(t.clone());
+            }
+        }
+        None
     }
 
     /// Trim selected clip in-point by delta frames.
@@ -1004,6 +1034,12 @@ impl TimelinePanel {
                     .iter()
                     .map(|clip| self.render_clip_element(clip, track, theme, ppf, cx)),
             )
+            .children(
+                track
+                    .transitions
+                    .iter()
+                    .map(|trans| self.render_transition_element(trans, track, theme, ppf, cx)),
+            )
             .into_any_element()
     }
 
@@ -1029,17 +1065,60 @@ impl TimelinePanel {
         let current_tool = self.current_tool;
         let playhead_frame = self.selection.playhead_frame;
 
-        // Styling based on track type
-        let (bg_color, border_color): (Rgba, Hsla) = match track.track_type {
-            TrackType::Video => (
-                gpui::rgb(0x1e293b),        // Dark slate/blue
-                gpui::rgb(0x38bdf8).into(), // Light sky blue
-            ),
-            TrackType::Audio => (
-                gpui::rgb(0x134e4a),        // Dark teal/emerald
-                gpui::rgb(0x34d399).into(), // Emerald
-            ),
-        };
+        // Styling based on track type and overlay content
+        let (bg_color, border_color, badge_pill): (Rgba, Hsla, Option<AnyElement>) =
+            if clip.text_overlay.is_some() {
+                let is_sub = clip_name.to_lowercase().contains("subtitle")
+                    || clip_name.to_lowercase().contains("caption");
+                if is_sub {
+                    (
+                        gpui::rgb(0x451a03),        // Dark amber
+                        gpui::rgb(0xf59e0b).into(), // Amber
+                        Some(
+                            div()
+                                .px_1()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(gpui::rgb(0xb45309))
+                                .text_xs()
+                                .font_bold()
+                                .text_color(gpui::rgb(0xfef3c7))
+                                .child("SUB")
+                                .into_any_element(),
+                        ),
+                    )
+                } else {
+                    (
+                        gpui::rgb(0x2e1065),        // Dark violet
+                        gpui::rgb(0xa855f7).into(), // Purple
+                        Some(
+                            div()
+                                .px_1()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(gpui::rgb(0x7c3aed))
+                                .text_xs()
+                                .font_bold()
+                                .text_color(gpui::rgb(0xf3e8ff))
+                                .child("TXT")
+                                .into_any_element(),
+                        ),
+                    )
+                }
+            } else {
+                match track.track_type {
+                    TrackType::Video => (
+                        gpui::rgb(0x1e293b),        // Dark slate/blue
+                        gpui::rgb(0x38bdf8).into(), // Light sky blue
+                        None,
+                    ),
+                    TrackType::Audio => (
+                        gpui::rgb(0x134e4a),        // Dark teal/emerald
+                        gpui::rgb(0x34d399).into(), // Emerald
+                        None,
+                    ),
+                }
+            };
 
         div()
             .id(ElementId::Name(format!("clip-{clip_id}").into()))
@@ -1059,6 +1138,7 @@ impl TimelinePanel {
             .cursor_pointer()
             .overflow_hidden()
             .on_click(cx.listener(move |this, _, _, cx| {
+                this.selected_transition = None;
                 match current_tool {
                     TimelineTool::Select => {
                         this.selection.select_single(clip_id);
@@ -1089,17 +1169,100 @@ impl TimelinePanel {
                     .px_1p5()
                     .child(
                         div()
-                            .text_xs()
-                            .font_semibold()
-                            .text_color(theme.foreground)
-                            .truncate()
-                            .child(clip_name),
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .overflow_hidden()
+                            .children(badge_pill)
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(theme.foreground)
+                                    .truncate()
+                                    .child(clip_name),
+                            ),
                     )
                     .child(
                         div()
                             .text_xs()
                             .font_family(mono_font)
                             .text_color(theme.muted_foreground)
+                            .child(duration_text),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// Render individual transition element spanning cut points on a track lane.
+    fn render_transition_element(
+        &self,
+        transition: &Transition,
+        _track: &Track,
+        theme: &Theme,
+        ppf: f32,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let transition_id = transition.id;
+        let is_selected = self.selected_transition == Some(transition_id);
+        let start_frame = transition.start_frame();
+        let left_px = (start_frame as f32 * ppf).max(0.0);
+        let width_px = (transition.duration_frames as f32 * ppf).max(18.0);
+        let mono_font = theme.mono_font_family.clone();
+        let duration_text = format!("{}f", transition.duration_frames);
+        let trans_label = match transition.transition_type {
+            TransitionType::Crossfade => "X-Fade",
+            TransitionType::Dissolve => "Dissolve",
+            TransitionType::FadeToBlack => "Fade Black",
+            TransitionType::DipToWhite => "Dip White",
+            TransitionType::WipeLeft => "Wipe L",
+            TransitionType::WipeRight => "Wipe R",
+        };
+
+        div()
+            .id(ElementId::Name(
+                format!("transition-{transition_id}").into(),
+            ))
+            .absolute()
+            .top(px(8.0))
+            .bottom(px(8.0))
+            .left(px(left_px))
+            .w(px(width_px))
+            .rounded_sm()
+            .bg(gpui::rgb(0x1e1b4b).opacity(0.85))
+            .border_1()
+            .border_color(if is_selected {
+                theme.accent
+            } else {
+                gpui::rgb(0x818cf8).into()
+            })
+            .cursor_pointer()
+            .overflow_hidden()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.selection.clear_selection();
+                this.selected_transition = Some(transition_id);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .size_full()
+                    .px_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_bold()
+                            .text_color(gpui::rgb(0xe0e7ff))
+                            .truncate()
+                            .child(trans_label),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(mono_font)
+                            .text_color(gpui::rgb(0xa5b4fc))
                             .child(duration_text),
                     ),
             )

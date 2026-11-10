@@ -614,4 +614,135 @@ mod tests {
         history.redo(&mut sequence).unwrap();
         assert_eq!(sequence.tracks[0].clips.len(), 3);
     }
+
+    #[core::prelude::v1::test]
+    fn test_inspector_text_overlay_and_transition_state() {
+        use nodavideo_command_system::{AddClip, AddTextOverlay, AddTransition, EditorCommand};
+        use nodavideo_project::AssetId;
+        use nodavideo_timeline::{
+            Clip, ClipId, TextAlignment, TextStyle, Transition, TransitionAlignment, TransitionId,
+            TransitionType,
+        };
+        use workspace::panels::inspector::InspectorPanel;
+        use workspace::panels::timeline::TimelinePanel;
+
+        let mut timeline = TimelinePanel::new();
+        let mut inspector = InspectorPanel::new();
+        let v0_id = timeline.sequence.tracks[0].id;
+        let v1_id = timeline.sequence.tracks[1].id;
+
+        // 1. Add Text Overlay clip to track V0
+        let text_clip_id = ClipId::new();
+        let style = TextStyle {
+            font_family: "Inter".into(),
+            font_size: 44,
+            color: "#ffffff".into(),
+            background_color: Some("#00000088".into()),
+            stroke_color: None,
+            stroke_width: 0,
+            alignment: TextAlignment::Bottom,
+        };
+        let text_clip = Clip::new_text_overlay(
+            text_clip_id,
+            v0_id,
+            "Lower Third: Lead Producer",
+            10,
+            60,
+            style,
+        )
+        .unwrap();
+
+        timeline
+            .history
+            .execute(
+                EditorCommand::AddTextOverlay(AddTextOverlay {
+                    track_id: v0_id,
+                    clip: text_clip,
+                }),
+                &mut timeline.sequence,
+            )
+            .unwrap();
+
+        timeline.selection.select_single(text_clip_id);
+        let selected_clip = timeline.get_selected_clip().unwrap();
+        assert_eq!(selected_clip.id, text_clip_id);
+        assert!(selected_clip.text_overlay.is_some());
+        let overlay = selected_clip.text_overlay.as_ref().unwrap();
+        assert_eq!(overlay.text, "Lower Third: Lead Producer");
+        assert_eq!(overlay.style.alignment, TextAlignment::Bottom);
+
+        // Populate inspector with text overlay clip
+        inspector.selected_clip = Some(selected_clip);
+        assert!(inspector.selected_clip.is_some());
+        assert!(inspector.selected_transition.is_none());
+
+        // 2. Add two clips to V1 and place a crossfade transition across their cut
+        let c1_id = ClipId::new();
+        let c2_id = ClipId::new();
+        let c1 = Clip::new(c1_id, AssetId::new(), v1_id, "Clip A", 0, 0, 48).unwrap();
+        let c2 = Clip::new(c2_id, AssetId::new(), v1_id, "Clip B", 48, 0, 48).unwrap();
+
+        timeline
+            .history
+            .execute(
+                EditorCommand::AddClip(AddClip {
+                    track_id: v1_id,
+                    clip: c1,
+                }),
+                &mut timeline.sequence,
+            )
+            .unwrap();
+        timeline
+            .history
+            .execute(
+                EditorCommand::AddClip(AddClip {
+                    track_id: v1_id,
+                    clip: c2,
+                }),
+                &mut timeline.sequence,
+            )
+            .unwrap();
+
+        let trans_id = TransitionId::new();
+        let transition = Transition::new(
+            trans_id,
+            TransitionType::Crossfade,
+            TransitionAlignment::Centered,
+            c1_id,
+            c2_id,
+            v1_id,
+            48,
+            24,
+        )
+        .unwrap();
+
+        timeline
+            .history
+            .execute(
+                EditorCommand::AddTransition(AddTransition {
+                    track_id: v1_id,
+                    transition,
+                }),
+                &mut timeline.sequence,
+            )
+            .unwrap();
+
+        // 3. Select transition on timeline
+        timeline.selection.clear_selection();
+        timeline.selected_transition = Some(trans_id);
+
+        let selected_trans = timeline.get_selected_transition();
+        assert!(selected_trans.is_some());
+        let trans = selected_trans.unwrap();
+        assert_eq!(trans.id, trans_id);
+        assert_eq!(trans.transition_type, TransitionType::Crossfade);
+        assert_eq!(trans.start_frame(), 36);
+        assert_eq!(trans.end_frame(), 60);
+
+        // Populate inspector with transition
+        inspector.selected_transition = Some(trans);
+        inspector.selected_clip = None;
+        assert!(inspector.selected_transition.is_some());
+        assert!(inspector.selected_clip.is_none());
+    }
 }

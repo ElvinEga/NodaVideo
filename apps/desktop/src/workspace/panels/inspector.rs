@@ -5,16 +5,18 @@ use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::Icon;
 use gpui_kit::component::Theme;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use nodavideo_project::{FrameRate, MediaAsset, MediaAssetStatus};
-use nodavideo_timeline::Clip;
+use nodavideo_timeline::{Clip, TextAlignment, Transition};
 
 /// Inspector view component.
 #[derive(Debug, Default)]
 pub struct InspectorPanel {
     pub selected_asset: Option<MediaAsset>,
     pub selected_clip: Option<Clip>,
+    pub selected_transition: Option<Transition>,
 }
 
 impl InspectorPanel {
@@ -22,18 +24,34 @@ impl InspectorPanel {
         Self {
             selected_asset: None,
             selected_clip: None,
+            selected_transition: None,
         }
     }
 
     pub fn set_selected_asset(&mut self, asset: Option<MediaAsset>, cx: &mut Context<Self>) {
         self.selected_asset = asset;
         self.selected_clip = None;
+        self.selected_transition = None;
         cx.notify();
     }
 
     pub fn set_selected_clip(&mut self, clip: Option<Clip>, cx: &mut Context<Self>) {
         self.selected_clip = clip;
         self.selected_asset = None;
+        self.selected_transition = None;
+        cx.notify();
+    }
+
+    pub fn set_selected_transition(&mut self, trans: Option<Transition>, cx: &mut Context<Self>) {
+        self.selected_transition = trans;
+        self.selected_clip = None;
+        self.selected_asset = None;
+        cx.notify();
+    }
+
+    pub fn clear_timeline_selection(&mut self, cx: &mut Context<Self>) {
+        self.selected_clip = None;
+        self.selected_transition = None;
         cx.notify();
     }
 }
@@ -44,6 +62,8 @@ impl Render for InspectorPanel {
 
         let (header_title, header_subtitle) = if self.selected_clip.is_some() {
             ("Clip Inspector", "Clip Properties")
+        } else if self.selected_transition.is_some() {
+            ("Transition Inspector", "Transition Properties")
         } else if self.selected_asset.is_some() {
             ("Media Inspector", "Asset Metadata")
         } else {
@@ -93,6 +113,9 @@ impl Render for InspectorPanel {
                 // Contextual Body
                 if let Some(ref clip) = self.selected_clip {
                     self.render_clip_properties(clip, &theme).into_any_element()
+                } else if let Some(ref trans) = self.selected_transition {
+                    self.render_transition_properties(trans, &theme)
+                        .into_any_element()
                 } else if let Some(ref asset) = self.selected_asset {
                     self.render_asset_properties(asset, &theme)
                         .into_any_element()
@@ -288,6 +311,108 @@ impl InspectorPanel {
                     ("Stereo Pan", &pan_str),
                     ("Channels", "Stereo (L/R)"),
                     ("Audio Status", audio_status),
+                ],
+                theme,
+            ))
+            .when_some(clip.text_overlay.as_ref(), |this, overlay| {
+                let font_spec = format!(
+                    "{} ({}px)",
+                    overlay.style.font_family, overlay.style.font_size
+                );
+                let align_str = match overlay.style.alignment {
+                    TextAlignment::Top => "Top",
+                    TextAlignment::Center => "Center",
+                    TextAlignment::Bottom => "Bottom",
+                };
+                let bg_color_str = overlay
+                    .style
+                    .background_color
+                    .as_deref()
+                    .unwrap_or("None (Transparent)");
+                let offset_str = format!("X: {}px, Y: {}px", overlay.offset_x, overlay.offset_y);
+                this.child(self.render_section_preview(
+                    "Text & Subtitle Styling",
+                    &[
+                        ("Text Content", &overlay.text),
+                        ("Font Spec", &font_spec),
+                        ("Text Color", &overlay.style.color),
+                        ("Background Box", bg_color_str),
+                        ("Canvas Alignment", align_str),
+                        ("Position Offsets", &offset_str),
+                    ],
+                    theme,
+                ))
+            })
+    }
+
+    fn render_transition_properties(&self, trans: &Transition, theme: &Theme) -> impl IntoElement {
+        let mono_font = theme.mono_font_family.clone();
+        let trans_type_str = format!("{:?}", trans.transition_type);
+        let alignment_str = format!("{:?}", trans.alignment);
+        let duration_str = format!("{} frames", trans.duration_frames);
+        let cut_frame_str = trans.cut_frame.to_string();
+        let range_str = format!("[{} .. {}]", trans.start_frame(), trans.end_frame());
+        let track_str = trans.track_id.to_string();
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .overflow_hidden()
+            .p_3()
+            .gap_3()
+            .child(
+                // Transition Header Summary
+                div()
+                    .flex()
+                    .flex_col()
+                    .p_3()
+                    .rounded_md()
+                    .bg(theme.secondary)
+                    .border_1()
+                    .border_color(theme.border)
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(theme.foreground)
+                                    .truncate()
+                                    .child(format!("{trans_type_str} Transition")),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(theme.accent)
+                                    .text_color(theme.foreground)
+                                    .child("Active"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(mono_font)
+                            .text_color(theme.muted_foreground)
+                            .child(format!("Transition: {}", trans.id)),
+                    ),
+            )
+            .child(self.render_section_preview(
+                "Transition Configuration",
+                &[
+                    ("Transition Effect", &trans_type_str),
+                    ("Cut Alignment", &alignment_str),
+                    ("Duration", &duration_str),
+                    ("Edit Cut Frame", &cut_frame_str),
+                    ("Timeline Range", &range_str),
+                    ("Track ID", &track_str),
                 ],
                 theme,
             ))
