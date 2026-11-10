@@ -3,13 +3,15 @@
 use std::str::FromStr;
 
 use nodavideo_command_system::{
-    AddClip, AddComposition, AddTransition, CommandHistory, DeleteClip, EditorCommand, MoveClip,
-    SetClipAudio, SetClipTransform, SplitClip, StagedChangeset, TrimClip,
+    AddClip, AddComposition, AddTextOverlay, AddTransition, CommandHistory, DeleteClip,
+    EditorCommand, GenerateCaptions, MoveClip, SetClipAudio, SetClipTransform, SplitClip,
+    StagedChangeset, TrimClip,
 };
 use nodavideo_hyperframes_bridge::{Composition, CompositionRenderer, TemplateRegistry};
 use nodavideo_project::{AssetId, MediaType, ProjectDocument};
 use nodavideo_timeline::{
-    Clip, ClipId, Sequence, TrackId, Transition, TransitionAlignment, TransitionId, TransitionType,
+    Clip, ClipId, Sequence, TextAlignment, TextStyle, TrackId, Transition, TransitionAlignment,
+    TransitionId, TransitionType,
 };
 
 use crate::error::McpError;
@@ -912,6 +914,196 @@ impl McpExecutor {
                 }))
             }
 
+            "add_text_overlay" => {
+                let track_id_str =
+                    args.get("track_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| McpError::InvalidArguments {
+                            tool: tool_name.into(),
+                            details: "Missing 'track_id'".into(),
+                        })?;
+                let text = args.get("text").and_then(|v| v.as_str()).ok_or_else(|| {
+                    McpError::InvalidArguments {
+                        tool: tool_name.into(),
+                        details: "Missing 'text'".into(),
+                    }
+                })?;
+                let start_frame = args
+                    .get("start_frame")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| McpError::InvalidArguments {
+                        tool: tool_name.into(),
+                        details: "Missing 'start_frame'".into(),
+                    })?;
+                let duration_frames = args
+                    .get("duration_frames")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(72);
+
+                let track_id =
+                    TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
+                        tool: tool_name.into(),
+                        details: format!("Invalid track UUID: {e}"),
+                    })?;
+
+                let font_family = args
+                    .get("font_family")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Inter")
+                    .to_string();
+                let font_size = args.get("font_size").and_then(|v| v.as_u64()).unwrap_or(48) as u32;
+                let color = args
+                    .get("color")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("#ffffff")
+                    .to_string();
+                let background_color = args
+                    .get("background_color")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                let alignment_str = args
+                    .get("alignment")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("bottom");
+                let alignment = match alignment_str {
+                    "top" => TextAlignment::Top,
+                    "center" => TextAlignment::Center,
+                    _ => TextAlignment::Bottom,
+                };
+
+                let style = TextStyle {
+                    font_family,
+                    font_size,
+                    color,
+                    background_color,
+                    stroke_color: Some("#000000".into()),
+                    stroke_width: 2,
+                    alignment,
+                };
+
+                let clip_id = ClipId::new();
+                let clip = Clip::new_text_overlay(
+                    clip_id,
+                    track_id,
+                    text,
+                    start_frame,
+                    duration_frames,
+                    style,
+                )
+                .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+                let cmd = EditorCommand::AddTextOverlay(AddTextOverlay { track_id, clip });
+                history
+                    .execute(cmd, sequence)
+                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "clip_id": clip_id.to_string(),
+                    "track_id": track_id.to_string(),
+                    "start_frame": start_frame,
+                    "duration_frames": duration_frames,
+                    "text": text,
+                }))
+            }
+
+            "generate_captions" => {
+                let track_id_str =
+                    args.get("track_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| McpError::InvalidArguments {
+                            tool: tool_name.into(),
+                            details: "Missing 'track_id'".into(),
+                        })?;
+                let track_id =
+                    TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
+                        tool: tool_name.into(),
+                        details: format!("Invalid track UUID: {e}"),
+                    })?;
+
+                let captions_arr =
+                    args.get("captions")
+                        .and_then(|v| v.as_array())
+                        .ok_or_else(|| McpError::InvalidArguments {
+                            tool: tool_name.into(),
+                            details: "Missing 'captions' array".into(),
+                        })?;
+
+                let font_size = args.get("font_size").and_then(|v| v.as_u64()).unwrap_or(36) as u32;
+                let color = args
+                    .get("color")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("#ffffff")
+                    .to_string();
+
+                let mut clips = Vec::new();
+                for item in captions_arr {
+                    let text = item.get("text").and_then(|v| v.as_str()).ok_or_else(|| {
+                        McpError::InvalidArguments {
+                            tool: tool_name.into(),
+                            details: "Caption missing 'text'".into(),
+                        }
+                    })?;
+                    let start_frame = item
+                        .get("start_frame")
+                        .and_then(|v| v.as_i64())
+                        .ok_or_else(|| McpError::InvalidArguments {
+                            tool: tool_name.into(),
+                            details: "Caption missing 'start_frame'".into(),
+                        })?;
+                    let end_frame =
+                        item.get("end_frame")
+                            .and_then(|v| v.as_i64())
+                            .ok_or_else(|| McpError::InvalidArguments {
+                                tool: tool_name.into(),
+                                details: "Caption missing 'end_frame'".into(),
+                            })?;
+                    let duration_frames = end_frame - start_frame;
+                    if duration_frames <= 0 {
+                        return Err(McpError::InvalidArguments {
+                            tool: tool_name.into(),
+                            details: format!("Invalid caption timing: {start_frame}..{end_frame}"),
+                        });
+                    }
+
+                    let style = TextStyle {
+                        font_family: "Inter".into(),
+                        font_size,
+                        color: color.clone(),
+                        background_color: Some("#000000b0".into()),
+                        stroke_color: Some("#000000".into()),
+                        stroke_width: 2,
+                        alignment: TextAlignment::Bottom,
+                    };
+                    let clip_id = ClipId::new();
+                    let clip = Clip::new_text_overlay(
+                        clip_id,
+                        track_id,
+                        text,
+                        start_frame,
+                        duration_frames,
+                        style,
+                    )
+                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+                    clips.push(clip);
+                }
+
+                let clip_count = clips.len();
+                let cmd = EditorCommand::GenerateCaptions(GenerateCaptions { track_id, clips });
+
+                history
+                    .execute(cmd, sequence)
+                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "track_id": track_id.to_string(),
+                    "captions_generated": clip_count,
+                }))
+            }
+
             _ => Err(McpError::ToolNotFound(tool_name.to_string())),
         }
     }
@@ -1434,6 +1626,179 @@ fn parse_command_spec(
             Ok(EditorCommand::AddTransition(AddTransition {
                 track_id,
                 transition,
+            }))
+        }
+
+        "add_text_overlay" => {
+            let track_id_str = spec
+                .get("track_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "add_text_overlay".into(),
+                    details: "Missing 'track_id'".into(),
+                })?;
+            let text = spec.get("text").and_then(|v| v.as_str()).ok_or_else(|| {
+                McpError::InvalidArguments {
+                    tool: "add_text_overlay".into(),
+                    details: "Missing 'text'".into(),
+                }
+            })?;
+            let start_frame = spec
+                .get("start_frame")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "add_text_overlay".into(),
+                    details: "Missing 'start_frame'".into(),
+                })?;
+            let duration_frames = spec
+                .get("duration_frames")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(72);
+
+            let track_id =
+                TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "add_text_overlay".into(),
+                    details: format!("Invalid track UUID: {e}"),
+                })?;
+
+            let font_family = spec
+                .get("font_family")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Inter")
+                .to_string();
+            let font_size = spec.get("font_size").and_then(|v| v.as_u64()).unwrap_or(48) as u32;
+            let color = spec
+                .get("color")
+                .and_then(|v| v.as_str())
+                .unwrap_or("#ffffff")
+                .to_string();
+            let background_color = spec
+                .get("background_color")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let alignment_str = spec
+                .get("alignment")
+                .and_then(|v| v.as_str())
+                .unwrap_or("bottom");
+            let alignment = match alignment_str {
+                "top" => TextAlignment::Top,
+                "center" => TextAlignment::Center,
+                _ => TextAlignment::Bottom,
+            };
+
+            let style = TextStyle {
+                font_family,
+                font_size,
+                color,
+                background_color,
+                stroke_color: Some("#000000".into()),
+                stroke_width: 2,
+                alignment,
+            };
+
+            let clip_id = ClipId::new();
+            let clip = Clip::new_text_overlay(
+                clip_id,
+                track_id,
+                text,
+                start_frame,
+                duration_frames,
+                style,
+            )
+            .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+            Ok(EditorCommand::AddTextOverlay(AddTextOverlay {
+                track_id,
+                clip,
+            }))
+        }
+
+        "generate_captions" => {
+            let track_id_str = spec
+                .get("track_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "generate_captions".into(),
+                    details: "Missing 'track_id'".into(),
+                })?;
+            let track_id =
+                TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "generate_captions".into(),
+                    details: format!("Invalid track UUID: {e}"),
+                })?;
+
+            let captions_arr =
+                spec.get("captions")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| McpError::InvalidArguments {
+                        tool: "generate_captions".into(),
+                        details: "Missing 'captions' array".into(),
+                    })?;
+
+            let font_size = spec.get("font_size").and_then(|v| v.as_u64()).unwrap_or(36) as u32;
+            let color = spec
+                .get("color")
+                .and_then(|v| v.as_str())
+                .unwrap_or("#ffffff")
+                .to_string();
+
+            let mut clips = Vec::new();
+            for item in captions_arr {
+                let text = item.get("text").and_then(|v| v.as_str()).ok_or_else(|| {
+                    McpError::InvalidArguments {
+                        tool: "generate_captions".into(),
+                        details: "Caption missing 'text'".into(),
+                    }
+                })?;
+                let start_frame = item
+                    .get("start_frame")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| McpError::InvalidArguments {
+                        tool: "generate_captions".into(),
+                        details: "Caption missing 'start_frame'".into(),
+                    })?;
+                let end_frame =
+                    item.get("end_frame")
+                        .and_then(|v| v.as_i64())
+                        .ok_or_else(|| McpError::InvalidArguments {
+                            tool: "generate_captions".into(),
+                            details: "Caption missing 'end_frame'".into(),
+                        })?;
+                let duration_frames = end_frame - start_frame;
+                if duration_frames <= 0 {
+                    return Err(McpError::InvalidArguments {
+                        tool: "generate_captions".into(),
+                        details: format!("Invalid caption timing: {start_frame}..{end_frame}"),
+                    });
+                }
+
+                let style = TextStyle {
+                    font_family: "Inter".into(),
+                    font_size,
+                    color: color.clone(),
+                    background_color: Some("#000000b0".into()),
+                    stroke_color: Some("#000000".into()),
+                    stroke_width: 2,
+                    alignment: TextAlignment::Bottom,
+                };
+                let clip_id = ClipId::new();
+                let clip = Clip::new_text_overlay(
+                    clip_id,
+                    track_id,
+                    text,
+                    start_frame,
+                    duration_frames,
+                    style,
+                )
+                .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+                clips.push(clip);
+            }
+
+            Ok(EditorCommand::GenerateCaptions(GenerateCaptions {
+                track_id,
+                clips,
             }))
         }
 

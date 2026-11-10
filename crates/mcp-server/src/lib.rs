@@ -419,4 +419,120 @@ mod tests {
         assert_eq!(undone, Some("Add Crossfade Transition".to_string()));
         assert_eq!(sequence.tracks[1].transitions.len(), 0);
     }
+
+    #[test]
+    fn test_add_text_overlay_and_generate_captions_tools() {
+        let project = ProjectDocument::new("Test Project");
+        let mut sequence = Sequence::default_1080p24();
+        let mut history = CommandHistory::new(10);
+        let v0_id = sequence.tracks[0].id;
+
+        // 1. Add Text Overlay
+        let overlay_res = McpExecutor::execute(
+            "add_text_overlay",
+            &serde_json::json!({
+                "track_id": v0_id.to_string(),
+                "text": "Welcome to NodaVideo",
+                "start_frame": 12,
+                "duration_frames": 48,
+                "font_family": "Inter",
+                "font_size": 48,
+                "color": "#ffffff",
+                "alignment": "bottom"
+            }),
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        )
+        .expect("add_text_overlay should succeed");
+
+        assert_eq!(overlay_res["status"], "success");
+        assert_eq!(overlay_res["text"], "Welcome to NodaVideo");
+        assert_eq!(sequence.tracks[0].clips.len(), 1);
+
+        let clip = &sequence.tracks[0].clips[0];
+        assert_eq!(clip.start_frame, 12);
+        assert_eq!(clip.duration_frames(), 48);
+        let overlay = clip
+            .text_overlay
+            .as_ref()
+            .expect("text overlay should exist");
+        assert_eq!(overlay.text, "Welcome to NodaVideo");
+
+        // Undo & redo text overlay
+        assert!(history.can_undo());
+        let undone = history.undo(&mut sequence).unwrap();
+        assert_eq!(
+            undone,
+            Some("Add Text Overlay 'Text: Welcome to NodaVideo'".to_string())
+        );
+        assert_eq!(sequence.tracks[0].clips.len(), 0);
+
+        let redone = history.redo(&mut sequence).unwrap();
+        assert_eq!(
+            redone,
+            Some("Add Text Overlay 'Text: Welcome to NodaVideo'".to_string())
+        );
+        assert_eq!(sequence.tracks[0].clips.len(), 1);
+
+        // 2. Generate Subtitle Captions
+        let captions_res = McpExecutor::execute(
+            "generate_captions",
+            &serde_json::json!({
+                "track_id": v0_id.to_string(),
+                "captions": [
+                    { "text": "First caption line", "start_frame": 100, "end_frame": 150 },
+                    { "text": "Second caption line", "start_frame": 160, "end_frame": 220 }
+                ],
+                "font_size": 36,
+                "color": "#ffff00"
+            }),
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        )
+        .expect("generate_captions should succeed");
+
+        assert_eq!(captions_res["status"], "success");
+        assert_eq!(captions_res["captions_generated"], 2);
+        assert_eq!(sequence.tracks[0].clips.len(), 3);
+
+        // Undo removes both captions atomically
+        let undone_captions = history.undo(&mut sequence).unwrap();
+        assert_eq!(undone_captions, Some("Generate 2 Captions".to_string()));
+        assert_eq!(sequence.tracks[0].clips.len(), 1);
+
+        // Redo restores both captions
+        let redone_captions = history.redo(&mut sequence).unwrap();
+        assert_eq!(redone_captions, Some("Generate 2 Captions".to_string()));
+        assert_eq!(sequence.tracks[0].clips.len(), 3);
+
+        // 3. Propose Changeset with text overlay and captions
+        let changeset_res = McpExecutor::execute(
+            "propose_changeset",
+            &serde_json::json!({
+                "title": "Add Lower Third and Auto-Captions",
+                "description": "Auto-generated subtitle track",
+                "commands": [
+                    {
+                        "tool": "add_text_overlay",
+                        "track_id": v0_id.to_string(),
+                        "text": "Chapter 2: Conclusion",
+                        "start_frame": 250,
+                        "duration_frames": 50
+                    }
+                ]
+            }),
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        )
+        .expect("propose_changeset with add_text_overlay should succeed");
+
+        assert_eq!(changeset_res["status"], "committed");
+        assert_eq!(sequence.tracks[0].clips.len(), 4);
+    }
 }

@@ -307,6 +307,61 @@ impl McpToolDefinition {
                 is_mutation: true,
                 requires_approval: false,
             },
+            Self {
+                name: "add_text_overlay".into(),
+                description: "Add a stylized text overlay, title, or lower-third caption to a video track.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "track_id": { "type": "string", "description": "UUID of track to place text overlay on (recommended: upper video track)" },
+                        "text": { "type": "string", "description": "Text content to display" },
+                        "start_frame": { "type": "integer", "minimum": 0, "description": "Timeline position in frames where text starts" },
+                        "duration_frames": { "type": "integer", "minimum": 1, "description": "Duration in frames (default: 72)" },
+                        "font_family": { "type": "string", "description": "Font family name (default: Inter)" },
+                        "font_size": { "type": "integer", "minimum": 8, "description": "Font size in canvas pixels (default: 48)" },
+                        "color": { "type": "string", "description": "Hex text color (default: #ffffff)" },
+                        "background_color": { "type": "string", "description": "Optional background box hex color (e.g. #00000088)" },
+                        "alignment": {
+                            "type": "string",
+                            "enum": ["top", "center", "bottom"],
+                            "description": "Screen alignment (default: bottom)"
+                        }
+                    },
+                    "required": ["track_id", "text", "start_frame"],
+                    "additionalProperties": false
+                }),
+                is_mutation: true,
+                requires_approval: false,
+            },
+            Self {
+                name: "generate_captions".into(),
+                description: "Batch generate timed subtitle caption clips on a track from transcript segments.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "track_id": { "type": "string", "description": "UUID of track for subtitles (e.g. V2)" },
+                        "captions": {
+                            "type": "array",
+                            "description": "Array of timed subtitle captions",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "text": { "type": "string" },
+                                    "start_frame": { "type": "integer", "minimum": 0 },
+                                    "end_frame": { "type": "integer", "minimum": 1 }
+                                },
+                                "required": ["text", "start_frame", "end_frame"]
+                            }
+                        },
+                        "font_size": { "type": "integer", "description": "Font size in pixels (default: 36)" },
+                        "color": { "type": "string", "description": "Hex text color (default: #ffffff)" }
+                    },
+                    "required": ["track_id", "captions"],
+                    "additionalProperties": false
+                }),
+                is_mutation: true,
+                requires_approval: false,
+            },
         ]
     }
 }

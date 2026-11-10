@@ -12,6 +12,7 @@ pub mod id;
 pub mod selection;
 pub mod sequence;
 pub mod snap;
+pub mod text;
 pub mod track;
 pub mod transition;
 
@@ -21,6 +22,7 @@ pub use id::{ClipId, SequenceId, TrackId, TransitionId};
 pub use selection::TimelineSelection;
 pub use sequence::Sequence;
 pub use snap::{SnapResult, SnapTarget, snap_clip_move, snap_frame};
+pub use text::{CaptionSegment, TextAlignment, TextOverlay, TextStyle};
 pub use track::{Track, TrackType};
 pub use transition::{Transition, TransitionAlignment, TransitionType};
 
@@ -400,5 +402,53 @@ mod tests {
         assert_eq!(sequence.tracks[1].transitions.len(), 1);
         sequence.delete_clip(clip1_id).unwrap();
         assert_eq!(sequence.tracks[1].transitions.len(), 0);
+    }
+
+    #[test]
+    fn test_text_overlay_and_captions() {
+        let mut sequence = Sequence::default_1080p24();
+        let v2_id = sequence.tracks[0].id; // Upper track for subtitles/titles
+
+        // 1. Create text overlay clip
+        let text_clip_id = ClipId::new();
+        let custom_style = TextStyle {
+            font_family: "Roboto".into(),
+            font_size: 64,
+            color: "#ffff00".into(),
+            background_color: Some("#000000aa".into()),
+            stroke_color: Some("#000000".into()),
+            stroke_width: 3,
+            alignment: TextAlignment::Center,
+        };
+
+        let text_clip = Clip::new_text_overlay(
+            text_clip_id,
+            v2_id,
+            "Episode 1: The Beginning",
+            24,
+            72,
+            custom_style,
+        )
+        .unwrap();
+
+        assert_eq!(text_clip.start_frame, 24);
+        assert_eq!(text_clip.duration_frames(), 72);
+        assert!(text_clip.text_overlay.is_some());
+        let overlay = text_clip.text_overlay.as_ref().unwrap();
+        assert_eq!(overlay.text, "Episode 1: The Beginning");
+        assert_eq!(overlay.style.font_size, 64);
+        assert_eq!(overlay.style.color, "#ffff00");
+        assert_eq!(overlay.style.alignment, TextAlignment::Center);
+
+        sequence.add_clip(v2_id, text_clip).unwrap();
+        assert_eq!(sequence.tracks[0].clips.len(), 1);
+
+        // 2. Splitting a text clip retains overlay attributes
+        let clip_to_split = sequence.tracks[0].clips[0].clone();
+        let (left, right) = clip_to_split.split(48, ClipId::new()).unwrap();
+        assert!(left.text_overlay.is_some());
+        assert!(right.text_overlay.is_some());
+        assert_eq!(left.text_overlay.unwrap().text, "Episode 1: The Beginning");
+        assert_eq!(right.text_overlay.unwrap().text, "Episode 1: The Beginning");
     }
 }

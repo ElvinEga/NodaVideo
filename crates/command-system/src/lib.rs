@@ -9,9 +9,9 @@ pub mod history;
 pub mod staged;
 
 pub use command::{
-    AddClip, AddComposition, AddTrack, AddTransition, BatchCommand, DeleteClip, DeleteTrack,
-    EditorCommand, MoveClip, RemoveTransition, SetClipAudio, SetClipTransform, SplitClip,
-    ToggleLock, ToggleMute, ToggleSolo, TrimClip, UnsplitClip,
+    AddClip, AddComposition, AddTextOverlay, AddTrack, AddTransition, BatchCommand, DeleteClip,
+    DeleteTrack, EditorCommand, GenerateCaptions, MoveClip, RemoveTransition, SetClipAudio,
+    SetClipTransform, SplitClip, ToggleLock, ToggleMute, ToggleSolo, TrimClip, UnsplitClip,
 };
 pub use error::CommandError;
 pub use history::{CommandHistory, HistoryEntry};
@@ -380,5 +380,77 @@ mod tests {
         // 5. Undo RemoveTransition
         history.undo(&mut sequence).unwrap();
         assert_eq!(sequence.tracks[1].transitions.len(), 1);
+    }
+
+    #[test]
+    fn test_add_text_overlay_and_generate_captions_undo_redo() {
+        use nodavideo_timeline::TextStyle;
+
+        let mut sequence = Sequence::default_1080p24();
+        let mut history = CommandHistory::new(10);
+        let v2_id = sequence.tracks[0].id; // Subtitle / graphics track
+
+        // 1. AddTextOverlay
+        let text_clip = Clip::new_text_overlay(
+            ClipId::new(),
+            v2_id,
+            "Breaking News",
+            0,
+            48,
+            TextStyle::default(),
+        )
+        .unwrap();
+
+        let add_text_cmd = EditorCommand::AddTextOverlay(AddTextOverlay {
+            track_id: v2_id,
+            clip: text_clip,
+        });
+        history.execute(add_text_cmd, &mut sequence).unwrap();
+        assert_eq!(sequence.tracks[0].clips.len(), 1);
+        assert_eq!(
+            sequence.tracks[0].clips[0]
+                .text_overlay
+                .as_ref()
+                .unwrap()
+                .text,
+            "Breaking News"
+        );
+
+        // Undo AddTextOverlay
+        history.undo(&mut sequence).unwrap();
+        assert_eq!(sequence.tracks[0].clips.len(), 0);
+
+        // 2. GenerateCaptions batch
+        let cap1 = Clip::new_text_overlay(
+            ClipId::new(),
+            v2_id,
+            "Welcome to NodaVideo",
+            0,
+            24,
+            TextStyle::default(),
+        )
+        .unwrap();
+        let cap2 = Clip::new_text_overlay(
+            ClipId::new(),
+            v2_id,
+            "The open source editor",
+            24,
+            24,
+            TextStyle::default(),
+        )
+        .unwrap();
+
+        let gen_cmd = EditorCommand::GenerateCaptions(GenerateCaptions {
+            track_id: v2_id,
+            clips: vec![cap1, cap2],
+        });
+        history.execute(gen_cmd, &mut sequence).unwrap();
+        assert_eq!(sequence.tracks[0].clips.len(), 2);
+        assert_eq!(sequence.duration_frames(), 48);
+
+        // Undo GenerateCaptions removes all generated caption clips
+        history.undo(&mut sequence).unwrap();
+        assert_eq!(sequence.tracks[0].clips.len(), 0);
+        assert_eq!(sequence.duration_frames(), 0);
     }
 }

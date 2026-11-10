@@ -528,4 +528,90 @@ mod tests {
         history.redo(&mut sequence).unwrap();
         assert_eq!(sequence.tracks[1].transitions.len(), 1);
     }
+
+    #[core::prelude::v1::test]
+    fn test_mcp_text_overlay_and_captions_workflow() {
+        use nodavideo_command_system::CommandHistory;
+        use nodavideo_mcp_server::McpExecutor;
+        use nodavideo_project::ProjectDocument;
+        use nodavideo_timeline::Sequence;
+        use serde_json::json;
+
+        let project = ProjectDocument::new("Subtitles & Titles Test");
+        let mut sequence = Sequence::default_1080p24();
+        let mut history = CommandHistory::new(10);
+        let v0_id = sequence.tracks[0].id.to_string();
+
+        // 1. Add Text Overlay (e.g. Title Header)
+        let title_res = McpExecutor::execute(
+            "add_text_overlay",
+            &json!({
+                "track_id": v0_id,
+                "text": "NodaVideo Premiere Showcase",
+                "start_frame": 0,
+                "duration_frames": 72,
+                "font_family": "Inter",
+                "font_size": 52,
+                "color": "#00f0ff",
+                "alignment": "top"
+            }),
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        )
+        .expect("add_text_overlay should succeed");
+
+        assert_eq!(title_res["status"], "success");
+        assert_eq!(sequence.tracks[0].clips.len(), 1);
+        let title_clip = &sequence.tracks[0].clips[0];
+        assert_eq!(
+            title_clip.text_overlay.as_ref().unwrap().text,
+            "NodaVideo Premiere Showcase"
+        );
+
+        // 2. Add Auto-Captions on same overlay track
+        let captions_res = McpExecutor::execute(
+            "generate_captions",
+            &json!({
+                "track_id": v0_id,
+                "captions": [
+                    { "text": "Welcome to our AI desktop editor.", "start_frame": 80, "end_frame": 140 },
+                    { "text": "Every edit is deterministic and undoable.", "start_frame": 150, "end_frame": 220 }
+                ],
+                "font_size": 34,
+                "color": "#ffffff"
+            }),
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        )
+        .expect("generate_captions should succeed");
+
+        assert_eq!(captions_res["status"], "success");
+        assert_eq!(captions_res["captions_generated"], 2);
+        assert_eq!(sequence.tracks[0].clips.len(), 3);
+
+        // 3. Test Undo stack
+        assert!(history.can_undo());
+        let undone_captions = history.undo(&mut sequence).unwrap();
+        assert_eq!(undone_captions, Some("Generate 2 Captions".to_string()));
+        assert_eq!(sequence.tracks[0].clips.len(), 1);
+
+        let undone_title = history.undo(&mut sequence).unwrap();
+        assert_eq!(
+            undone_title,
+            Some("Add Text Overlay 'Text: NodaVideo Premiere S'".to_string())
+        );
+        assert_eq!(sequence.tracks[0].clips.len(), 0);
+
+        // 4. Test Redo stack
+        assert!(history.can_redo());
+        history.redo(&mut sequence).unwrap();
+        assert_eq!(sequence.tracks[0].clips.len(), 1);
+
+        history.redo(&mut sequence).unwrap();
+        assert_eq!(sequence.tracks[0].clips.len(), 3);
+    }
 }

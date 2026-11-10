@@ -146,6 +146,12 @@ impl StagedChangeset {
                 EditorCommand::RemoveTransition(c) => {
                     affected_tracks.insert(c.track_id);
                 }
+                EditorCommand::AddTextOverlay(c) => {
+                    affected_tracks.insert(c.track_id);
+                }
+                EditorCommand::GenerateCaptions(c) => {
+                    affected_tracks.insert(c.track_id);
+                }
                 EditorCommand::Batch(_) => {}
             }
         }

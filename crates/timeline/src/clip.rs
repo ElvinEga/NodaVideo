@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::TimelineError;
 use crate::id::{ClipId, TrackId};
+use crate::text::{TextOverlay, TextStyle};
 
 /// Spatial and visual transform properties for a video/image/composition clip.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -135,6 +136,9 @@ pub struct Clip {
     /// Audio level and panning attributes.
     #[serde(default)]
     pub audio_params: ClipAudioParams,
+    /// Optional text overlay and caption attributes.
+    #[serde(default)]
+    pub text_overlay: Option<TextOverlay>,
 }
 
 impl Clip {
@@ -169,7 +173,32 @@ impl Clip {
             enabled: true,
             transform: ClipTransform::default(),
             audio_params: ClipAudioParams::default(),
+            text_overlay: None,
         })
+    }
+
+    /// Create a new clip hosting a text overlay or subtitle.
+    pub fn new_text_overlay(
+        id: ClipId,
+        track_id: TrackId,
+        text: impl Into<String>,
+        start_frame: i64,
+        duration_frames: i64,
+        style: TextStyle,
+    ) -> Result<Self, TimelineError> {
+        let text_str = text.into();
+        let label = format!("Text: {}", text_str.chars().take(20).collect::<String>());
+        let mut clip = Self::new(
+            id,
+            AssetId::new(),
+            track_id,
+            label,
+            start_frame,
+            0,
+            duration_frames,
+        )?;
+        clip.text_overlay = Some(TextOverlay::with_style(text_str, style));
+        Ok(clip)
     }
 
     /// Derived duration of the clip in integer frames.
@@ -276,6 +305,7 @@ impl Clip {
             enabled: self.enabled,
             transform: self.transform,
             audio_params: self.audio_params,
+            text_overlay: self.text_overlay.clone(),
         };
 
         let right = Self {
@@ -289,6 +319,7 @@ impl Clip {
             enabled: self.enabled,
             transform: self.transform,
             audio_params: self.audio_params,
+            text_overlay: self.text_overlay.clone(),
         };
 
         Ok((left, right))

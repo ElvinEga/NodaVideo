@@ -140,6 +140,20 @@ pub struct RemoveTransition {
     pub transition: Transition,
 }
 
+/// Parameters for adding a text overlay or title clip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddTextOverlay {
+    pub track_id: TrackId,
+    pub clip: Clip,
+}
+
+/// Parameters for batch adding timed subtitle caption clips to a track.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerateCaptions {
+    pub track_id: TrackId,
+    pub clips: Vec<Clip>,
+}
+
 /// Canonical editor commands governing all project and timeline mutations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EditorCommand {
@@ -160,6 +174,8 @@ pub enum EditorCommand {
     SetClipAudio(SetClipAudio),
     AddTransition(AddTransition),
     RemoveTransition(RemoveTransition),
+    AddTextOverlay(AddTextOverlay),
+    GenerateCaptions(GenerateCaptions),
 }
 
 impl EditorCommand {
@@ -189,6 +205,8 @@ impl EditorCommand {
             Self::RemoveTransition(cmd) => {
                 format!("Remove {:?} Transition", cmd.transition.transition_type)
             }
+            Self::AddTextOverlay(cmd) => format!("Add Text Overlay '{}'", cmd.clip.name),
+            Self::GenerateCaptions(cmd) => format!("Generate {} Captions", cmd.clips.len()),
         }
     }
 
@@ -272,6 +290,27 @@ impl EditorCommand {
                 track_id: cmd.track_id,
                 transition: cmd.transition.clone(),
             }),
+            Self::AddTextOverlay(cmd) => Self::DeleteClip(DeleteClip {
+                track_id: cmd.track_id,
+                clip: cmd.clip.clone(),
+            }),
+            Self::GenerateCaptions(cmd) => {
+                let inverse_commands = cmd
+                    .clips
+                    .iter()
+                    .rev()
+                    .map(|c| {
+                        Self::DeleteClip(DeleteClip {
+                            track_id: cmd.track_id,
+                            clip: c.clone(),
+                        })
+                    })
+                    .collect();
+                Self::Batch(BatchCommand {
+                    name: format!("Undo Generate {} Captions", cmd.clips.len()),
+                    commands: inverse_commands,
+                })
+            }
         }
     }
 
@@ -376,6 +415,14 @@ impl EditorCommand {
             }
             Self::RemoveTransition(cmd) => {
                 sequence.remove_transition(cmd.transition.id)?;
+            }
+            Self::AddTextOverlay(cmd) => {
+                sequence.add_clip(cmd.track_id, cmd.clip.clone())?;
+            }
+            Self::GenerateCaptions(cmd) => {
+                for c in &cmd.clips {
+                    sequence.add_clip(cmd.track_id, c.clone())?;
+                }
             }
         }
         Ok(())
