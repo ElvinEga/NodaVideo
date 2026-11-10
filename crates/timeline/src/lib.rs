@@ -14,7 +14,7 @@ pub mod sequence;
 pub mod snap;
 pub mod track;
 
-pub use clip::Clip;
+pub use clip::{Clip, ClipAudioParams, ClipTransform};
 pub use error::TimelineError;
 pub use id::{ClipId, SequenceId, TrackId};
 pub use selection::TimelineSelection;
@@ -253,5 +253,78 @@ mod tests {
         assert_eq!(loaded_seq.tracks.len(), 4);
         assert_eq!(loaded_seq.tracks[1].clips.len(), 1);
         assert_eq!(loaded_seq.tracks[1].clips[0].duration_frames(), 120);
+    }
+
+    #[test]
+    fn test_clip_transform_and_audio_parameters() {
+        let mut clip = test_clip(ClipId::new(), AssetId::new(), TrackId::new(), 0, 0, 48);
+        assert!(clip.transform.is_identity());
+        assert!(clip.audio_params.is_default());
+        assert_eq!(clip.transform.opacity, 1.0);
+        assert_eq!(clip.transform.scale_x, 1.0);
+        assert_eq!(clip.audio_params.volume_db, 0.0);
+
+        // Update transform
+        let transform = ClipTransform {
+            position_x: 120.0,
+            position_y: -45.0,
+            scale_x: 1.5,
+            scale_y: 1.5,
+            rotation_degrees: 45.0,
+            opacity: 0.85,
+        };
+        clip.set_transform(transform);
+        assert!(!clip.transform.is_identity());
+        assert_eq!(clip.transform.position_x, 120.0);
+        assert_eq!(clip.transform.position_y, -45.0);
+        assert_eq!(clip.transform.opacity, 0.85);
+
+        // Clamping check
+        let unclamped = ClipTransform {
+            position_x: 0.0,
+            position_y: 0.0,
+            scale_x: 0.0,
+            scale_y: -1.0,
+            rotation_degrees: 390.0,
+            opacity: 1.5,
+        };
+        clip.set_transform(unclamped);
+        assert_eq!(clip.transform.opacity, 1.0);
+        assert_eq!(clip.transform.scale_x, 0.001);
+        assert_eq!(clip.transform.rotation_degrees, 30.0);
+
+        // Reset transform
+        clip.reset_transform();
+        assert!(clip.transform.is_identity());
+
+        // Update audio params
+        let audio = ClipAudioParams {
+            volume_db: -6.0,
+            pan: -0.5,
+        };
+        clip.set_audio_params(audio);
+        assert!(!clip.audio_params.is_default());
+        assert_eq!(clip.audio_params.volume_db, -6.0);
+        assert_eq!(clip.audio_params.pan, -0.5);
+
+        // Audio clamping
+        clip.set_audio_params(ClipAudioParams {
+            volume_db: 50.0,
+            pan: -2.0,
+        });
+        assert_eq!(clip.audio_params.volume_db, 24.0);
+        assert_eq!(clip.audio_params.pan, -1.0);
+
+        clip.reset_audio_params();
+        assert!(clip.audio_params.is_default());
+
+        // Splitting preserves transform and audio params
+        clip.set_transform(transform);
+        clip.set_audio_params(audio);
+        let (left, right) = clip.split(24, ClipId::new()).unwrap();
+        assert_eq!(left.transform, transform);
+        assert_eq!(right.transform, transform);
+        assert_eq!(left.audio_params, audio);
+        assert_eq!(right.audio_params, audio);
     }
 }

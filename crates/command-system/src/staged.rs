@@ -130,6 +130,16 @@ impl StagedChangeset {
                 EditorCommand::AddComposition(c) => {
                     affected_tracks.insert(c.track_id);
                 }
+                EditorCommand::SetClipTransform(c) => {
+                    if let Some(track) = original.find_track_for_clip(c.clip_id) {
+                        affected_tracks.insert(track.id);
+                    }
+                }
+                EditorCommand::SetClipAudio(c) => {
+                    if let Some(track) = original.find_track_for_clip(c.clip_id) {
+                        affected_tracks.insert(track.id);
+                    }
+                }
                 EditorCommand::Batch(_) => {}
             }
         }

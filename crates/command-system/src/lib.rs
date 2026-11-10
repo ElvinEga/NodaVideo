@@ -10,7 +10,8 @@ pub mod staged;
 
 pub use command::{
     AddClip, AddComposition, AddTrack, BatchCommand, DeleteClip, DeleteTrack, EditorCommand,
-    MoveClip, SplitClip, ToggleLock, ToggleMute, ToggleSolo, TrimClip, UnsplitClip,
+    MoveClip, SetClipAudio, SetClipTransform, SplitClip, ToggleLock, ToggleMute, ToggleSolo,
+    TrimClip, UnsplitClip,
 };
 pub use error::CommandError;
 pub use history::{CommandHistory, HistoryEntry};
@@ -241,5 +242,68 @@ mod tests {
         history.undo(&mut sequence).unwrap();
         assert_eq!(sequence.tracks[0].clips.len(), 0);
         assert_eq!(sequence.duration_frames(), 0);
+    }
+
+    #[test]
+    fn test_set_clip_transform_and_audio_undo_redo() {
+        use nodavideo_timeline::{ClipAudioParams, ClipTransform};
+
+        let mut sequence = Sequence::default_1080p24();
+        let mut history = CommandHistory::new(10);
+        let track_id = sequence.tracks[1].id;
+        let clip_id = ClipId::new();
+
+        let clip = Clip::new(clip_id, AssetId::new(), track_id, "Video Clip", 0, 0, 48).unwrap();
+        history
+            .execute(
+                EditorCommand::AddClip(AddClip { track_id, clip }),
+                &mut sequence,
+            )
+            .unwrap();
+
+        let initial_transform = sequence.tracks[1].clips[0].transform;
+        let target_transform = ClipTransform {
+            position_x: 200.0,
+            position_y: 100.0,
+            scale_x: 1.25,
+            scale_y: 1.25,
+            rotation_degrees: 90.0,
+            opacity: 0.75,
+        };
+
+        // 1. Execute SetClipTransform
+        let transform_cmd = EditorCommand::SetClipTransform(SetClipTransform {
+            clip_id,
+            old_transform: initial_transform,
+            new_transform: target_transform,
+        });
+        history.execute(transform_cmd, &mut sequence).unwrap();
+        assert_eq!(sequence.tracks[1].clips[0].transform, target_transform);
+
+        // 2. Undo SetClipTransform
+        history.undo(&mut sequence).unwrap();
+        assert_eq!(sequence.tracks[1].clips[0].transform, initial_transform);
+
+        // 3. Redo SetClipTransform
+        history.redo(&mut sequence).unwrap();
+        assert_eq!(sequence.tracks[1].clips[0].transform, target_transform);
+
+        // 4. Execute SetClipAudio
+        let initial_audio = sequence.tracks[1].clips[0].audio_params;
+        let target_audio = ClipAudioParams {
+            volume_db: -12.0,
+            pan: 0.4,
+        };
+        let audio_cmd = EditorCommand::SetClipAudio(SetClipAudio {
+            clip_id,
+            old_audio: initial_audio,
+            new_audio: target_audio,
+        });
+        history.execute(audio_cmd, &mut sequence).unwrap();
+        assert_eq!(sequence.tracks[1].clips[0].audio_params, target_audio);
+
+        // 5. Undo SetClipAudio
+        history.undo(&mut sequence).unwrap();
+        assert_eq!(sequence.tracks[1].clips[0].audio_params, initial_audio);
     }
 }

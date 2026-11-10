@@ -256,6 +256,12 @@ impl TimelinePanel {
         cx.notify();
     }
 
+    /// Return the currently primary-selected clip on the timeline, if any.
+    pub fn get_selected_clip(&self) -> Option<Clip> {
+        let clip_id = self.selection.primary_selected()?;
+        self.sequence.get_clip(clip_id).cloned()
+    }
+
     /// Trim selected clip in-point by delta frames.
     pub fn trim_selected_in(&mut self, delta_frames: i64, cx: &mut Context<Self>) {
         let Some(clip_id) = self.selection.primary_selected() else {

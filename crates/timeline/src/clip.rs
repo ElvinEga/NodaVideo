@@ -6,6 +6,110 @@ use serde::{Deserialize, Serialize};
 use crate::error::TimelineError;
 use crate::id::{ClipId, TrackId};
 
+/// Spatial and visual transform properties for a video/image/composition clip.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ClipTransform {
+    /// Horizontal translation offset in pixels (0.0 = centered).
+    pub position_x: f64,
+    /// Vertical translation offset in pixels (0.0 = centered).
+    pub position_y: f64,
+    /// Scale factor along horizontal axis (1.0 = 100%).
+    pub scale_x: f64,
+    /// Scale factor along vertical axis (1.0 = 100%).
+    pub scale_y: f64,
+    /// Rotation in degrees clockwise.
+    pub rotation_degrees: f64,
+    /// Visual opacity (0.0 to 1.0).
+    pub opacity: f64,
+}
+
+impl Default for ClipTransform {
+    fn default() -> Self {
+        Self {
+            position_x: 0.0,
+            position_y: 0.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            rotation_degrees: 0.0,
+            opacity: 1.0,
+        }
+    }
+}
+
+impl Eq for ClipTransform {}
+impl PartialEq for ClipTransform {
+    fn eq(&self, other: &Self) -> bool {
+        self.position_x.to_bits() == other.position_x.to_bits()
+            && self.position_y.to_bits() == other.position_y.to_bits()
+            && self.scale_x.to_bits() == other.scale_x.to_bits()
+            && self.scale_y.to_bits() == other.scale_y.to_bits()
+            && self.rotation_degrees.to_bits() == other.rotation_degrees.to_bits()
+            && self.opacity.to_bits() == other.opacity.to_bits()
+    }
+}
+
+impl ClipTransform {
+    /// Whether this transform is identical to the default identity state.
+    pub fn is_identity(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// Return a clamped version ensuring opacity is within [0.0, 1.0].
+    #[must_use]
+    pub fn clamped(&self) -> Self {
+        Self {
+            position_x: self.position_x,
+            position_y: self.position_y,
+            scale_x: self.scale_x.max(0.001),
+            scale_y: self.scale_y.max(0.001),
+            rotation_degrees: self.rotation_degrees % 360.0,
+            opacity: self.opacity.clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// Audio properties for a clip segment.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ClipAudioParams {
+    /// Volume gain in decibels (0.0 = unity gain, negative = attenuate, positive = boost).
+    pub volume_db: f64,
+    /// Stereo panning (-1.0 = full left, 0.0 = center, +1.0 = full right).
+    pub pan: f64,
+}
+
+impl Default for ClipAudioParams {
+    fn default() -> Self {
+        Self {
+            volume_db: 0.0,
+            pan: 0.0,
+        }
+    }
+}
+
+impl Eq for ClipAudioParams {}
+impl PartialEq for ClipAudioParams {
+    fn eq(&self, other: &Self) -> bool {
+        self.volume_db.to_bits() == other.volume_db.to_bits()
+            && self.pan.to_bits() == other.pan.to_bits()
+    }
+}
+
+impl ClipAudioParams {
+    /// Whether this audio parameter is identical to the default unity gain & center pan.
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// Return a clamped version ensuring pan is within [-1.0, 1.0] and volume within [-100.0, 24.0] dB.
+    #[must_use]
+    pub fn clamped(&self) -> Self {
+        Self {
+            volume_db: self.volume_db.clamp(-100.0, 24.0),
+            pan: self.pan.clamp(-1.0, 1.0),
+        }
+    }
+}
+
 /// Placed segment of a media asset positioned on a timeline track.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Clip {
@@ -25,6 +129,12 @@ pub struct Clip {
     pub source_out: i64,
     /// Whether the clip is active and audible/visible.
     pub enabled: bool,
+    /// Spatial and visual transform attributes.
+    #[serde(default)]
+    pub transform: ClipTransform,
+    /// Audio level and panning attributes.
+    #[serde(default)]
+    pub audio_params: ClipAudioParams,
 }
 
 impl Clip {
@@ -57,6 +167,8 @@ impl Clip {
             source_in,
             source_out,
             enabled: true,
+            transform: ClipTransform::default(),
+            audio_params: ClipAudioParams::default(),
         })
     }
 
@@ -162,6 +274,8 @@ impl Clip {
             source_in: self.source_in,
             source_out: mid_source,
             enabled: self.enabled,
+            transform: self.transform,
+            audio_params: self.audio_params,
         };
 
         let right = Self {
@@ -173,8 +287,30 @@ impl Clip {
             source_in: mid_source,
             source_out: self.source_out,
             enabled: self.enabled,
+            transform: self.transform,
+            audio_params: self.audio_params,
         };
 
         Ok((left, right))
+    }
+
+    /// Update spatial and visual transform attributes.
+    pub fn set_transform(&mut self, transform: ClipTransform) {
+        self.transform = transform.clamped();
+    }
+
+    /// Reset spatial transform back to identity.
+    pub fn reset_transform(&mut self) {
+        self.transform = ClipTransform::default();
+    }
+
+    /// Update audio volume and panning attributes.
+    pub fn set_audio_params(&mut self, audio_params: ClipAudioParams) {
+        self.audio_params = audio_params.clamped();
+    }
+
+    /// Reset audio parameters back to defaults (0.0 dB, 0 pan).
+    pub fn reset_audio_params(&mut self) {
+        self.audio_params = ClipAudioParams::default();
     }
 }

@@ -1,6 +1,8 @@
 //! Canonical EditorCommand domain representation and execution.
 
-use nodavideo_timeline::{Clip, ClipId, Sequence, TimelineError, Track, TrackId};
+use nodavideo_timeline::{
+    Clip, ClipAudioParams, ClipId, ClipTransform, Sequence, TimelineError, Track, TrackId,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::CommandError;
@@ -107,6 +109,22 @@ pub struct AddComposition {
     pub template_id: String,
 }
 
+/// Parameters for updating clip spatial and visual transform attributes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetClipTransform {
+    pub clip_id: ClipId,
+    pub old_transform: ClipTransform,
+    pub new_transform: ClipTransform,
+}
+
+/// Parameters for updating clip audio volume and panning attributes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetClipAudio {
+    pub clip_id: ClipId,
+    pub old_audio: ClipAudioParams,
+    pub new_audio: ClipAudioParams,
+}
+
 /// Canonical editor commands governing all project and timeline mutations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EditorCommand {
@@ -123,6 +141,8 @@ pub enum EditorCommand {
     ToggleLock(ToggleLock),
     Batch(BatchCommand),
     AddComposition(AddComposition),
+    SetClipTransform(SetClipTransform),
+    SetClipAudio(SetClipAudio),
 }
 
 impl EditorCommand {
@@ -142,6 +162,10 @@ impl EditorCommand {
             Self::ToggleLock(_) => "Toggle Track Lock".to_string(),
             Self::Batch(cmd) => cmd.name.clone(),
             Self::AddComposition(cmd) => format!("Add Composition '{}'", cmd.clip.name),
+            Self::SetClipTransform(cmd) => format!("Update Transform for Clip '{}'", cmd.clip_id),
+            Self::SetClipAudio(cmd) => {
+                format!("Update Audio Parameters for Clip '{}'", cmd.clip_id)
+            }
         }
     }
 
@@ -206,6 +230,16 @@ impl EditorCommand {
             Self::AddComposition(cmd) => Self::DeleteClip(DeleteClip {
                 track_id: cmd.track_id,
                 clip: cmd.clip.clone(),
+            }),
+            Self::SetClipTransform(cmd) => Self::SetClipTransform(SetClipTransform {
+                clip_id: cmd.clip_id,
+                old_transform: cmd.new_transform,
+                new_transform: cmd.old_transform,
+            }),
+            Self::SetClipAudio(cmd) => Self::SetClipAudio(SetClipAudio {
+                clip_id: cmd.clip_id,
+                old_audio: cmd.new_audio,
+                new_audio: cmd.old_audio,
             }),
         }
     }
@@ -287,6 +321,24 @@ impl EditorCommand {
             }
             Self::AddComposition(cmd) => {
                 sequence.add_clip(cmd.track_id, cmd.clip.clone())?;
+            }
+            Self::SetClipTransform(cmd) => {
+                let track = sequence
+                    .find_track_for_clip_mut(cmd.clip_id)
+                    .ok_or(TimelineError::ClipNotFound(cmd.clip_id))?;
+                let clip = track
+                    .get_clip_mut(cmd.clip_id)
+                    .ok_or(TimelineError::ClipNotFound(cmd.clip_id))?;
+                clip.set_transform(cmd.new_transform);
+            }
+            Self::SetClipAudio(cmd) => {
+                let track = sequence
+                    .find_track_for_clip_mut(cmd.clip_id)
+                    .ok_or(TimelineError::ClipNotFound(cmd.clip_id))?;
+                let clip = track
+                    .get_clip_mut(cmd.clip_id)
+                    .ok_or(TimelineError::ClipNotFound(cmd.clip_id))?;
+                clip.set_audio_params(cmd.new_audio);
             }
         }
         Ok(())

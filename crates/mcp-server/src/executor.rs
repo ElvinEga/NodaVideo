@@ -3,8 +3,8 @@
 use std::str::FromStr;
 
 use nodavideo_command_system::{
-    AddClip, AddComposition, CommandHistory, DeleteClip, EditorCommand, MoveClip, SplitClip,
-    StagedChangeset, TrimClip,
+    AddClip, AddComposition, CommandHistory, DeleteClip, EditorCommand, MoveClip, SetClipAudio,
+    SetClipTransform, SplitClip, StagedChangeset, TrimClip,
 };
 use nodavideo_hyperframes_bridge::{Composition, CompositionRenderer, TemplateRegistry};
 use nodavideo_project::{AssetId, MediaType, ProjectDocument};
@@ -683,6 +683,126 @@ impl McpExecutor {
                 }))
             }
 
+            "set_clip_transform" => {
+                let clip_id_str =
+                    args.get("clip_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| McpError::InvalidArguments {
+                            tool: tool_name.into(),
+                            details: "Missing 'clip_id'".into(),
+                        })?;
+                let clip_id =
+                    ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
+                        tool: tool_name.into(),
+                        details: format!("Invalid clip_id: {e}"),
+                    })?;
+
+                let track = sequence.find_track_for_clip(clip_id).ok_or_else(|| {
+                    McpError::ExecutionFailed(format!("Clip '{clip_id}' not found"))
+                })?;
+                let clip = track.get_clip(clip_id).ok_or_else(|| {
+                    McpError::ExecutionFailed(format!("Clip '{clip_id}' not found"))
+                })?;
+
+                let old_transform = clip.transform;
+                let mut new_transform = old_transform;
+
+                if let Some(px) = args.get("position_x").and_then(|v| v.as_f64()) {
+                    new_transform.position_x = px;
+                }
+                if let Some(py) = args.get("position_y").and_then(|v| v.as_f64()) {
+                    new_transform.position_y = py;
+                }
+                if let Some(sx) = args.get("scale_x").and_then(|v| v.as_f64()) {
+                    new_transform.scale_x = sx;
+                }
+                if let Some(sy) = args.get("scale_y").and_then(|v| v.as_f64()) {
+                    new_transform.scale_y = sy;
+                }
+                if let Some(rot) = args.get("rotation").and_then(|v| v.as_f64()) {
+                    new_transform.rotation_degrees = rot;
+                }
+                if let Some(op) = args.get("opacity").and_then(|v| v.as_f64()) {
+                    new_transform.opacity = op;
+                }
+                new_transform = new_transform.clamped();
+
+                let cmd = EditorCommand::SetClipTransform(SetClipTransform {
+                    clip_id,
+                    old_transform,
+                    new_transform,
+                });
+
+                history
+                    .execute(cmd, sequence)
+                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "clip_id": clip_id.to_string(),
+                    "transform": {
+                        "position_x": new_transform.position_x,
+                        "position_y": new_transform.position_y,
+                        "scale_x": new_transform.scale_x,
+                        "scale_y": new_transform.scale_y,
+                        "rotation": new_transform.rotation_degrees,
+                        "opacity": new_transform.opacity,
+                    }
+                }))
+            }
+
+            "set_clip_audio" => {
+                let clip_id_str =
+                    args.get("clip_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| McpError::InvalidArguments {
+                            tool: tool_name.into(),
+                            details: "Missing 'clip_id'".into(),
+                        })?;
+                let clip_id =
+                    ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
+                        tool: tool_name.into(),
+                        details: format!("Invalid clip_id: {e}"),
+                    })?;
+
+                let track = sequence.find_track_for_clip(clip_id).ok_or_else(|| {
+                    McpError::ExecutionFailed(format!("Clip '{clip_id}' not found"))
+                })?;
+                let clip = track.get_clip(clip_id).ok_or_else(|| {
+                    McpError::ExecutionFailed(format!("Clip '{clip_id}' not found"))
+                })?;
+
+                let old_audio = clip.audio_params;
+                let mut new_audio = old_audio;
+
+                if let Some(vol) = args.get("volume_db").and_then(|v| v.as_f64()) {
+                    new_audio.volume_db = vol;
+                }
+                if let Some(pan) = args.get("pan").and_then(|v| v.as_f64()) {
+                    new_audio.pan = pan;
+                }
+                new_audio = new_audio.clamped();
+
+                let cmd = EditorCommand::SetClipAudio(SetClipAudio {
+                    clip_id,
+                    old_audio,
+                    new_audio,
+                });
+
+                history
+                    .execute(cmd, sequence)
+                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "clip_id": clip_id.to_string(),
+                    "audio": {
+                        "volume_db": new_audio.volume_db,
+                        "pan": new_audio.pan,
+                    }
+                }))
+            }
+
             _ => Err(McpError::ToolNotFound(tool_name.to_string())),
         }
     }
@@ -1025,6 +1145,93 @@ fn parse_command_spec(
                 clip,
                 composition_id: comp.id.to_string(),
                 template_id: template.id.clone(),
+            }))
+        }
+
+        "set_clip_transform" => {
+            let clip_id_str = spec
+                .get("clip_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "set_clip_transform".into(),
+                    details: "Missing 'clip_id'".into(),
+                })?;
+            let clip_id =
+                ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "set_clip_transform".into(),
+                    details: format!("Invalid clip_id: {e}"),
+                })?;
+            let track = sequence
+                .find_track_for_clip(clip_id)
+                .ok_or_else(|| McpError::ExecutionFailed(format!("Clip '{clip_id}' not found")))?;
+            let clip = track
+                .get_clip(clip_id)
+                .ok_or_else(|| McpError::ExecutionFailed(format!("Clip '{clip_id}' not found")))?;
+
+            let old_transform = clip.transform;
+            let mut new_transform = old_transform;
+
+            if let Some(px) = spec.get("position_x").and_then(|v| v.as_f64()) {
+                new_transform.position_x = px;
+            }
+            if let Some(py) = spec.get("position_y").and_then(|v| v.as_f64()) {
+                new_transform.position_y = py;
+            }
+            if let Some(sx) = spec.get("scale_x").and_then(|v| v.as_f64()) {
+                new_transform.scale_x = sx;
+            }
+            if let Some(sy) = spec.get("scale_y").and_then(|v| v.as_f64()) {
+                new_transform.scale_y = sy;
+            }
+            if let Some(rot) = spec.get("rotation").and_then(|v| v.as_f64()) {
+                new_transform.rotation_degrees = rot;
+            }
+            if let Some(op) = spec.get("opacity").and_then(|v| v.as_f64()) {
+                new_transform.opacity = op;
+            }
+            new_transform = new_transform.clamped();
+
+            Ok(EditorCommand::SetClipTransform(SetClipTransform {
+                clip_id,
+                old_transform,
+                new_transform,
+            }))
+        }
+
+        "set_clip_audio" => {
+            let clip_id_str = spec
+                .get("clip_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "set_clip_audio".into(),
+                    details: "Missing 'clip_id'".into(),
+                })?;
+            let clip_id =
+                ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "set_clip_audio".into(),
+                    details: format!("Invalid clip_id: {e}"),
+                })?;
+            let track = sequence
+                .find_track_for_clip(clip_id)
+                .ok_or_else(|| McpError::ExecutionFailed(format!("Clip '{clip_id}' not found")))?;
+            let clip = track
+                .get_clip(clip_id)
+                .ok_or_else(|| McpError::ExecutionFailed(format!("Clip '{clip_id}' not found")))?;
+
+            let old_audio = clip.audio_params;
+            let mut new_audio = old_audio;
+            if let Some(vol) = spec.get("volume_db").and_then(|v| v.as_f64()) {
+                new_audio.volume_db = vol;
+            }
+            if let Some(pan) = spec.get("pan").and_then(|v| v.as_f64()) {
+                new_audio.pan = pan;
+            }
+            new_audio = new_audio.clamped();
+
+            Ok(EditorCommand::SetClipAudio(SetClipAudio {
+                clip_id,
+                old_audio,
+                new_audio,
             }))
         }
 

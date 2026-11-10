@@ -177,7 +177,7 @@ get_project · get_timeline · get_selected_clips · search_media
 add_clip · move_clip · trim_clip · split_clip · delete_clip
 add_audio_track · add_transition · add_text_overlay · generate_captions
 list_composition_templates · add_composition
-apply_effect · set_clip_transform · render_preview · export_video
+apply_effect · set_clip_transform · set_clip_audio · render_preview · export_video
 ```
 
 Typical agent flow for *"Create a 30-second promo from the imported clips with an intro, subtitles, music and an outro"*: inspect project → inspect media → propose a sequence → add/arrange clips → generate captions and motion graphics → render preview → **ask for approval** before finalizing or exporting. Every step is a command in the shared history.

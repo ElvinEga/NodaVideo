@@ -8,22 +8,32 @@ use gpui_kit::component::Theme;
 use gpui_kit::*;
 
 use nodavideo_project::{FrameRate, MediaAsset, MediaAssetStatus};
+use nodavideo_timeline::Clip;
 
 /// Inspector view component.
 #[derive(Debug, Default)]
 pub struct InspectorPanel {
     pub selected_asset: Option<MediaAsset>,
+    pub selected_clip: Option<Clip>,
 }
 
 impl InspectorPanel {
     pub fn new() -> Self {
         Self {
             selected_asset: None,
+            selected_clip: None,
         }
     }
 
     pub fn set_selected_asset(&mut self, asset: Option<MediaAsset>, cx: &mut Context<Self>) {
         self.selected_asset = asset;
+        self.selected_clip = None;
+        cx.notify();
+    }
+
+    pub fn set_selected_clip(&mut self, clip: Option<Clip>, cx: &mut Context<Self>) {
+        self.selected_clip = clip;
+        self.selected_asset = None;
         cx.notify();
     }
 }
@@ -31,6 +41,14 @@ impl InspectorPanel {
 impl Render for InspectorPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+
+        let (header_title, header_subtitle) = if self.selected_clip.is_some() {
+            ("Clip Inspector", "Clip Properties")
+        } else if self.selected_asset.is_some() {
+            ("Media Inspector", "Asset Metadata")
+        } else {
+            ("Inspector", "Properties")
+        };
 
         div()
             .flex()
@@ -61,20 +79,21 @@ impl Render for InspectorPanel {
                                     .text_xs()
                                     .font_semibold()
                                     .text_color(theme.foreground)
-                                    .child("Inspector"),
+                                    .child(header_title),
                             ),
                     )
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        if self.selected_asset.is_some() {
-                            "Asset Metadata"
-                        } else {
-                            "Properties"
-                        },
-                    )),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(header_subtitle),
+                    ),
             )
             .child(
                 // Contextual Body
-                if let Some(ref asset) = self.selected_asset {
+                if let Some(ref clip) = self.selected_clip {
+                    self.render_clip_properties(clip, &theme).into_any_element()
+                } else if let Some(ref asset) = self.selected_asset {
                     self.render_asset_properties(asset, &theme)
                         .into_any_element()
                 } else {
@@ -144,6 +163,134 @@ impl InspectorPanel {
                         theme,
                     )),
             )
+    }
+
+    fn render_clip_properties(&self, clip: &Clip, theme: &Theme) -> impl IntoElement {
+        let mono_font = theme.mono_font_family.clone();
+        let transform = clip.transform;
+        let audio = clip.audio_params;
+
+        let pos_str = format!(
+            "{:.1} px / {:.1} px",
+            transform.position_x, transform.position_y
+        );
+        let scale_str = format!(
+            "{:.0}% / {:.0}%",
+            transform.scale_x * 100.0,
+            transform.scale_y * 100.0
+        );
+        let rot_str = format!("{:.1}°", transform.rotation_degrees);
+        let opacity_str = format!("{:.0}%", transform.opacity * 100.0);
+        let transform_status = if transform.is_identity() {
+            "Identity (Default)"
+        } else {
+            "Modified"
+        };
+
+        let vol_str = format!("{:.1} dB", audio.volume_db);
+        let pan_str = if audio.pan == 0.0 {
+            "Center (0.0)".to_string()
+        } else if audio.pan < 0.0 {
+            format!("L {:.0}%", audio.pan.abs() * 100.0)
+        } else {
+            format!("R {:.0}%", audio.pan * 100.0)
+        };
+        let audio_status = if audio.is_default() {
+            "Unity Gain (0.0 dB)"
+        } else {
+            "Adjusted"
+        };
+
+        let start_frame_str = clip.start_frame.to_string();
+        let end_frame_str = clip.end_frame().to_string();
+        let duration_str = format!("{} frames", clip.duration_frames());
+        let source_range_str = format!("[{} .. {}]", clip.source_in, clip.source_out);
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .overflow_hidden()
+            .p_3()
+            .gap_3()
+            .child(
+                // Clip Header Summary
+                div()
+                    .flex()
+                    .flex_col()
+                    .p_3()
+                    .rounded_md()
+                    .bg(theme.secondary)
+                    .border_1()
+                    .border_color(theme.border)
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(theme.foreground)
+                                    .truncate()
+                                    .child(clip.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(if clip.enabled {
+                                        theme.accent
+                                    } else {
+                                        theme.muted
+                                    })
+                                    .text_color(theme.foreground)
+                                    .child(if clip.enabled { "Active" } else { "Muted" }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(mono_font)
+                            .text_color(theme.muted_foreground)
+                            .child(format!("Clip: {}", clip.id)),
+                    ),
+            )
+            .child(self.render_section_preview(
+                "Timeline Placement",
+                &[
+                    ("Start Frame", &start_frame_str),
+                    ("End Frame", &end_frame_str),
+                    ("Duration", &duration_str),
+                    ("Source In/Out", &source_range_str),
+                ],
+                theme,
+            ))
+            .child(self.render_section_preview(
+                "Video Transform",
+                &[
+                    ("Position X / Y", &pos_str),
+                    ("Scale X / Y", &scale_str),
+                    ("Rotation", &rot_str),
+                    ("Opacity", &opacity_str),
+                    ("Transform Status", transform_status),
+                ],
+                theme,
+            ))
+            .child(self.render_section_preview(
+                "Audio Parameters",
+                &[
+                    ("Volume Gain", &vol_str),
+                    ("Stereo Pan", &pan_str),
+                    ("Channels", "Stereo (L/R)"),
+                    ("Audio Status", audio_status),
+                ],
+                theme,
+            ))
     }
 
     fn render_asset_properties(&self, asset: &MediaAsset, theme: &Theme) -> impl IntoElement {

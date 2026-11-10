@@ -340,4 +340,109 @@ mod tests {
         assert!(history.undo(&mut sequence).is_ok());
         assert_eq!(sequence.tracks[0].clips.len(), 0);
     }
+
+    #[core::prelude::v1::test]
+    fn test_inspector_clip_transform_and_audio_state() {
+        use nodavideo_command_system::{AddClip, EditorCommand, SetClipAudio, SetClipTransform};
+        use nodavideo_project::AssetId;
+        use nodavideo_timeline::{Clip, ClipAudioParams, ClipId, ClipTransform};
+        use workspace::panels::inspector::InspectorPanel;
+        use workspace::panels::timeline::TimelinePanel;
+
+        let mut timeline = TimelinePanel::new();
+        let mut inspector = InspectorPanel::new();
+        assert!(inspector.selected_clip.is_none());
+        assert!(inspector.selected_asset.is_none());
+
+        // Add clip to timeline
+        let v1_id = timeline.sequence.tracks[1].id;
+        let clip_id = ClipId::new();
+        let clip = Clip::new(clip_id, AssetId::new(), v1_id, "Main Interview", 0, 0, 96).unwrap();
+        timeline
+            .history
+            .execute(
+                EditorCommand::AddClip(AddClip {
+                    track_id: v1_id,
+                    clip,
+                }),
+                &mut timeline.sequence,
+            )
+            .unwrap();
+
+        // Select the clip on timeline
+        timeline.selection.select_single(clip_id);
+        let selected = timeline.get_selected_clip();
+        assert!(selected.is_some());
+        let selected_clip = selected.unwrap();
+        assert_eq!(selected_clip.id, clip_id);
+        assert!(selected_clip.transform.is_identity());
+        assert!(selected_clip.audio_params.is_default());
+
+        // Pass selected clip to inspector
+        inspector.selected_clip = Some(selected_clip);
+        assert!(inspector.selected_clip.is_some());
+        assert_eq!(
+            inspector.selected_clip.as_ref().unwrap().name,
+            "Main Interview"
+        );
+
+        // Mutate transform via CommandHistory
+        let new_transform = ClipTransform {
+            position_x: 50.0,
+            position_y: -25.0,
+            scale_x: 1.1,
+            scale_y: 1.1,
+            rotation_degrees: 10.0,
+            opacity: 0.95,
+        };
+        timeline
+            .history
+            .execute(
+                EditorCommand::SetClipTransform(SetClipTransform {
+                    clip_id,
+                    old_transform: ClipTransform::default(),
+                    new_transform,
+                }),
+                &mut timeline.sequence,
+            )
+            .unwrap();
+
+        // Verify updated clip transform on timeline
+        let updated_clip = timeline.get_selected_clip().unwrap();
+        assert_eq!(updated_clip.transform, new_transform);
+
+        // Mutate audio via CommandHistory
+        let new_audio = ClipAudioParams {
+            volume_db: -3.0,
+            pan: -0.2,
+        };
+        timeline
+            .history
+            .execute(
+                EditorCommand::SetClipAudio(SetClipAudio {
+                    clip_id,
+                    old_audio: ClipAudioParams::default(),
+                    new_audio,
+                }),
+                &mut timeline.sequence,
+            )
+            .unwrap();
+
+        let updated_clip_audio = timeline.get_selected_clip().unwrap();
+        assert_eq!(updated_clip_audio.audio_params, new_audio);
+
+        // Undo audio and transform
+        assert!(timeline.can_undo());
+        timeline.history.undo(&mut timeline.sequence).unwrap();
+        assert_eq!(
+            timeline.get_selected_clip().unwrap().audio_params,
+            ClipAudioParams::default()
+        );
+
+        timeline.history.undo(&mut timeline.sequence).unwrap();
+        assert_eq!(
+            timeline.get_selected_clip().unwrap().transform,
+            ClipTransform::default()
+        );
+    }
 }
