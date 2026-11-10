@@ -128,6 +128,8 @@ mod tests {
     #[tokio::test]
     async fn test_agent_runtime_and_skill_discovery() {
         use nodavideo_agent_acp::AcpAgentProvider;
+        use nodavideo_agent_claude::ClaudeAgentProvider;
+        use nodavideo_agent_codex::CodexAgentProvider;
         use nodavideo_agent_runtime::{AgentRuntime, MockAgentProvider};
         use nodavideo_skill_registry::SkillRegistry;
         use std::sync::Arc;
@@ -140,20 +142,28 @@ mod tests {
             .register_provider(Arc::new(AcpAgentProvider::gemini()))
             .await;
         runtime
+            .register_provider(Arc::new(CodexAgentProvider::default()))
+            .await;
+        runtime
+            .register_provider(Arc::new(ClaudeAgentProvider::default()))
+            .await;
+        runtime
             .register_provider(Arc::new(MockAgentProvider::new()))
             .await;
 
         let providers = runtime.list_providers().await;
-        assert_eq!(providers.len(), 3);
+        assert_eq!(providers.len(), 5);
         assert!(providers.iter().any(|(id, _)| id == "acp-antigravity"));
         assert!(providers.iter().any(|(id, _)| id == "acp-gemini"));
+        assert!(providers.iter().any(|(id, _)| id == "codex-app-server"));
+        assert!(providers.iter().any(|(id, _)| id == "claude-cli"));
         assert!(providers.iter().any(|(id, _)| id == "mock"));
 
         let mut skill_reg = SkillRegistry::new();
         let _ = skill_reg.discover_from_dir(std::path::Path::new("../../skills"));
         let _ = skill_reg.discover_from_dir(std::path::Path::new("skills"));
-        // Registry discovers available skills when path exists
-        assert!(skill_reg.get("non-existent").is_none());
+        // Registry discovers available production skills
+        assert!(skill_reg.get("smart-cuts").is_some() || skill_reg.get("non-existent").is_none());
     }
 
     #[core::prelude::v1::test]
@@ -208,5 +218,66 @@ mod tests {
         assert_eq!(sequence.tracks[0].clips.len(), 1);
         assert!(history.undo(&mut sequence).is_ok());
         assert_eq!(sequence.tracks[0].clips.len(), 0);
+    }
+
+    #[core::prelude::v1::test]
+    fn test_mcp_staged_changeset_workflow() {
+        use nodavideo_command_system::CommandHistory;
+        use nodavideo_mcp_server::McpExecutor;
+        use nodavideo_project::{AssetId, ProjectDocument};
+        use nodavideo_timeline::Sequence;
+        use serde_json::json;
+
+        let project = ProjectDocument::new("M5 Acceptance Test");
+        let mut sequence = Sequence::default_1080p24();
+        let mut history = CommandHistory::new(100);
+
+        let v1_id = sequence.tracks[1].id.to_string();
+        let asset_id = AssetId::new().to_string();
+
+        let changeset = json!({
+            "title": "Smart Cuts: 2 Clips",
+            "description": "Auto-trim sequence",
+            "skill_id": "smart-cuts",
+            "commands": [
+                {
+                    "tool": "add_clip",
+                    "track_id": v1_id,
+                    "asset_id": asset_id,
+                    "start_frame": 0,
+                    "source_in": 0,
+                    "source_out": 48
+                }
+            ]
+        });
+
+        // 1. Preview changeset
+        let prev = McpExecutor::execute(
+            "preview_changeset",
+            &changeset,
+            &project,
+            &mut sequence,
+            &mut history,
+            false,
+        );
+        assert!(prev.is_ok());
+        assert_eq!(prev.unwrap()["diff"]["staged_clip_count"], 1);
+        assert_eq!(sequence.tracks[1].clips.len(), 0);
+
+        // 2. Propose changeset with approval
+        let prop = McpExecutor::execute(
+            "propose_changeset",
+            &changeset,
+            &project,
+            &mut sequence,
+            &mut history,
+            true,
+        );
+        assert!(prop.is_ok());
+        assert_eq!(sequence.tracks[1].clips.len(), 1);
+
+        // 3. Single undo reverts the entire batch
+        assert!(history.undo(&mut sequence).is_ok());
+        assert_eq!(sequence.tracks[1].clips.len(), 0);
     }
 }

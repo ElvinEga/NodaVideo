@@ -6,13 +6,15 @@
 pub mod command;
 pub mod error;
 pub mod history;
+pub mod staged;
 
 pub use command::{
-    AddClip, AddTrack, DeleteClip, DeleteTrack, EditorCommand, MoveClip, SplitClip, ToggleLock,
-    ToggleMute, ToggleSolo, TrimClip, UnsplitClip,
+    AddClip, AddTrack, BatchCommand, DeleteClip, DeleteTrack, EditorCommand, MoveClip, SplitClip,
+    ToggleLock, ToggleMute, ToggleSolo, TrimClip, UnsplitClip,
 };
 pub use error::CommandError;
 pub use history::{CommandHistory, HistoryEntry};
+pub use staged::{ChangesetDiff, ChangesetStatus, StagedChangeset};
 
 #[cfg(test)]
 mod tests {
@@ -150,5 +152,60 @@ mod tests {
         // Undo lock
         history.undo(&mut sequence).unwrap();
         assert!(!sequence.tracks[1].locked);
+    }
+
+    #[test]
+    fn test_staged_changeset_speculative_and_commit() {
+        let mut sequence = Sequence::default_1080p24();
+        let mut history = CommandHistory::new(10);
+        let track_id = sequence.tracks[1].id;
+        let asset_id = AssetId::new();
+
+        let clip1 = Clip::new(ClipId::new(), asset_id, track_id, "Clip 1", 0, 0, 50).unwrap();
+        let clip2 = Clip::new(ClipId::new(), asset_id, track_id, "Clip 2", 50, 0, 50).unwrap();
+
+        let mut staged = StagedChangeset::new(
+            "Smart Cuts",
+            "Auto-generated sequence arrangement with 2 clips",
+        )
+        .with_skill("smart-cuts");
+
+        staged.add_command(EditorCommand::AddClip(AddClip {
+            track_id,
+            clip: clip1,
+        }));
+        staged.add_command(EditorCommand::AddClip(AddClip {
+            track_id,
+            clip: clip2,
+        }));
+
+        // 1. Speculative preview should reflect changes without altering the original sequence
+        let diff = staged.compute_diff(&sequence).unwrap();
+        assert_eq!(diff.original_clip_count, 0);
+        assert_eq!(diff.staged_clip_count, 2);
+        assert_eq!(diff.original_duration_frames, 0);
+        assert_eq!(diff.staged_duration_frames, 100);
+        assert_eq!(diff.commands_count, 2);
+        assert_eq!(diff.tracks_affected, 1);
+        assert_eq!(sequence.tracks[1].clips.len(), 0);
+
+        // 2. Commit the staged proposal into active sequence through history
+        let committed = history.commit_staged(staged, &mut sequence).unwrap();
+        assert_eq!(committed.status, ChangesetStatus::Committed);
+        assert_eq!(sequence.tracks[1].clips.len(), 2);
+        assert_eq!(sequence.duration_frames(), 100);
+
+        // 3. Unified undo reverts entire batch in one step
+        assert!(history.can_undo());
+        let undone = history.undo(&mut sequence).unwrap();
+        assert_eq!(undone, Some("Smart Cuts".to_string()));
+        assert_eq!(sequence.tracks[1].clips.len(), 0);
+        assert_eq!(sequence.duration_frames(), 0);
+
+        // 4. Redo restores entire batch in one step
+        let redone = history.redo(&mut sequence).unwrap();
+        assert_eq!(redone, Some("Smart Cuts".to_string()));
+        assert_eq!(sequence.tracks[1].clips.len(), 2);
+        assert_eq!(sequence.duration_frames(), 100);
     }
 }

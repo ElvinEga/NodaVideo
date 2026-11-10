@@ -105,7 +105,9 @@ impl AssistantPanel {
     pub fn cycle_provider(&mut self, cx: &mut Context<Self>) {
         let next_provider = match self.current_provider_id.as_str() {
             "acp-antigravity" => "acp-gemini",
-            "acp-gemini" => "mock",
+            "acp-gemini" => "codex-app-server",
+            "codex-app-server" => "claude-cli",
+            "claude-cli" => "mock",
             _ => "acp-antigravity",
         };
         self.current_provider_id = next_provider.to_string();
@@ -122,6 +124,8 @@ impl AssistantPanel {
         match self.current_provider_id.as_str() {
             "acp-antigravity" => "Antigravity (ACP)",
             "acp-gemini" => "Gemini CLI (ACP)",
+            "codex-app-server" => "Codex (App-Server)",
+            "claude-cli" => "Claude Code (CLI)",
             "mock" => "Mock Assistant (Offline)",
             other => other,
         }
@@ -405,10 +409,25 @@ impl Render for AssistantPanel {
                                     .ghost()
                                     .xsmall()
                                     .label(provider_name)
-                                    .tooltip("Switch Agent Provider (Antigravity / Gemini / Mock)")
+                                    .tooltip("Switch Agent Provider (Antigravity / Gemini / Codex / Claude / Mock)")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.cycle_provider(cx);
                                     })),
+                            )
+                            .child(
+                                div()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(theme.muted)
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!(
+                                        "{} Skills",
+                                        self.skill_registry
+                                            .read()
+                                            .map_or(0, |r| r.list().len())
+                                    )),
                             ),
                     )
                     .child(
@@ -553,12 +572,14 @@ impl AssistantPanel {
                 title,
                 description,
                 command_summary,
+                tool_name,
                 status,
                 ..
             } => {
                 let req_id_approve = request_id.clone();
                 let req_id_reject = request_id.clone();
                 let is_pending = *status == ApprovalStatus::Pending;
+                let is_changeset = tool_name == "propose_changeset";
 
                 div()
                     .flex()
@@ -631,7 +652,11 @@ impl AssistantPanel {
                                     Button::new(format!("appr-btn-{idx}"))
                                         .primary()
                                         .xsmall()
-                                        .label("Approve & Apply")
+                                        .label(if is_changeset {
+                                            "Approve & Commit Staged Edit"
+                                        } else {
+                                            "Approve & Apply"
+                                        })
                                         .on_click(cx.listener(move |this, _, win, cx| {
                                             this.handle_approval_decision(
                                                 req_id_approve.clone(),

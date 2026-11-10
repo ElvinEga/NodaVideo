@@ -169,6 +169,48 @@ impl McpToolDefinition {
                 is_mutation: false,
                 requires_approval: true,
             },
+            Self {
+                name: "preview_changeset".into(),
+                description: "Compute a speculative diff for a proposed multi-step editing changeset without committing or modifying timeline state.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "description": "Short title of proposed edit" },
+                        "description": { "type": "string", "description": "Detailed explanation of changes" },
+                        "skill_id": { "type": "string", "description": "Originating skill package ID" },
+                        "commands": {
+                            "type": "array",
+                            "description": "List of command objects specifying tool name and arguments",
+                            "items": { "type": "object" }
+                        }
+                    },
+                    "required": ["title", "commands"],
+                    "additionalProperties": false
+                }),
+                is_mutation: false,
+                requires_approval: false,
+            },
+            Self {
+                name: "propose_changeset".into(),
+                description: "Propose a multi-command editing plan (smart cuts, captions, social video) requiring explicit user approval before atomic commit.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "description": "Short title of proposed edit" },
+                        "description": { "type": "string", "description": "Detailed explanation of changes" },
+                        "skill_id": { "type": "string", "description": "Originating skill package ID" },
+                        "commands": {
+                            "type": "array",
+                            "description": "List of command objects specifying tool name and arguments",
+                            "items": { "type": "object" }
+                        }
+                    },
+                    "required": ["title", "description", "commands"],
+                    "additionalProperties": false
+                }),
+                is_mutation: true,
+                requires_approval: true,
+            },
         ]
     }
 }

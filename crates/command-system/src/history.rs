@@ -150,4 +150,21 @@ impl CommandHistory {
         self.undo_stack.clear();
         self.redo_stack.clear();
     }
+
+    /// Commit an entire staged changeset as a single transactional command.
+    pub fn commit_staged(
+        &mut self,
+        mut changeset: crate::staged::StagedChangeset,
+        sequence: &mut Sequence,
+    ) -> Result<crate::staged::StagedChangeset, CommandError> {
+        if changeset.commands.is_empty() {
+            changeset.status = crate::staged::ChangesetStatus::Committed;
+            return Ok(changeset);
+        }
+
+        let batch = changeset.clone().into_batch_command();
+        self.execute(batch, sequence)?;
+        changeset.status = crate::staged::ChangesetStatus::Committed;
+        Ok(changeset)
+    }
 }

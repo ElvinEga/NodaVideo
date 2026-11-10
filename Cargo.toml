@@ -9,6 +9,8 @@ members = [
     "crates/agent-runtime",
     "crates/mcp-server",
     "crates/agent-acp",
+    "crates/agent-codex",
+    "crates/agent-claude",
     "crates/skill-registry",
 ]
 
@@ -27,6 +29,8 @@ nodavideo-command-system = { path = "crates/command-system" }
 nodavideo-agent-runtime = { path = "crates/agent-runtime" }
 nodavideo-mcp-server = { path = "crates/mcp-server" }
 nodavideo-agent-acp = { path = "crates/agent-acp" }
+nodavideo-agent-codex = { path = "crates/agent-codex" }
+nodavideo-agent-claude = { path = "crates/agent-claude" }
 nodavideo-skill-registry = { path = "crates/skill-registry" }
 gpui-kit = "0.9.0"
 anyhow = "1.0.95"

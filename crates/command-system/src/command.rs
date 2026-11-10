@@ -91,6 +91,13 @@ pub struct ToggleLock {
     pub track_id: TrackId,
 }
 
+/// Parameters for an atomic batch of commands executing as a single transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchCommand {
+    pub name: String,
+    pub commands: Vec<EditorCommand>,
+}
+
 /// Canonical editor commands governing all project and timeline mutations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EditorCommand {
@@ -105,6 +112,7 @@ pub enum EditorCommand {
     ToggleMute(ToggleMute),
     ToggleSolo(ToggleSolo),
     ToggleLock(ToggleLock),
+    Batch(BatchCommand),
 }
 
 impl EditorCommand {
@@ -122,6 +130,7 @@ impl EditorCommand {
             Self::ToggleMute(_) => "Toggle Track Mute".to_string(),
             Self::ToggleSolo(_) => "Toggle Track Solo".to_string(),
             Self::ToggleLock(_) => "Toggle Track Lock".to_string(),
+            Self::Batch(cmd) => cmd.name.clone(),
         }
     }
 
@@ -176,6 +185,13 @@ impl EditorCommand {
             Self::ToggleMute(cmd) => Self::ToggleMute(cmd.clone()),
             Self::ToggleSolo(cmd) => Self::ToggleSolo(cmd.clone()),
             Self::ToggleLock(cmd) => Self::ToggleLock(cmd.clone()),
+            Self::Batch(cmd) => {
+                let inverse_commands = cmd.commands.iter().rev().map(|c| c.inverse()).collect();
+                Self::Batch(BatchCommand {
+                    name: format!("Undo {}", cmd.name),
+                    commands: inverse_commands,
+                })
+            }
         }
     }
 
@@ -241,6 +257,18 @@ impl EditorCommand {
                     .get_track_mut(cmd.track_id)
                     .ok_or(TimelineError::TrackNotFound(cmd.track_id))?;
                 track.locked = !track.locked;
+            }
+            Self::Batch(cmd) => {
+                let mut applied_inverses: Vec<Self> = Vec::new();
+                for c in &cmd.commands {
+                    if let Err(err) = c.apply(sequence) {
+                        for inv in applied_inverses.into_iter().rev() {
+                            let _ = inv.apply(sequence);
+                        }
+                        return Err(err);
+                    }
+                    applied_inverses.push(c.inverse());
+                }
             }
         }
         Ok(())

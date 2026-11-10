@@ -17,6 +17,8 @@ use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_pane
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use nodavideo_agent_acp::AcpAgentProvider;
+use nodavideo_agent_claude::ClaudeAgentProvider;
+use nodavideo_agent_codex::CodexAgentProvider;
 use nodavideo_agent_runtime::{AgentRuntime, MockAgentProvider};
 use nodavideo_mcp_server::McpExecutor;
 use nodavideo_media_engine::MediaProcessor;
@@ -77,6 +79,12 @@ impl WorkspaceView {
                 .await;
             rt_clone
                 .register_provider(Arc::new(AcpAgentProvider::gemini()))
+                .await;
+            rt_clone
+                .register_provider(Arc::new(CodexAgentProvider::default()))
+                .await;
+            rt_clone
+                .register_provider(Arc::new(ClaudeAgentProvider::default()))
                 .await;
             rt_clone
                 .register_provider(Arc::new(MockAgentProvider::new()))

@@ -3,7 +3,8 @@
 use std::str::FromStr;
 
 use nodavideo_command_system::{
-    AddClip, CommandHistory, DeleteClip, EditorCommand, MoveClip, SplitClip, TrimClip,
+    AddClip, CommandHistory, DeleteClip, EditorCommand, MoveClip, SplitClip, StagedChangeset,
+    TrimClip,
 };
 use nodavideo_project::{AssetId, MediaType, ProjectDocument};
 use nodavideo_timeline::{Clip, ClipId, Sequence, TrackId};
@@ -453,7 +454,391 @@ impl McpExecutor {
                 }))
             }
 
+            "preview_changeset" => {
+                let title = args
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Proposed Changeset");
+                let description = args
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let skill_id = args.get("skill_id").and_then(|v| v.as_str());
+                let commands_arr =
+                    args.get("commands")
+                        .and_then(|v| v.as_array())
+                        .ok_or_else(|| McpError::InvalidArguments {
+                            tool: tool_name.into(),
+                            details: "Missing 'commands' array".into(),
+                        })?;
+
+                let mut staged = StagedChangeset::new(title, description);
+                if let Some(s) = skill_id {
+                    staged = staged.with_skill(s);
+                }
+
+                let mut speculative = sequence.clone();
+                for cmd_json in commands_arr {
+                    let cmd = parse_command_spec(cmd_json, &speculative)?;
+                    cmd.apply(&mut speculative)
+                        .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+                    staged.add_command(cmd);
+                }
+
+                let diff = staged
+                    .compute_diff(sequence)
+                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+                Ok(serde_json::json!({
+                    "status": "preview",
+                    "changeset_id": staged.id,
+                    "title": staged.title,
+                    "description": staged.description,
+                    "skill_id": staged.skill_id,
+                    "diff": {
+                        "original_duration_frames": diff.original_duration_frames,
+                        "staged_duration_frames": diff.staged_duration_frames,
+                        "original_clip_count": diff.original_clip_count,
+                        "staged_clip_count": diff.staged_clip_count,
+                        "commands_count": diff.commands_count,
+                        "tracks_affected": diff.tracks_affected
+                    }
+                }))
+            }
+
+            "propose_changeset" => {
+                let title = args
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Proposed Changeset");
+                let description = args
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let skill_id = args.get("skill_id").and_then(|v| v.as_str());
+                let commands_arr =
+                    args.get("commands")
+                        .and_then(|v| v.as_array())
+                        .ok_or_else(|| McpError::InvalidArguments {
+                            tool: tool_name.into(),
+                            details: "Missing 'commands' array".into(),
+                        })?;
+
+                let mut staged = StagedChangeset::new(title, description);
+                if let Some(s) = skill_id {
+                    staged = staged.with_skill(s);
+                }
+
+                let mut speculative = sequence.clone();
+                for cmd_json in commands_arr {
+                    let cmd = parse_command_spec(cmd_json, &speculative)?;
+                    cmd.apply(&mut speculative)
+                        .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+                    staged.add_command(cmd);
+                }
+
+                let diff = staged
+                    .compute_diff(sequence)
+                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+                // Commit the staged changeset atomically into history
+                history
+                    .commit_staged(staged.clone(), sequence)
+                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
+
+                Ok(serde_json::json!({
+                    "status": "committed",
+                    "changeset_id": staged.id,
+                    "title": staged.title,
+                    "commands_executed": staged.commands.len(),
+                    "new_duration_frames": sequence.duration_frames(),
+                    "diff": {
+                        "original_duration_frames": diff.original_duration_frames,
+                        "staged_duration_frames": diff.staged_duration_frames,
+                        "original_clip_count": diff.original_clip_count,
+                        "staged_clip_count": diff.staged_clip_count,
+                        "commands_count": diff.commands_count,
+                        "tracks_affected": diff.tracks_affected
+                    }
+                }))
+            }
+
             _ => Err(McpError::ToolNotFound(tool_name.to_string())),
         }
+    }
+}
+
+fn parse_command_spec(
+    spec: &serde_json::Value,
+    sequence: &Sequence,
+) -> Result<EditorCommand, McpError> {
+    let tool = spec
+        .get("tool")
+        .or_else(|| spec.get("name"))
+        .or_else(|| spec.get("type"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| McpError::InvalidArguments {
+            tool: "propose_changeset".into(),
+            details: "Command spec missing 'tool'".into(),
+        })?;
+
+    match tool {
+        "add_clip" => {
+            let track_id_str = spec
+                .get("track_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "add_clip".into(),
+                    details: "Missing 'track_id'".into(),
+                })?;
+            let asset_id_str = spec
+                .get("asset_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "add_clip".into(),
+                    details: "Missing 'asset_id'".into(),
+                })?;
+            let start_frame = spec
+                .get("start_frame")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "add_clip".into(),
+                    details: "Missing 'start_frame'".into(),
+                })?;
+            let source_in = spec
+                .get("source_in")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "add_clip".into(),
+                    details: "Missing 'source_in'".into(),
+                })?;
+            let source_out = spec
+                .get("source_out")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "add_clip".into(),
+                    details: "Missing 'source_out'".into(),
+                })?;
+            let clip_name = spec.get("name").and_then(|v| v.as_str()).unwrap_or("Clip");
+
+            let track_id =
+                TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "add_clip".into(),
+                    details: format!("Invalid track UUID: {e}"),
+                })?;
+            let asset_id =
+                AssetId::from_str(asset_id_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "add_clip".into(),
+                    details: format!("Invalid asset UUID: {e}"),
+                })?;
+
+            let clip_id = if let Some(id_str) = spec.get("clip_id").and_then(|v| v.as_str()) {
+                ClipId::from_str(id_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "add_clip".into(),
+                    details: format!("Invalid clip UUID: {e}"),
+                })?
+            } else {
+                ClipId::new()
+            };
+
+            let clip = Clip::new(
+                clip_id,
+                asset_id,
+                track_id,
+                clip_name,
+                start_frame,
+                source_in,
+                source_out,
+            )
+            .map_err(|e| McpError::ExecutionFailed(format!("Invalid clip parameters: {e}")))?;
+
+            Ok(EditorCommand::AddClip(AddClip { track_id, clip }))
+        }
+
+        "move_clip" => {
+            let clip_id_str = spec
+                .get("clip_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "move_clip".into(),
+                    details: "Missing 'clip_id'".into(),
+                })?;
+            let to_track_str = spec
+                .get("to_track_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "move_clip".into(),
+                    details: "Missing 'to_track_id'".into(),
+                })?;
+            let new_start_frame = spec
+                .get("new_start_frame")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "move_clip".into(),
+                    details: "Missing 'new_start_frame'".into(),
+                })?;
+
+            let clip_id =
+                ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "move_clip".into(),
+                    details: format!("Invalid clip UUID: {e}"),
+                })?;
+            let to_track =
+                TrackId::from_str(to_track_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "move_clip".into(),
+                    details: format!("Invalid track UUID: {e}"),
+                })?;
+
+            let (from_track, old_start_frame) = {
+                let track = sequence.find_track_for_clip(clip_id).ok_or_else(|| {
+                    McpError::ExecutionFailed(format!("Clip '{clip_id}' not found on any track"))
+                })?;
+                let clip = sequence.get_clip(clip_id).unwrap();
+                (track.id, clip.start_frame)
+            };
+
+            Ok(EditorCommand::MoveClip(MoveClip {
+                clip_id,
+                from_track,
+                to_track,
+                old_start_frame,
+                new_start_frame,
+            }))
+        }
+
+        "trim_clip" => {
+            let clip_id_str = spec
+                .get("clip_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "trim_clip".into(),
+                    details: "Missing 'clip_id'".into(),
+                })?;
+            let new_start_frame = spec
+                .get("new_start_frame")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "trim_clip".into(),
+                    details: "Missing 'new_start_frame'".into(),
+                })?;
+            let new_source_in = spec
+                .get("new_source_in")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "trim_clip".into(),
+                    details: "Missing 'new_source_in'".into(),
+                })?;
+            let new_source_out = spec
+                .get("new_source_out")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "trim_clip".into(),
+                    details: "Missing 'new_source_out'".into(),
+                })?;
+
+            let clip_id =
+                ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "trim_clip".into(),
+                    details: format!("Invalid clip UUID: {e}"),
+                })?;
+
+            let (track_id, old_start_frame, old_source_in, old_source_out) = {
+                let track = sequence.find_track_for_clip(clip_id).ok_or_else(|| {
+                    McpError::ExecutionFailed(format!("Clip '{clip_id}' not found on any track"))
+                })?;
+                let clip = sequence.get_clip(clip_id).unwrap();
+                (track.id, clip.start_frame, clip.source_in, clip.source_out)
+            };
+
+            Ok(EditorCommand::TrimClip(TrimClip {
+                clip_id,
+                track_id,
+                old_start_frame,
+                new_start_frame,
+                old_source_in,
+                new_source_in,
+                old_source_out,
+                new_source_out,
+            }))
+        }
+
+        "split_clip" => {
+            let clip_id_str = spec
+                .get("clip_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "split_clip".into(),
+                    details: "Missing 'clip_id'".into(),
+                })?;
+            let split_frame = spec
+                .get("split_frame")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "split_clip".into(),
+                    details: "Missing 'split_frame'".into(),
+                })?;
+
+            let clip_id =
+                ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "split_clip".into(),
+                    details: format!("Invalid clip UUID: {e}"),
+                })?;
+
+            let (track_id, original_source_out) = {
+                let track = sequence.find_track_for_clip(clip_id).ok_or_else(|| {
+                    McpError::ExecutionFailed(format!("Clip '{clip_id}' not found on any track"))
+                })?;
+                let clip = sequence.get_clip(clip_id).unwrap();
+                (track.id, clip.source_out)
+            };
+
+            let new_clip_id = if let Some(id_str) = spec.get("new_clip_id").and_then(|v| v.as_str())
+            {
+                ClipId::from_str(id_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "split_clip".into(),
+                    details: format!("Invalid new_clip_id UUID: {e}"),
+                })?
+            } else {
+                ClipId::new()
+            };
+
+            Ok(EditorCommand::SplitClip(SplitClip {
+                original_clip_id: clip_id,
+                track_id,
+                split_frame,
+                new_clip_id,
+                original_source_out,
+            }))
+        }
+
+        "delete_clip" => {
+            let clip_id_str = spec
+                .get("clip_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::InvalidArguments {
+                    tool: "delete_clip".into(),
+                    details: "Missing 'clip_id'".into(),
+                })?;
+
+            let clip_id =
+                ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
+                    tool: "delete_clip".into(),
+                    details: format!("Invalid clip UUID: {e}"),
+                })?;
+
+            let (track_id, clip) = {
+                let track = sequence.find_track_for_clip(clip_id).ok_or_else(|| {
+                    McpError::ExecutionFailed(format!("Clip '{clip_id}' not found on any track"))
+                })?;
+                let clip = sequence.get_clip(clip_id).unwrap().clone();
+                (track.id, clip)
+            };
+
+            Ok(EditorCommand::DeleteClip(DeleteClip { track_id, clip }))
+        }
+
+        other => Err(McpError::ToolNotFound(format!(
+            "Unsupported changeset command tool: {other}"
+        ))),
     }
 }

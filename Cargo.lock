@@ -3831,6 +3831,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodavideo-agent-claude"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "nodavideo-agent-runtime",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "nodavideo-agent-codex"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "nodavideo-agent-runtime",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "nodavideo-agent-runtime"
 version = "0.1.0"
 dependencies = [
@@ -3866,6 +3892,8 @@ dependencies = [
  "anyhow",
  "gpui-kit",
  "nodavideo-agent-acp",
+ "nodavideo-agent-claude",
+ "nodavideo-agent-codex",
  "nodavideo-agent-runtime",
  "nodavideo-command-system",
  "nodavideo-mcp-server",
