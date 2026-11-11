@@ -25,6 +25,8 @@ pub struct PreviewMonitorPanel {
     pub sequence_info: SharedString,
     pub zoom_level: SharedString,
     pub current_frame_path: Option<PathBuf>,
+    pub audio_meter_left: f32,
+    pub audio_meter_right: f32,
     pub on_step_backward: Option<TransportCallback>,
     pub on_step_forward: Option<TransportCallback>,
 }
@@ -52,6 +54,8 @@ impl Default for PreviewMonitorPanel {
             sequence_info: "1920×1080 24fps".into(),
             zoom_level: "Fit (100%)".into(),
             current_frame_path: None,
+            audio_meter_left: -60.0,
+            audio_meter_right: -60.0,
             on_step_backward: None,
             on_step_forward: None,
         }
@@ -61,6 +65,13 @@ impl Default for PreviewMonitorPanel {
 impl PreviewMonitorPanel {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Update audio level meters (values in dBFS, range -60.0 to 0.0).
+    pub fn update_audio_meters(&mut self, left_db: f32, right_db: f32, cx: &mut Context<Self>) {
+        self.audio_meter_left = left_db.clamp(-60.0, 0.0);
+        self.audio_meter_right = right_db.clamp(-60.0, 0.0);
+        cx.notify();
     }
 
     /// Update preview frame and timecode display.
@@ -244,7 +255,7 @@ impl Render for PreviewMonitorPanel {
                             )
                             .child(
                                 div()
-                                    .font_family(mono_font)
+                                    .font_family(mono_font.clone())
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .child(format!("/ {}", self.duration)),
@@ -310,12 +321,101 @@ impl Render for PreviewMonitorPanel {
                                     })),
                             ),
                     )
-                    .child(
+                    .child({
+                        let left_pct = ((self.audio_meter_left + 60.0) / 60.0).clamp(0.0, 1.0);
+                        let right_pct = ((self.audio_meter_right + 60.0) / 60.0).clamp(0.0, 1.0);
+                        let left_color = if self.audio_meter_left > -3.0 {
+                            gpui::rgb(0xef4444)
+                        } else if self.audio_meter_left > -12.0 {
+                            gpui::rgb(0xf59e0b)
+                        } else {
+                            gpui::rgb(0x10b981)
+                        };
+                        let right_color = if self.audio_meter_right > -3.0 {
+                            gpui::rgb(0xef4444)
+                        } else if self.audio_meter_right > -12.0 {
+                            gpui::rgb(0xf59e0b)
+                        } else {
+                            gpui::rgb(0x10b981)
+                        };
+                        let peak_db = self.audio_meter_left.max(self.audio_meter_right);
+
                         div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Render: 24fps MP4 Preview"),
-                    ),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_semibold()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("L"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .w_16()
+                                                    .h_1p5()
+                                                    .rounded_full()
+                                                    .bg(theme.muted)
+                                                    .overflow_hidden()
+                                                    .child(
+                                                        div()
+                                                            .h_full()
+                                                            .w(px(left_pct * 64.0))
+                                                            .bg(left_color),
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_semibold()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("R"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .w_16()
+                                                    .h_1p5()
+                                                    .rounded_full()
+                                                    .bg(theme.muted)
+                                                    .overflow_hidden()
+                                                    .child(
+                                                        div()
+                                                            .h_full()
+                                                            .w(px(right_pct * 64.0))
+                                                            .bg(right_color),
+                                                    ),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .font_family(mono_font)
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(if peak_db <= -59.0 {
+                                        "-inf dB".to_string()
+                                    } else {
+                                        format!("{peak_db:.1} dB")
+                                    }),
+                            )
+                    }),
             )
     }
 }

@@ -131,6 +131,19 @@ impl AssistantPanel {
         }
     }
 
+    /// Pre-populate the input prompt with a skill workflow instruction.
+    pub fn select_skill_prompt(
+        &mut self,
+        prompt: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prompt_input.update(cx, |input, cx| {
+            input.set_value(prompt, window, cx);
+        });
+        cx.notify();
+    }
+
     /// Send the user prompt into the active session.
     pub fn send_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.prompt_input.read(cx).value().to_string();
@@ -463,6 +476,104 @@ impl Render for AssistantPanel {
                     .border_t_1()
                     .border_color(theme.border)
                     .bg(theme.secondary)
+                    .child(
+                        // Quick Skills Bar
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .overflow_hidden()
+                            .child(
+                                Button::new("skill-btn-cuts")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Scissors)
+                                    .label("Smart Cuts")
+                                    .tooltip("Detect pauses and remove silence")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.select_skill_prompt(
+                                            "Run Smart Cuts to detect pauses and remove silence from the dialogue tracks.",
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                Button::new("skill-btn-captions")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Film)
+                                    .label("Captions")
+                                    .tooltip("Generate animated subtitles")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.select_skill_prompt(
+                                            "Generate auto-captions with readable animated subtitles for the sequence.",
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                Button::new("skill-btn-titles")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Sparkles)
+                                    .label("Titles")
+                                    .tooltip("Add motion graphics title card")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.select_skill_prompt(
+                                            "Add an animated title card to the beginning of the timeline.",
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                Button::new("skill-btn-social")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::LayoutGrid)
+                                    .label("Social 9:16")
+                                    .tooltip("Reframe sequence for vertical social format")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.select_skill_prompt(
+                                            "Reframe sequence for vertical 9:16 social video with centered captions.",
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                Button::new("skill-btn-audio")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Volume2)
+                                    .label("Audio Cleanup")
+                                    .tooltip("Normalize loudness to -14 LUFS")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.select_skill_prompt(
+                                            "Normalize audio to -14 LUFS streaming standards and clean up noise.",
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                Button::new("skill-btn-color")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::SlidersHorizontal)
+                                    .label("Color Grade")
+                                    .tooltip("Apply cinematic color grade preset")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.select_skill_prompt(
+                                            "Apply a cinematic warm golden hour color grade across video clips.",
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            ),
+                    )
                     .child(Input::new(&self.prompt_input))
                     .child(
                         div()

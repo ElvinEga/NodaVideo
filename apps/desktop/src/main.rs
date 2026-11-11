@@ -108,6 +108,8 @@ mod tests {
         assert_eq!(panel.sequence_name, "Main Sequence");
         assert_eq!(panel.sequence_info, "1920×1080 24fps");
         assert!(panel.current_frame_path.is_none());
+        assert_eq!(panel.audio_meter_left, -60.0);
+        assert_eq!(panel.audio_meter_right, -60.0);
     }
 
     #[core::prelude::v1::test]
@@ -163,7 +165,15 @@ mod tests {
         let _ = skill_reg.discover_from_dir(std::path::Path::new("../../skills"));
         let _ = skill_reg.discover_from_dir(std::path::Path::new("skills"));
         // Registry discovers available production skills
-        assert!(skill_reg.get("smart-cuts").is_some() || skill_reg.get("non-existent").is_none());
+        if std::path::Path::new("skills").exists() || std::path::Path::new("../../skills").exists()
+        {
+            assert!(skill_reg.get("smart-cuts").is_some());
+            assert!(skill_reg.get("auto-captions").is_some());
+            assert!(skill_reg.get("animated-titles").is_some());
+            assert!(skill_reg.get("social-video").is_some());
+            assert!(skill_reg.get("audio-cleanup").is_some());
+            assert!(skill_reg.get("color-grading").is_some());
+        }
     }
 
     #[core::prelude::v1::test]
