@@ -1,6 +1,8 @@
 //! Timeline panel displaying multitrack composition, ruler, clips, playhead, and editing controls.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
@@ -10,8 +12,8 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use nodavideo_command_system::{
-    AddClip, CommandHistory, DeleteClip, EditorCommand, MoveClip, RemoveTransition, SplitClip,
-    ToggleLock, ToggleMute, ToggleSolo, TrimClip,
+    AddClip, BatchCommand, CommandHistory, DeleteClip, EditorCommand, MoveClip, RemoveTransition,
+    SplitClip, ToggleLock, ToggleMute, ToggleSolo, TrimClip,
 };
 use nodavideo_media_engine::WaveformData;
 use nodavideo_project::{AssetId, MediaAsset, MediaType};
@@ -30,8 +32,12 @@ pub enum TimelineTool {
     Split,
 }
 
+/// Callback when external OS files (e.g. .mp4) are dropped onto the timeline.
+pub type ExternalDropCallback = Rc<
+    dyn Fn(Vec<PathBuf>, Option<TrackId>, Option<i64>, &mut Window, &mut Context<TimelinePanel>),
+>;
+
 /// Timeline panel view component.
-#[derive(Debug)]
 pub struct TimelinePanel {
     pub sequence: Sequence,
     pub history: CommandHistory,
@@ -43,6 +49,18 @@ pub struct TimelinePanel {
     pub zoom_level: usize,
     pub snap_threshold_frames: i64,
     pub waveforms: HashMap<AssetId, WaveformData>,
+    pub is_scrubbing: bool,
+    pub on_external_drop: Option<ExternalDropCallback>,
+}
+
+impl std::fmt::Debug for TimelinePanel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimelinePanel")
+            .field("sequence", &self.sequence.name)
+            .field("current_tool", &self.current_tool)
+            .field("is_scrubbing", &self.is_scrubbing)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for TimelinePanel {
@@ -58,6 +76,8 @@ impl Default for TimelinePanel {
             zoom_level: 100,
             snap_threshold_frames: 6,
             waveforms: HashMap::new(),
+            is_scrubbing: false,
+            on_external_drop: None,
         }
     }
 }
@@ -109,6 +129,22 @@ impl TimelinePanel {
     /// Current playhead position in frames.
     pub fn playhead(&self) -> i64 {
         self.selection.playhead_frame
+    }
+
+    /// Default timeline duration when sequence has no clips (30 seconds).
+    pub fn default_empty_duration_frames(&self) -> i64 {
+        let fps = self.sequence.fps.rounded_int().max(1);
+        30 * fps
+    }
+
+    /// Effective timeline duration for navigation and playback, falling back to 30s when empty.
+    pub fn effective_duration_frames(&self) -> i64 {
+        let actual = self.sequence.duration_frames();
+        if actual > 0 {
+            actual
+        } else {
+            self.default_empty_duration_frames()
+        }
     }
 
     /// Move playhead to specified frame.
@@ -483,25 +519,18 @@ impl TimelinePanel {
         cx.notify();
     }
 
-    /// Handle dropping a media asset from Media Browser onto a track.
-    pub fn handle_asset_drop(
+    /// Apply asset drop onto timeline, creating linked video + audio clips if applicable.
+    pub fn drop_asset_clip(
         &mut self,
         track_id: TrackId,
         asset: &MediaAsset,
-        cx: &mut Context<Self>,
-    ) {
+        target_frame: Option<i64>,
+    ) -> bool {
         let Some(track) = self.sequence.get_track(track_id) else {
-            return;
+            return false;
         };
         if track.locked {
-            return;
-        }
-
-        // Check media type compatibility
-        match (track.track_type, asset.media_type) {
-            (TrackType::Video, MediaType::Video | MediaType::Image)
-            | (TrackType::Audio, MediaType::Audio | MediaType::Video) => {}
-            _ => return, // Incompatible track type
+            return false;
         }
 
         // Calculate clip duration in frames
@@ -510,8 +539,8 @@ impl TimelinePanel {
             |d| d.to_frames(self.sequence.fps).max(1),
         );
 
-        // Place clip at current playhead frame, or after track's latest clip if earlier
-        let candidate_start = self.selection.playhead_frame;
+        // Place clip at target_frame or current playhead frame
+        let candidate_start = target_frame.unwrap_or(self.selection.playhead_frame).max(0);
         let start_frame = if self.snapping_enabled {
             snap_clip_move(
                 candidate_start,
@@ -526,6 +555,76 @@ impl TimelinePanel {
             candidate_start
         };
 
+        // Check if this is a video asset with audio being placed on a video track
+        let has_audio = asset.media_type == MediaType::Video
+            && (asset.audio_codec.is_some() || asset.audio_channels.is_some());
+
+        if track.track_type == TrackType::Video && has_audio {
+            // Find the primary unlocked audio track (e.g. A1)
+            let audio_track = self
+                .sequence
+                .tracks
+                .iter()
+                .find(|t| t.track_type == TrackType::Audio && !t.locked)
+                .cloned();
+
+            let video_clip_id = ClipId::new();
+            let video_clip = match Clip::new(
+                video_clip_id,
+                asset.id,
+                track_id,
+                asset.original_filename.clone(),
+                start_frame,
+                0,
+                duration_frames,
+            ) {
+                Ok(c) => c,
+                Err(_) => return false,
+            };
+
+            let mut batch_commands = vec![EditorCommand::AddClip(AddClip {
+                track_id,
+                clip: video_clip,
+            })];
+
+            if let Some(a_track) = audio_track {
+                let a_id = ClipId::new();
+                if let Ok(a_clip) = Clip::new(
+                    a_id,
+                    asset.id,
+                    a_track.id,
+                    format!("{} [Audio]", asset.original_filename),
+                    start_frame,
+                    0,
+                    duration_frames,
+                ) {
+                    batch_commands.push(EditorCommand::AddClip(AddClip {
+                        track_id: a_track.id,
+                        clip: a_clip,
+                    }));
+                }
+            }
+
+            let batch = EditorCommand::Batch(BatchCommand {
+                name: format!("Add Linked Clip: {}", asset.original_filename),
+                commands: batch_commands,
+            });
+
+            if self.history.execute(batch, &mut self.sequence).is_ok() {
+                self.selection.select_single(video_clip_id);
+                self.selection.set_playhead(start_frame + duration_frames);
+                return true;
+            }
+            return false;
+        }
+
+        // Standard single clip placement
+        match (track.track_type, asset.media_type) {
+            (TrackType::Video, MediaType::Video | MediaType::Image)
+            | (TrackType::Audio, MediaType::Audio | MediaType::Video) => {}
+            _ => return false, // Incompatible track type
+        }
+
         let clip_id = ClipId::new();
         let clip = match Clip::new(
             clip_id,
@@ -537,16 +636,39 @@ impl TimelinePanel {
             duration_frames,
         ) {
             Ok(c) => c,
-            Err(_) => return,
+            Err(_) => return false,
         };
 
         let cmd = EditorCommand::AddClip(AddClip { track_id, clip });
         if self.history.execute(cmd, &mut self.sequence).is_ok() {
             self.selection.select_single(clip_id);
-            // Move playhead to end of newly placed clip
             self.selection.set_playhead(start_frame + duration_frames);
+            return true;
+        }
+        false
+    }
+
+    /// Handle dropping a media asset onto a track with target frame and audio-linking support.
+    pub fn handle_asset_drop_with_frame(
+        &mut self,
+        track_id: TrackId,
+        asset: &MediaAsset,
+        target_frame: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.drop_asset_clip(track_id, asset, target_frame) {
             cx.notify();
         }
+    }
+
+    /// Handle dropping a media asset from Media Browser onto a track at current playhead.
+    pub fn handle_asset_drop(
+        &mut self,
+        track_id: TrackId,
+        asset: &MediaAsset,
+        cx: &mut Context<Self>,
+    ) {
+        self.handle_asset_drop_with_frame(track_id, asset, None, cx);
     }
 }
 
@@ -576,7 +698,9 @@ impl TimelinePanel {
         let mono_font = theme.mono_font_family.clone();
         let playhead_frame = self.selection.playhead_frame;
         let playhead_timecode = self.sequence.frame_to_timecode(playhead_frame);
-        let duration_timecode = self.sequence.duration_timecode();
+        let duration_timecode = self
+            .sequence
+            .frame_to_timecode(self.effective_duration_frames());
         let has_selection = !self.selection.selected_clips.is_empty();
 
         div()
@@ -875,12 +999,42 @@ impl TimelinePanel {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    this.is_scrubbing = true;
                                     let x = f32::from(event.position.x);
                                     let frame = (x / ppf).max(0.0) as i64;
                                     this.set_playhead(frame, cx);
                                 }),
                             )
-                            .children(self.render_ruler_ticks(theme, ppf)),
+                            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                                if this.is_scrubbing {
+                                    let x = f32::from(event.position.x);
+                                    let frame = (x / ppf).max(0.0) as i64;
+                                    this.set_playhead(frame, cx);
+                                }
+                            }))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.is_scrubbing = false;
+                                    cx.notify();
+                                }),
+                            )
+                            .children(self.render_ruler_ticks(theme, ppf))
+                            .child(
+                                // Red playhead scrubber cap on ruler
+                                div()
+                                    .absolute()
+                                    .top_1()
+                                    .left(px((playhead_frame as f32).mul_add(ppf, -6.0).max(-6.0)))
+                                    .w(px(14.0))
+                                    .h(px(16.0))
+                                    .rounded_xs()
+                                    .bg(theme.danger)
+                                    .border_1()
+                                    .border_color(gpui::rgb(0xffffff).opacity(0.85))
+                                    .shadow_sm()
+                                    .cursor_col_resize(),
+                            ),
                     )
                     .child(
                         // Track Lanes Canvas
@@ -890,6 +1044,29 @@ impl TimelinePanel {
                             .flex_1()
                             .relative()
                             .overflow_hidden()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    this.is_scrubbing = true;
+                                    let x = f32::from(event.position.x);
+                                    let frame = (x / ppf).max(0.0) as i64;
+                                    this.set_playhead(frame, cx);
+                                }),
+                            )
+                            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                                if this.is_scrubbing {
+                                    let x = f32::from(event.position.x);
+                                    let frame = (x / ppf).max(0.0) as i64;
+                                    this.set_playhead(frame, cx);
+                                }
+                            }))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.is_scrubbing = false;
+                                    cx.notify();
+                                }),
+                            )
                             .children(
                                 self.sequence
                                     .tracks
@@ -907,6 +1084,13 @@ impl TimelinePanel {
                                     .bg(theme.danger),
                             )
                             .when(total_clips == 0, |this| {
+                                let default_v1 = self
+                                    .sequence
+                                    .tracks
+                                    .iter()
+                                    .find(|t| t.track_type == TrackType::Video)
+                                    .map(|t| t.id);
+
                                 this.child(
                                     // Empty Timeline State Overlay
                                     div()
@@ -915,12 +1099,37 @@ impl TimelinePanel {
                                         .justify_center()
                                         .flex_1()
                                         .p_4()
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                                this.is_scrubbing = true;
+                                                let x = f32::from(event.position.x);
+                                                let frame = (x / ppf).max(0.0) as i64;
+                                                this.set_playhead(frame, cx);
+                                            }),
+                                        )
+                                        .when_some(default_v1, |this, v1_id| {
+                                            this.on_drop(cx.listener(move |this, asset: &MediaAsset, window, cx| {
+                                                let mouse_x: f32 = window.mouse_position().x.into();
+                                                let timeline_x = (mouse_x - 130.0).max(0.0);
+                                                let target_frame = (timeline_x / ppf) as i64;
+                                                this.handle_asset_drop_with_frame(v1_id, asset, Some(target_frame), cx);
+                                            }))
+                                            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                                                let mouse_x: f32 = window.mouse_position().x.into();
+                                                let timeline_x = (mouse_x - 130.0).max(0.0);
+                                                let target_frame = (timeline_x / ppf) as i64;
+                                                if let Some(cb) = this.on_external_drop.clone() {
+                                                    cb(paths.0.to_vec(), Some(v1_id), Some(target_frame), window, cx);
+                                                }
+                                            }))
+                                        })
                                         .child(
                                             div()
                                                 .text_xs()
                                                 .font_medium()
                                                 .text_color(theme.muted_foreground)
-                                                .child("Timeline is empty. Drag video or audio from the Media Browser into a track to create clips."),
+                                                .child("Timeline is empty. Drag video or audio from the Media Browser or Desktop to start editing."),
                                         ),
                                 )
                             }),
@@ -1087,8 +1296,20 @@ impl TimelinePanel {
                 theme.background
             })
             // Dropping an imported asset from Media Browser onto this track
-            .on_drop(cx.listener(move |this, asset: &MediaAsset, _, cx| {
-                this.handle_asset_drop(track_id, asset, cx);
+            .on_drop(cx.listener(move |this, asset: &MediaAsset, window, cx| {
+                let mouse_x: f32 = window.mouse_position().x.into();
+                let timeline_x = (mouse_x - 130.0).max(0.0);
+                let target_frame = (timeline_x / ppf) as i64;
+                this.handle_asset_drop_with_frame(track_id, asset, Some(target_frame), cx);
+            }))
+            // Dropping an external file from Finder/OS onto this track
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                let mouse_x: f32 = window.mouse_position().x.into();
+                let timeline_x = (mouse_x - 130.0).max(0.0);
+                let target_frame = (timeline_x / ppf) as i64;
+                if let Some(cb) = this.on_external_drop.clone() {
+                    cb(paths.0.to_vec(), Some(track_id), Some(target_frame), window, cx);
+                }
             }))
             .children(
                 track

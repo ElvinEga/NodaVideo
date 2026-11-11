@@ -157,6 +157,77 @@ impl WorkspaceView {
             }));
         });
 
+        // Wire external file drop on Timeline (Finder / Explorer direct file drop auto-import and clip placement)
+        let mb_for_drop = media_browser.clone();
+        let tl_for_drop = timeline.clone();
+        let session_for_drop = session.clone();
+        let proc_for_drop = processor.clone();
+        timeline.update(cx, |tl, _| {
+            tl.on_external_drop = Some(Rc::new(
+                move |paths, target_track, target_frame, _win, cx| {
+                    let mb = mb_for_drop.clone();
+                    let tl = tl_for_drop.clone();
+                    let session = session_for_drop.clone();
+                    let proc = proc_for_drop.clone();
+
+                    cx.spawn(async move |_, cx| {
+                        let mut imported_assets = Vec::new();
+                        for path in paths {
+                            if let Ok(asset) = proc.process_file(&path) {
+                                imported_assets.push(asset);
+                            }
+                        }
+
+                        if imported_assets.is_empty() {
+                            return;
+                        }
+
+                        mb.update(cx, |mb, cx| {
+                            for asset in &imported_assets {
+                                let _ = mb.project.add_asset(asset.clone());
+                            }
+                            cx.notify();
+                        });
+
+                        if let Ok(mut sess) = session.write() {
+                            for asset in &imported_assets {
+                                let _ = sess.project.add_asset(asset.clone());
+                            }
+                        }
+
+                        tl.update(cx, |tl, cx| {
+                            for asset in imported_assets {
+                                let track_id = target_track.unwrap_or_else(|| {
+                                    if asset.media_type == nodavideo_project::MediaType::Audio {
+                                        tl.sequence
+                                            .tracks
+                                            .iter()
+                                            .find(|t| {
+                                                t.track_type == nodavideo_timeline::TrackType::Audio
+                                            })
+                                            .map(|t| t.id)
+                                            .unwrap_or_default()
+                                    } else {
+                                        tl.sequence
+                                            .tracks
+                                            .iter()
+                                            .find(|t| {
+                                                t.track_type == nodavideo_timeline::TrackType::Video
+                                            })
+                                            .map(|t| t.id)
+                                            .unwrap_or_default()
+                                    }
+                                });
+                                tl.handle_asset_drop_with_frame(track_id, &asset, target_frame, cx);
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                },
+            ));
+        });
+
         let h_split_state = cx.new(|_| ResizableState::default());
         let v_split_state = cx.new(|_| ResizableState::default());
 
@@ -271,7 +342,8 @@ impl WorkspaceView {
         let processor = self.processor.clone();
 
         let timecode = sequence.frame_to_timecode(playhead);
-        let duration = sequence.duration_timecode();
+        let effective_duration = self.timeline.read(cx).effective_duration_frames();
+        let duration = sequence.frame_to_timecode(effective_duration);
         let seq_name = sequence.name.clone();
         let seq_info = format!(
             "{}×{} {}fps",
@@ -317,7 +389,7 @@ impl WorkspaceView {
                             return false;
                         }
 
-                        let seq_duration = this.timeline.read(cx).sequence.duration_frames();
+                        let seq_duration = this.timeline.read(cx).effective_duration_frames();
                         let current_playhead = this.timeline.read(cx).playhead();
                         let is_looping = this.preview_monitor.read(cx).is_looping;
 

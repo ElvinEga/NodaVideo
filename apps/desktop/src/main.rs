@@ -1117,4 +1117,93 @@ mod tests {
             assert!((0.05..=1.0).contains(&p));
         }
     }
+
+    #[core::prelude::v1::test]
+    fn test_empty_timeline_playhead_and_linked_video_audio_drop() {
+        use nodavideo_project::{AssetId, MediaAsset, MediaAssetStatus, MediaType, TimeRational};
+        use nodavideo_timeline::TrackType;
+        use std::path::PathBuf;
+        use workspace::panels::timeline::TimelinePanel;
+
+        let mut timeline = TimelinePanel::new();
+
+        // 1. Empty timeline should report effective duration of 30 seconds (720 frames at 24fps)
+        assert_eq!(timeline.sequence.duration_frames(), 0);
+        assert_eq!(timeline.default_empty_duration_frames(), 720);
+        assert_eq!(timeline.effective_duration_frames(), 720);
+        assert_eq!(timeline.playhead(), 0);
+
+        // 2. Playhead can scrub freely across the empty timeline range
+        timeline.selection.set_playhead(120);
+        assert_eq!(timeline.playhead(), 120);
+
+        // 3. Create a video asset with audio stream (.mp4)
+        let asset = MediaAsset {
+            id: AssetId::new(),
+            original_filename: "scene_01.mp4".into(),
+            file_path: PathBuf::from("/media/scene_01.mp4"),
+            media_type: MediaType::Video,
+            file_size: 15_000_000,
+            import_timestamp: "2026-11-11T12:00:00Z".into(),
+            duration: Some(TimeRational::new(5, 1)), // 5 seconds (120 frames at 24fps)
+            width: Some(1920),
+            height: Some(1080),
+            frame_rate: Some(timeline.sequence.fps),
+            video_codec: Some("h264".into()),
+            pixel_format: Some("yuv420p".into()),
+            audio_codec: Some("aac".into()),
+            audio_sample_rate: Some(48_000),
+            audio_channels: Some(2),
+            audio_bitrate: Some(192_000),
+            status: MediaAssetStatus::Ready,
+            error_message: None,
+        };
+
+        let v1_id = timeline
+            .sequence
+            .tracks
+            .iter()
+            .find(|t| t.track_type == TrackType::Video && t.name == "V1")
+            .map(|t| t.id)
+            .unwrap();
+        let a1_id = timeline
+            .sequence
+            .tracks
+            .iter()
+            .find(|t| t.track_type == TrackType::Audio && t.name == "A1")
+            .map(|t| t.id)
+            .unwrap();
+
+        // 4. Drop on V1 at target_frame = 48 (2.0s)
+        let placed = timeline.drop_asset_clip(v1_id, &asset, Some(48));
+        assert!(placed);
+
+        // 5. Verify both V1 video clip and A1 audio clip were created with linked start frame 48 and duration 120
+        let v1_track = timeline.sequence.get_track(v1_id).unwrap();
+        assert_eq!(v1_track.clips.len(), 1);
+        let v_clip = &v1_track.clips[0];
+        assert_eq!(v_clip.start_frame, 48);
+        assert_eq!(v_clip.duration_frames(), 120);
+        assert_eq!(v_clip.name, "scene_01.mp4");
+
+        let a1_track = timeline.sequence.get_track(a1_id).unwrap();
+        assert_eq!(a1_track.clips.len(), 1);
+        let a_clip = &a1_track.clips[0];
+        assert_eq!(a_clip.start_frame, 48);
+        assert_eq!(a_clip.duration_frames(), 120);
+        assert_eq!(a_clip.name, "scene_01.mp4 [Audio]");
+
+        // Total timeline duration is now 48 + 120 = 168 frames
+        assert_eq!(timeline.sequence.duration_frames(), 168);
+        assert_eq!(timeline.effective_duration_frames(), 168);
+
+        // 6. Test undo: a single undo removes BOTH the video and audio clips atomically
+        assert!(timeline.can_undo());
+        let undone = timeline.history.undo(&mut timeline.sequence).unwrap();
+        assert!(undone.is_some());
+        assert_eq!(timeline.sequence.get_track(v1_id).unwrap().clips.len(), 0);
+        assert_eq!(timeline.sequence.get_track(a1_id).unwrap().clips.len(), 0);
+        assert_eq!(timeline.sequence.duration_frames(), 0);
+        assert_eq!(timeline.effective_duration_frames(), 720);
+    }
 }
