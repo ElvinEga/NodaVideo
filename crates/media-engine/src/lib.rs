@@ -13,7 +13,7 @@ pub mod waveform;
 
 use std::path::{Path, PathBuf};
 
-use nodavideo_project::{MediaAsset, MediaType, ProjectDocument};
+use nodavideo_project::{AssetId, MediaAsset, MediaType, ProjectDocument};
 use nodavideo_timeline::Sequence;
 
 pub use cache::{CachedMediaRecord, MediaCacheDb};
@@ -121,6 +121,20 @@ impl MediaProcessor {
         settings: &ExportSettings,
     ) -> Result<ExportReport, MediaEngineError> {
         export_sequence(sequence, project, settings)
+    }
+
+    /// Retrieve cached waveform data for an asset ID if it exists on disk.
+    #[must_use]
+    pub fn get_waveform(&self, asset_id: AssetId) -> Option<WaveformData> {
+        let path = self
+            .cache_dir
+            .join("waveforms")
+            .join(format!("{asset_id}.json"));
+        if path.exists() {
+            WaveformData::load_from_file(&path).ok()
+        } else {
+            None
+        }
     }
 }
 

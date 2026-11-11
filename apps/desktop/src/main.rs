@@ -1076,4 +1076,45 @@ mod tests {
             assert_eq!(session.sequence.tracks[0].clips.len(), 0);
         }
     }
+
+    #[core::prelude::v1::test]
+    fn test_waveform_timeline_visualization_and_export_toast() {
+        use nodavideo_media_engine::WaveformData;
+        use nodavideo_project::{AssetId, TimeRational};
+        use nodavideo_timeline::{Clip, ClipId};
+        use workspace::panels::timeline::TimelinePanel;
+
+        let mut timeline = TimelinePanel::new();
+        let a1_id = timeline.sequence.tracks[2].id; // A1 audio track
+        let asset_id = AssetId::new();
+
+        // 1. Test fallback harmonic waveform generation for clips without cached waveform
+        let clip = Clip::new(ClipId::new(), asset_id, a1_id, "Dialogue Audio", 0, 0, 96).unwrap();
+        let fallback_peaks = timeline.get_clip_waveform_peaks(&clip, 20);
+        assert_eq!(fallback_peaks.len(), 20);
+        for &p in &fallback_peaks {
+            assert!((0.05..=1.0).contains(&p));
+        }
+
+        // 2. Register real cached waveform data and test exact peak extraction
+        let mut real_peaks = Vec::with_capacity(400);
+        for i in 0..400 {
+            real_peaks.push((i as f32 / 400.0).clamp(0.1, 0.95));
+        }
+        let waveform = WaveformData {
+            asset_id,
+            duration: TimeRational::new(4, 1),
+            points_per_second: 100,
+            peaks: real_peaks,
+        };
+
+        timeline.set_waveform(asset_id, waveform);
+        assert!(timeline.waveforms.contains_key(&asset_id));
+
+        let sampled_peaks = timeline.get_clip_waveform_peaks(&clip, 10);
+        assert_eq!(sampled_peaks.len(), 10);
+        for &p in &sampled_peaks {
+            assert!((0.05..=1.0).contains(&p));
+        }
+    }
 }

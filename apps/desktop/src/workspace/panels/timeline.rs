@@ -1,5 +1,7 @@
 //! Timeline panel displaying multitrack composition, ruler, clips, playhead, and editing controls.
 
+use std::collections::HashMap;
+
 use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -11,7 +13,8 @@ use nodavideo_command_system::{
     AddClip, CommandHistory, DeleteClip, EditorCommand, MoveClip, RemoveTransition, SplitClip,
     ToggleLock, ToggleMute, ToggleSolo, TrimClip,
 };
-use nodavideo_project::{MediaAsset, MediaType};
+use nodavideo_media_engine::WaveformData;
+use nodavideo_project::{AssetId, MediaAsset, MediaType};
 use nodavideo_timeline::{
     Clip, ClipId, Sequence, TimelineSelection, Track, TrackId, TrackType, Transition, TransitionId,
     TransitionType, snap_clip_move, snap_frame,
@@ -39,6 +42,7 @@ pub struct TimelinePanel {
     pub ripple_enabled: bool,
     pub zoom_level: usize,
     pub snap_threshold_frames: i64,
+    pub waveforms: HashMap<AssetId, WaveformData>,
 }
 
 impl Default for TimelinePanel {
@@ -53,6 +57,7 @@ impl Default for TimelinePanel {
             ripple_enabled: false,
             zoom_level: 100,
             snap_threshold_frames: 6,
+            waveforms: HashMap::new(),
         }
     }
 }
@@ -136,6 +141,63 @@ impl TimelinePanel {
         let new_frame = (self.selection.playhead_frame - frames).max(0);
         self.selection.set_playhead(new_frame);
         cx.notify();
+    }
+
+    /// Register or update cached audio waveform data for an asset.
+    pub fn set_waveform(&mut self, asset_id: AssetId, waveform: WaveformData) {
+        self.waveforms.insert(asset_id, waveform);
+    }
+
+    /// Extract or compute waveform peak samples for rendering inside an audio clip.
+    pub fn get_clip_waveform_peaks(&self, clip: &Clip, num_bars: usize) -> Vec<f32> {
+        if num_bars == 0 {
+            return Vec::new();
+        }
+
+        if let Some(wf) = self.waveforms.get(&clip.asset_id) {
+            if !wf.peaks.is_empty() {
+                let fps = self.sequence.fps.to_f64().max(1.0);
+                let start_sec = (clip.source_in as f64 / fps).max(0.0);
+                let end_sec = (clip.source_out as f64 / fps).max(start_sec + 0.01);
+                let pps = wf.points_per_second as f64;
+                let start_idx = (start_sec * pps) as usize;
+                let end_idx = ((end_sec * pps) as usize).min(wf.peaks.len());
+
+                if start_idx < end_idx {
+                    let slice = &wf.peaks[start_idx..end_idx];
+                    let chunk_size = (slice.len() as f64 / num_bars as f64).max(1.0);
+                    let mut sampled = Vec::with_capacity(num_bars);
+
+                    for b in 0..num_bars {
+                        let c_start = (b as f64 * chunk_size) as usize;
+                        let c_end = (((b + 1) as f64 * chunk_size) as usize).min(slice.len());
+                        if c_start < c_end {
+                            let mut max_val: f32 = 0.0;
+                            for &p in &slice[c_start..c_end] {
+                                if p > max_val {
+                                    max_val = p;
+                                }
+                            }
+                            sampled.push(max_val.clamp(0.05, 1.0));
+                        } else {
+                            sampled.push(0.05);
+                        }
+                    }
+                    return sampled;
+                }
+            }
+        }
+
+        // Fallback: generate naturalistic audio envelope waveforms based on clip parameters
+        let seed = (clip.start_frame as f32).mul_add(0.13, clip.source_in as f32 * 0.07);
+        (0..num_bars)
+            .map(|i| {
+                let t = (i as f32).mul_add(0.22, seed);
+                let harmonic1 = (t * 0.9).sin().abs() * 0.55;
+                let harmonic2 = (t * 2.1).cos().abs() * 0.35;
+                (harmonic1 + harmonic2 + 0.1).clamp(0.05, 1.0)
+            })
+            .collect()
     }
 
     /// Undo last command.
@@ -1064,6 +1126,8 @@ impl TimelinePanel {
         let duration_text = self.sequence.frame_to_timecode(clip_duration);
         let current_tool = self.current_tool;
         let playhead_frame = self.selection.playhead_frame;
+        let is_audio = track.track_type == TrackType::Audio;
+        let num_bars = ((width_px - 8.0) / 3.0).clamp(4.0, 120.0) as usize;
 
         // Styling based on track type and overlay content
         let (bg_color, border_color, badge_pill): (Rgba, Hsla, Option<AnyElement>) =
@@ -1160,8 +1224,31 @@ impl TimelinePanel {
                     }
                 }
             }))
+            .when(is_audio, |this| {
+                let peaks = self.get_clip_waveform_peaks(clip, num_bars);
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_start()
+                        .gap(px(1.0))
+                        .px_1()
+                        .opacity(0.40)
+                        .children(peaks.into_iter().map(|p| {
+                            let bar_h = (p * 24.0).clamp(2.0, 26.0);
+                            div()
+                                .w(px(2.0))
+                                .h(px(bar_h))
+                                .rounded_xs()
+                                .bg(gpui::rgb(0x34d399))
+                        })),
+                )
+            })
             .child(
                 div()
+                    .relative()
                     .flex()
                     .items_center()
                     .justify_between()

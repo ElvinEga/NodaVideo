@@ -11,9 +11,9 @@ use std::sync::{Arc, RwLock};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
-use gpui_kit::component::ActiveTheme;
-use gpui_kit::component::Icon;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use nodavideo_agent_acp::AcpAgentProvider;
@@ -172,6 +172,18 @@ impl WorkspaceView {
             this.inspector.update(cx, |insp, cx| {
                 if insp.selected_asset != selected_asset {
                     insp.set_selected_asset(selected_asset, cx);
+                }
+            });
+            let assets = mb.read(cx).project.assets.clone();
+            let proc = this.processor.clone();
+            this.timeline.update(cx, |tl, cx| {
+                for asset in &assets {
+                    if !tl.waveforms.contains_key(&asset.id) {
+                        if let Some(wf) = proc.get_waveform(asset.id) {
+                            tl.set_waveform(asset.id, wf);
+                            cx.notify();
+                        }
+                    }
                 }
             });
             this.refresh_preview_frame(cx);
@@ -669,6 +681,7 @@ impl Render for WorkspaceView {
             .child(
                 // Workspace Body (Edit vs Other modes)
                 div()
+                    .relative()
                     .flex()
                     .flex_1()
                     .overflow_hidden()
@@ -676,7 +689,8 @@ impl Render for WorkspaceView {
                         self.render_edit_workspace(cx).into_any_element()
                     } else {
                         render_placeholder_workspace(active_tab, cx).into_any_element()
-                    }),
+                    })
+                    .children(self.render_export_toast(cx)),
             )
             .child(
                 // Bottom Window Status Bar
@@ -836,5 +850,117 @@ impl WorkspaceView {
                             .child("NodaVideo v0.1.0-alpha"),
                     ),
             )
+    }
+
+    /// Render floating export progress and completion toast overlay.
+    fn render_export_toast(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let status = self.export_status.as_ref()?;
+        let theme = cx.theme();
+        let is_in_progress = status.starts_with("Exporting") || status.starts_with("Selecting");
+        let is_complete = status.starts_with("Export complete");
+        let is_error = status.starts_with("Export failed") || status.starts_with("Cannot export");
+
+        let (title, icon, icon_color, border_color): (&str, IconName, Hsla, Hsla) =
+            if is_in_progress {
+                (
+                    "Exporting Video",
+                    IconName::Film,
+                    gpui::rgb(0x38bdf8).into(),
+                    gpui::rgb(0x0284c7).into(),
+                )
+            } else if is_complete {
+                (
+                    "Export Complete",
+                    IconName::Check,
+                    gpui::rgb(0x34d399).into(),
+                    gpui::rgb(0x059669).into(),
+                )
+            } else if is_error {
+                (
+                    "Export Error",
+                    IconName::TriangleAlert,
+                    gpui::rgb(0xf87171).into(),
+                    gpui::rgb(0xdc2626).into(),
+                )
+            } else {
+                (
+                    "Export Notification",
+                    IconName::Share2,
+                    theme.muted_foreground,
+                    theme.border,
+                )
+            };
+
+        Some(
+            div()
+                .absolute()
+                .bottom_4()
+                .right_4()
+                .w(px(380.0))
+                .p_3()
+                .rounded_lg()
+                .bg(theme.secondary)
+                .border_1()
+                .border_color(border_color)
+                .shadow_lg()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(Icon::new(icon).text_color(icon_color))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_bold()
+                                        .text_color(theme.foreground)
+                                        .child(title),
+                                ),
+                        )
+                        .child(
+                            Button::new("dismiss-export-toast")
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::X)
+                                .tooltip("Dismiss")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.export_status = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(status.clone()),
+                )
+                .when(is_in_progress, |this| {
+                    this.child(
+                        div()
+                            .h(px(3.0))
+                            .w_full()
+                            .rounded_full()
+                            .bg(theme.muted)
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w_3_4()
+                                    .rounded_full()
+                                    .bg(gpui::rgb(0x38bdf8)),
+                            ),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 }
