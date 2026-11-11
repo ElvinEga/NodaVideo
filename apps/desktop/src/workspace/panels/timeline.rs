@@ -612,7 +612,7 @@ impl TimelinePanel {
 
             if self.history.execute(batch, &mut self.sequence).is_ok() {
                 self.selection.select_single(video_clip_id);
-                self.selection.set_playhead(start_frame + duration_frames);
+                self.selection.set_playhead(start_frame);
                 return true;
             }
             return false;
@@ -642,7 +642,7 @@ impl TimelinePanel {
         let cmd = EditorCommand::AddClip(AddClip { track_id, clip });
         if self.history.execute(cmd, &mut self.sequence).is_ok() {
             self.selection.select_single(clip_id);
-            self.selection.set_playhead(start_frame + duration_frames);
+            self.selection.set_playhead(start_frame);
             return true;
         }
         false

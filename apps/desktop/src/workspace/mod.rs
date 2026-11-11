@@ -146,14 +146,25 @@ impl WorkspaceView {
         });
 
         // Wire transport buttons on Preview Monitor
+        let tl_rewind = timeline.clone();
         let tl_back = timeline.clone();
         let tl_fwd = timeline.clone();
+        let tl_forward = timeline.clone();
         preview_monitor.update(cx, |mon, _| {
+            mon.on_rewind_start = Some(std::rc::Rc::new(move |_, cx| {
+                tl_rewind.update(cx, |tl, cx| tl.set_playhead(0, cx));
+            }));
             mon.on_step_backward = Some(std::rc::Rc::new(move |_, cx| {
                 tl_back.update(cx, |tl, cx| tl.step_backward(1, cx));
             }));
             mon.on_step_forward = Some(std::rc::Rc::new(move |_, cx| {
                 tl_fwd.update(cx, |tl, cx| tl.step_forward(1, cx));
+            }));
+            mon.on_forward_end = Some(std::rc::Rc::new(move |_, cx| {
+                tl_forward.update(cx, |tl, cx| {
+                    let dur = tl.effective_duration_frames();
+                    tl.set_playhead(dur, cx);
+                });
             }));
         });
 
@@ -373,6 +384,12 @@ impl WorkspaceView {
 
     /// Start the real-time playback timer advancing the playhead.
     pub fn start_playback_loop(&mut self, cx: &mut Context<Self>) {
+        let seq_duration = self.timeline.read(cx).effective_duration_frames();
+        let current_playhead = self.timeline.read(cx).playhead();
+        if current_playhead >= seq_duration && seq_duration > 0 {
+            self.timeline.update(cx, |tl, cx| tl.set_playhead(0, cx));
+        }
+
         let fps = self.timeline.read(cx).sequence.fps;
         let fps_f64 = fps.to_f64().max(1.0);
         let interval_ms = (1000.0 / fps_f64).round() as u64;
@@ -709,6 +726,17 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(|this, _: &StepBackwardAction, _, cx| {
                 this.timeline.update(cx, |tl, cx| {
                     tl.step_backward(1, cx);
+                });
+            }))
+            .on_action(cx.listener(|this, _: &RewindToStartAction, _, cx| {
+                this.timeline.update(cx, |tl, cx| {
+                    tl.set_playhead(0, cx);
+                });
+            }))
+            .on_action(cx.listener(|this, _: &ForwardToEndAction, _, cx| {
+                this.timeline.update(cx, |tl, cx| {
+                    let dur = tl.effective_duration_frames();
+                    tl.set_playhead(dur, cx);
                 });
             }))
             .child({

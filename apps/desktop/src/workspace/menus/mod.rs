@@ -28,6 +28,8 @@ actions!(
         PlayPauseAction,
         StepForwardAction,
         StepBackwardAction,
+        RewindToStartAction,
+        ForwardToEndAction,
         LoopPlaybackAction,
         SplitClipAction,
         DeleteClipAction,
@@ -63,6 +65,8 @@ pub fn init(cx: &mut App) {
             KeyBinding::new("space", PlayPauseAction, None),
             KeyBinding::new("right", StepForwardAction, None),
             KeyBinding::new("left", StepBackwardAction, None),
+            KeyBinding::new("home", RewindToStartAction, None),
+            KeyBinding::new("end", ForwardToEndAction, None),
             KeyBinding::new("l", LoopPlaybackAction, None),
         ]);
     } else {
@@ -88,6 +92,8 @@ pub fn init(cx: &mut App) {
             KeyBinding::new("space", PlayPauseAction, None),
             KeyBinding::new("right", StepForwardAction, None),
             KeyBinding::new("left", StepBackwardAction, None),
+            KeyBinding::new("home", RewindToStartAction, None),
+            KeyBinding::new("end", ForwardToEndAction, None),
             KeyBinding::new("l", LoopPlaybackAction, None),
         ]);
     }
@@ -144,8 +150,10 @@ pub fn init(cx: &mut App) {
             name: "Playback".into(),
             items: vec![
                 MenuItem::action("Play / Pause", PlayPauseAction),
+                MenuItem::action("Rewind to Start", RewindToStartAction),
                 MenuItem::action("Step Forward 1 Frame", StepForwardAction),
                 MenuItem::action("Step Backward 1 Frame", StepBackwardAction),
+                MenuItem::action("Forward to End", ForwardToEndAction),
                 MenuItem::action("Loop Playback", LoopPlaybackAction),
             ],
             disabled: false,

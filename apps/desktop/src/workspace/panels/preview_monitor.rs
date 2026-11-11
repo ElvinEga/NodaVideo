@@ -29,6 +29,8 @@ pub struct PreviewMonitorPanel {
     pub audio_meter_right: f32,
     pub on_step_backward: Option<TransportCallback>,
     pub on_step_forward: Option<TransportCallback>,
+    pub on_rewind_start: Option<TransportCallback>,
+    pub on_forward_end: Option<TransportCallback>,
 }
 
 impl std::fmt::Debug for PreviewMonitorPanel {
@@ -58,6 +60,8 @@ impl Default for PreviewMonitorPanel {
             audio_meter_right: -60.0,
             on_step_backward: None,
             on_step_forward: None,
+            on_rewind_start: None,
+            on_forward_end: None,
         }
     }
 }
@@ -121,13 +125,16 @@ impl Render for PreviewMonitorPanel {
             .filter(|p| p.exists())
             .cloned();
 
+        let rewind_start = self.on_rewind_start.clone();
         let step_back = self.on_step_backward.clone();
         let step_fwd = self.on_step_forward.clone();
+        let forward_end = self.on_forward_end.clone();
 
         div()
             .flex()
             .flex_col()
             .size_full()
+            .overflow_hidden()
             .bg(theme.background)
             .child(
                 // Panel Header
@@ -136,6 +143,7 @@ impl Render for PreviewMonitorPanel {
                     .items_center()
                     .justify_between()
                     .h_9()
+                    .flex_shrink_0()
                     .px_3()
                     .border_b_1()
                     .border_color(theme.border)
@@ -176,7 +184,10 @@ impl Render for PreviewMonitorPanel {
                     .items_center()
                     .justify_center()
                     .flex_1()
-                    .p_4()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .p_2()
                     .bg(theme.background)
                     .child(
                         // Monitor Aspect Canvas Screen
@@ -185,8 +196,7 @@ impl Render for PreviewMonitorPanel {
                             .flex_col()
                             .items_center()
                             .justify_center()
-                            .w_full()
-                            .h_full()
+                            .size_full()
                             .max_w(px(880.0))
                             .max_h(px(495.0))
                             .rounded_sm()
@@ -198,22 +208,22 @@ impl Render for PreviewMonitorPanel {
                                 this.child(img(path).size_full().object_fit(ObjectFit::Contain))
                             })
                             .when(self.current_frame_path.is_none(), |this| {
-                                this.p_6().child(
+                                this.p_4().child(
                                     div()
                                         .flex()
                                         .flex_col()
                                         .items_center()
-                                        .gap_2()
+                                        .gap_1p5()
                                         .child(
                                             div()
-                                                .p_3()
+                                                .p_2p5()
                                                 .rounded_full()
                                                 .bg(theme.muted)
                                                 .child(Icon::new(IconName::Play)),
                                         )
                                         .child(
                                             div()
-                                                .text_sm()
+                                                .text_xs()
                                                 .font_medium()
                                                 .text_color(theme.foreground)
                                                 .child("Empty Timeline Playhead"),
@@ -235,6 +245,7 @@ impl Render for PreviewMonitorPanel {
                     .items_center()
                     .justify_between()
                     .h_10()
+                    .flex_shrink_0()
                     .px_4()
                     .border_t_1()
                     .border_color(theme.border)
@@ -267,6 +278,18 @@ impl Render for PreviewMonitorPanel {
                             .flex()
                             .items_center()
                             .gap_1()
+                            .child(
+                                Button::new("rewind-start-btn")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::SkipBack)
+                                    .tooltip("Rewind to Start (Home)")
+                                    .on_click(move |_, win, app| {
+                                        if let Some(ref cb) = rewind_start {
+                                            cb(win, app);
+                                        }
+                                    }),
+                            )
                             .child(
                                 Button::new("step-back-btn")
                                     .ghost()
@@ -310,10 +333,22 @@ impl Render for PreviewMonitorPanel {
                                     }),
                             )
                             .child(
+                                Button::new("forward-end-btn")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::SkipForward)
+                                    .tooltip("Forward to End (End)")
+                                    .on_click(move |_, win, app| {
+                                        if let Some(ref cb) = forward_end {
+                                            cb(win, app);
+                                        }
+                                    }),
+                            )
+                            .child(
                                 Button::new("loop-btn")
                                     .ghost()
                                     .small()
-                                    .icon(IconName::RotateCcw)
+                                    .icon(IconName::Repeat)
                                     .tooltip("Toggle Playback Loop (L)")
                                     .when(is_looping, |btn| btn.outline())
                                     .on_click(cx.listener(|this, _, _, cx| {

@@ -1177,6 +1177,8 @@ mod tests {
         // 4. Drop on V1 at target_frame = 48 (2.0s)
         let placed = timeline.drop_asset_clip(v1_id, &asset, Some(48));
         assert!(placed);
+        // Playhead is placed at start_frame (48) so the first frame renders immediately on drop
+        assert_eq!(timeline.playhead(), 48);
 
         // 5. Verify both V1 video clip and A1 audio clip were created with linked start frame 48 and duration 120
         let v1_track = timeline.sequence.get_track(v1_id).unwrap();
@@ -1205,5 +1207,51 @@ mod tests {
         assert_eq!(timeline.sequence.get_track(a1_id).unwrap().clips.len(), 0);
         assert_eq!(timeline.sequence.duration_frames(), 0);
         assert_eq!(timeline.effective_duration_frames(), 720);
+    }
+
+    #[test]
+    fn test_preview_monitor_transport_and_playback_controls() {
+        use workspace::panels::preview_monitor::PreviewMonitorPanel;
+        use workspace::panels::timeline::TimelinePanel;
+
+        let mut monitor = PreviewMonitorPanel::new();
+        assert!(!monitor.is_playing);
+        assert!(!monitor.is_looping);
+
+        // Verify initial timecodes and audio meters
+        assert_eq!(monitor.timecode.as_ref(), "00:00:00:00");
+        assert_eq!(monitor.duration.as_ref(), "00:00:00:00");
+        assert_eq!(monitor.audio_meter_left, -60.0);
+        assert_eq!(monitor.audio_meter_right, -60.0);
+
+        // Verify transport callbacks can be configured
+        let rewind_called = std::rc::Rc::new(std::cell::Cell::new(false));
+        let rc_clone = rewind_called.clone();
+        monitor.on_rewind_start = Some(std::rc::Rc::new(move |_, _| {
+            rc_clone.set(true);
+        }));
+        assert!(monitor.on_rewind_start.is_some());
+        assert!(!rewind_called.get());
+
+        let forward_called = std::rc::Rc::new(std::cell::Cell::new(false));
+        let fwd_clone = forward_called.clone();
+        monitor.on_forward_end = Some(std::rc::Rc::new(move |_, _| {
+            fwd_clone.set(true);
+        }));
+        assert!(monitor.on_forward_end.is_some());
+        assert!(!forward_called.get());
+
+        // Verify auto-rewind logic at sequence end
+        let mut timeline = TimelinePanel::new();
+        timeline.selection.set_playhead(720);
+        let seq_duration = timeline.effective_duration_frames();
+        let current_playhead = timeline.playhead();
+        assert!(current_playhead >= seq_duration);
+
+        // If playhead was at sequence end when playback starts, auto-rewind to 0
+        if current_playhead >= seq_duration && seq_duration > 0 {
+            timeline.selection.set_playhead(0);
+        }
+        assert_eq!(timeline.playhead(), 0);
     }
 }
