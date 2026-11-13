@@ -4,7 +4,7 @@ id: color-grading
 version: 1.0.0
 description: Apply cinematic color grades, mood presets, contrast curves, and exposure balancing across sequence clips.
 tags: [color, grading, lut, cinematic, exposure, saturation, look, mood]
-recommended_tools: [get_timeline, set_clip_transform, preview_changeset, propose_changeset]
+tools: [get_timeline, set_clip_transform, preview_changeset, propose_changeset]
 ---
 
 # Color Grading Skill
