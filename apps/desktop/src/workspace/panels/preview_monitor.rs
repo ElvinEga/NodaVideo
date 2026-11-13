@@ -78,7 +78,32 @@ impl PreviewMonitorPanel {
         cx.notify();
     }
 
-    /// Update preview frame and timecode display.
+    /// Update the timecode readout without waiting for a decoded frame.
+    ///
+    /// Timecodes derive from integer frames and are cheap; the workspace applies
+    /// them immediately on every playhead change while frame decoding is deferred.
+    pub fn update_timecode(
+        &mut self,
+        timecode: SharedString,
+        duration: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        if self.timecode != timecode || self.duration != duration {
+            self.timecode = timecode;
+            self.duration = duration;
+            cx.notify();
+        }
+    }
+
+    /// Replace the displayed frame with a completed decode result.
+    pub fn set_frame(&mut self, frame_path: Option<PathBuf>, cx: &mut Context<Self>) {
+        if self.current_frame_path != frame_path {
+            self.current_frame_path = frame_path;
+            cx.notify();
+        }
+    }
+
+    /// Update preview frame and timecode display together.
     pub fn update_frame(
         &mut self,
         frame_path: Option<PathBuf>,
@@ -86,10 +111,8 @@ impl PreviewMonitorPanel {
         duration: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) {
-        self.current_frame_path = frame_path;
-        self.timecode = timecode.into();
-        self.duration = duration.into();
-        cx.notify();
+        self.update_timecode(timecode.into(), duration.into(), cx);
+        self.set_frame(frame_path, cx);
     }
 
     /// Toggle playback state.
