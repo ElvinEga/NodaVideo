@@ -17,10 +17,10 @@ Product direction, in priority order:
 
 Core identity: native Rust + GPUI, professional NLE, multi-provider agent support, AI-assisted editing with full user control.
 
-**Repo status: M0 desktop shell, M1 media management, M2 timeline engine, M3 preview & export, M4 AI integration, and M5 AI editing workflows completed.** As of 2026-11-10, the foundational Cargo workspace, media engine, timeline engine, command system, preview playback, MP4 export pipeline, multi-provider AI adapters, and AI editing workflow architecture have been implemented:
+**Repo status (corrected 2026-11-12): M0 and M1 are complete; M2 and M3 are partial; M4 and M5 have working domain and protocol layers.** The earlier "all milestones completed" claim described implemented modules rather than end-to-end working features — see the **Reality check** below and the milestone table in §8. As of 2026-11-12, the foundational Cargo workspace, media engine, timeline engine, command system, MP4 export pipeline, multi-provider AI adapters, and AI editing workflow architecture have been implemented:
 - `apps/desktop` (`nodavideo-desktop` binary): native GPUI desktop application featuring the complete professional NLE shell (native menus with shortcuts, top toolbar, workspace mode tabs for Edit/Color/Audio/AI Studio, resizable dockable panel layout for Media Browser, Preview Monitor, Inspector, Timeline, and AI Assistant, session persistence, and dark NLE theme), a fully functioning Media Browser connected to real media imports, search, filters, drag-and-drop, an interactive multitrack Timeline connected to real clips, ruler scrubbing, razor split, trimming, snapping, and undo/redo history, a real-time Preview Monitor with playback loop, frame-accurate transport controls, full MP4 export workflow, a dedicated AI Assistant dockable panel with provider cycling (Antigravity ACP / Gemini ACP / Codex App-Server / Claude Code CLI / Mock Offline), active skill badge indicator, streaming chat message history, real-time thought/tool-call inspection, interactive approval cards for staged sequence edits, and status bar AI readiness indicator.
 - `crates/project` (`nodavideo-project` library): versioned JSON project document (`schema_version = 1`), atomic project persistence, missing media asset detection, strongly typed IDs (`AssetId`, `ProjectId`), frame-accurate rational timing (`TimeRational`, `FrameRate`), and timeline sequence attachment.
-- `crates/media-engine` (`nodavideo-media-engine` library): FFmpeg/FFprobe stream metadata probing, thumbnail generation, normalized audio waveform extraction, real-time timeline frame extraction with disk caching (`render_sequence_frame`), broadcast-standard multitrack MP4 export filtergraph assembly (`export_sequence`), and SQLite-backed persistent media cache (`MediaCacheDb`).
+- `crates/media-engine` (`nodavideo-media-engine` library): FFmpeg/FFprobe stream metadata probing, thumbnail generation, normalized audio waveform extraction, real-time timeline frame extraction with disk caching (`render_sequence_frame`), broadcast-standard multitrack MP4 export filtergraph assembly (`export_sequence`), and SQLite-backed persistent media cache (`MediaCacheDb`); central FFmpeg/FFprobe executable resolution with env overrides (`binaries`), and pure frame-exact conversion helpers (`time_math`) used only at the FFmpeg CLI boundary.
 - `crates/timeline` (`nodavideo-timeline` library): pure deterministic multitrack sequence model, tracks (video/audio, mute, solo, lock, order), timeline clips (frame-accurate source in/out and placement), text overlays and auto-captions (`TextOverlay`, `TextStyle`, `TextAlignment`, `CaptionSegment`), edit cut transitions (crossfade, dissolve, fade-to-black, dip-to-white, wipe), snapping engine (clip edges, playhead, sequence start), trimming, splitting, ripple deletion, and selection state.
 - `crates/command-system` (`nodavideo-command-system` library): canonical `EditorCommand` enum with atomic `BatchCommand` and `StagedChangeset` support, text overlays (`AddTextOverlay`), subtitle caption batches (`GenerateCaptions`), clip transforms, audio parameters, transition placement, deterministic speculative preview diff projection, transactional error rollback, and unified undo/redo history stack (`CommandHistory`).
 - `crates/agent-runtime` (`nodavideo-agent-runtime` library): pluggable `AgentProvider` trait, `AgentConfig`, strongly typed `AgentEvent` streams, `MockAgentProvider` with approval prompts and tool calls for offline CI, and thread-safe session router (`AgentRuntime`).
@@ -36,6 +36,44 @@ Core identity: native Rust + GPUI, professional NLE, multi-provider agent suppor
 - `templates/`: standard production motion graphics and title template bundles (`titles`, `lower-thirds`, `social`, `transitions`) with recursive directory loading.
 - `sidecars/hyperframes`: vector motion graphics and HTML scene sidecar runtime (`@nodavideo/hyperframes-sidecar`) with headless CLI renderer and browser preview testbed.
 
+### Reality check (2026-11-12 audit)
+
+An audit of the playback/editing path against the running code found that the
+domain layer is sound but the editor is not yet reliably usable as an NLE. The
+bullets above describe implemented modules, not end-to-end working features:
+
+- **Playback is a slideshow.** One FFmpeg process and one JPEG per requested
+  frame; measured ~37.5 ms/frame at 640x360, before compositing or audio. Phase A
+  added a single-flight coalescing scheduler and a wall-clock clock, but did not
+  replace the per-frame process model. A persistent decoder measured ~1.25 ms/frame
+  on the same clip. See `docs/PLAYBACK_ENGINE_DESIGN.md`.
+- **Playback is silent.** There is no audio output backend (`cpal` / `rodio` /
+  ALSA / CoreAudio / SDL2) anywhere in the workspace. `crates/audio-engine`
+  provides mixing primitives but is used only from `#[cfg(test)]` code in the
+  desktop binary. No A/V sync exists.
+- **Preview and export disagree.** Preview resolves one topmost video clip and
+  holds `Option<PathBuf>`; export builds a separate FFmpeg filtergraph. Neither
+  renders transitions, titles, captions, transforms or per-clip audio parameters.
+- **Direct manipulation is incomplete.** Ruler and track-lane mouse handlers scrub
+  the playhead; clips have selection clicks but no drag-to-move and no edge-trim
+  handles. Trimming is available only through fixed-step toolbar buttons that
+  dispatch `TrimClip`. `Track::add_clip` also allows overlapping clips on one
+  lane, and `TrimClip::apply` does not validate invariants.
+- **Transport state is duplicated** across `TimelinePanel`, `PreviewMonitorPanel`,
+  `WorkspaceLayoutState` and `EditorSession` / `PlaybackController`.
+
+**Phase A (2026-11-12) stabilized the existing path**: central FFmpeg/FFprobe
+resolution (GUI `PATH` fix), frame-accurate sequence/asset fps retiming in preview
+and export, overlay clips no longer blanking preview, single-flight preview
+rendering, wall-clock playback with no overshoot, exact frame stepping, and clip
+clicks no longer scrubbing the playhead. Verified: `cargo fmt --all -- --check`,
+`cargo test --workspace` (123 passed, 0 failed),
+`cargo clippy --workspace --all-targets -- -D warnings` and
+`cargo build --workspace` all clean on macOS aarch64 with rustc 1.99.1.
+
+**Phase B is a design proposal only** (`docs/PLAYBACK_ENGINE_DESIGN.md`, status
+PROPOSED). §10 requires sign-off on decisions D1–D7 before any new engine is
+implemented. No Phase B code exists.
 
 Pinned stack: `gpui-kit 0.9.0` (`gpui-pre 0.3.11`), Rust MSRV `1.92.0`, edition `2024`. Dependencies are centralized in workspace `Cargo.toml` with `Cargo.lock` committed.
 Repository scaffolding includes: `.gitignore`, `rustfmt.toml`, `README.md`, `LICENSE` (Apache-2.0), and GitHub Actions CI (`.github/workflows/ci.yml`).
@@ -69,7 +107,8 @@ These are the decisions that define NodaVideo. Any change to them requires an ex
 NodaVideo/
 ├── AGENTS.md                    # this file
 ├── docs/
-│   └── GPUI_KIT_GUIDELINES.md   # GPUI Kit / GPUI UI implementation guideline
+│   ├── GPUI_KIT_GUIDELINES.md    # GPUI Kit / GPUI UI implementation guideline
+│   └── PLAYBACK_ENGINE_DESIGN.md # Phase B real playback engine (PROPOSED)
 ├── Cargo.toml                   # workspace manifest (pins GPUI versions)
 ├── apps/
 │   └── desktop/
@@ -205,8 +244,8 @@ Build a working editor **vertically**, then expand. Do not attempt the full CapC
 | --- | --- | --- | --- |
 | M0 | Native desktop foundation: GPUI + GPUI Kit, menus, dockable/resizable panels, keyboard shortcuts, themes, project management | App launches on macOS, Windows and Linux; panels resize and persist; a new project can be created and reopened | **Completed on macOS** (CI configured for Windows/Linux) |
 | M1 | Media management: import video/audio/images, thumbnails, metadata, waveform generation, media bin | Import a clip; see thumbnail, duration and waveform; relaunch retains the media index | **Completed on macOS** (Real file imports, drag-and-drop, FFprobe metadata, thumbnailing, 100-pt/sec waveform cache, SQLite index, and atomic project persistence; CI configured for Windows/Linux) |
-| M2 | Timeline engine: multi-track editing, drag and drop, trim, split, snapping, playhead, selection, undo/redo | Drag a clip to a track, trim both edges, split at playhead, ripple delete; undo/redo restores exact state; times are exact at frame boundaries | **Completed on macOS** (Pure deterministic `crates/timeline` domain, canonical `EditorCommand` & `CommandHistory` in `crates/command-system`, frame-accurate snapping, timeline serialization, interactive GPUI timeline panel with razor split, trimming, dragging, and undo/redo; CI configured for Windows/Linux) |
-| M3 | Preview and export: playback, scrubbing, A/V sync, effects pipeline, MP4 export | **First vertical slice: import video → drag to timeline → trim → preview → export MP4**, with output playable in a third-party player | **Completed on macOS** (Real-time frame extraction cache, 24fps playback loop, dynamic FFmpeg multitrack video/audio filtergraph MP4 export, `Cmd+E`/`Ctrl+E` and toolbar triggers, background off-thread execution, and status bar progress; CI configured for Windows/Linux) |
+| M2 | Timeline engine: multi-track editing, drag and drop, trim, split, snapping, playhead, selection, undo/redo | Drag a clip to a track, trim both edges, split at playhead, ripple delete; undo/redo restores exact state; times are exact at frame boundaries | **Partial on macOS — acceptance test NOT met.** Pure deterministic `crates/timeline` domain, canonical `EditorCommand` & `CommandHistory`, frame-accurate snapping, serialization and undo/redo are complete. The GPUI timeline has ruler/lane scrubbing, razor split, drop-to-add, fixed-step trim buttons and clip selection, but **no drag-to-move or edge-trim handles**; overlapping clips are allowed on one lane; `TrimClip::apply` lacks invariant validation. Clip clicks no longer scrub the playhead (Phase A A6). |
+| M3 | Preview and export: playback, scrubbing, A/V sync, effects pipeline, MP4 export | **First vertical slice: import video → drag to timeline → trim → preview → export MP4**, with output playable in a third-party player | **Partial on macOS — acceptance test NOT met.** Dynamic FFmpeg multitrack video/audio filtergraph MP4 export (with sequence/asset fps retiming after Phase A), `Cmd+E`/`Ctrl+E`, off-thread execution and progress reporting work. **Playback is not real-time**: one FFmpeg process + one JPEG per frame, no audio output backend, no A/V sync, no GPU compositing. Preview shows one topmost clip and does not match export for transitions, titles, captions or transforms. Phase A added wall-clock playback, coalesced rendering and no-overshoot. See `docs/PLAYBACK_ENGINE_DESIGN.md`. |
 | M4 | AI integration: ACP, Codex app-server, Claude CLI adapter, provider selector, conversation UI, skill picker, MCP editor tools | Two different providers can run the same task; every agent mutation appears in undo history; disconnecting an agent leaves the editor fully functional | **Completed on macOS** (Pluggable `AgentProvider`, ACP adapter for Antigravity & Gemini CLI, offline Mock provider, MCP tool surface over `EditorCommand` & `CommandHistory`, interactive approvals, AI Studio dockable panel; CI configured for Windows/Linux) |
 | M5 | AI editing workflows: smart cuts, captions, animated titles, social-video formats, natural-language editing | A prompt produces a reviewable sequence, a preview render, and only commits after user approval | **Completed on macOS** (Atomic `BatchCommand` & `StagedChangeset` engine, speculative sequence diff projection, production skills: smart-cuts, auto-captions, social-video, animated-titles; Codex app-server & Claude Code CLI adapters; CI configured for Windows/Linux) |
 
@@ -218,7 +257,8 @@ Integrate **Codex and Antigravity** through their supported protocols before add
 - **Errors**: `thiserror` for domain errors in library crates; `anyhow` only at application boundaries. No `unwrap()` / `expect()` in library crates unless the invariant is provably impossible — and then document why inline.
 - **Async**: tokio for agent I/O and long-running tasks. Keep timeline model and command application synchronous and pure so replay/undo stay deterministic.
 - **IDs**: opaque strongly-typed newtypes (`ClipId`, `TrackId`, `SessionId`, `ProjectId`), never raw strings or integers in public APIs.
-- **Tests**: unit tests for timeline invariants (trim, split, ripple, snapping, frame-exact arithmetic); project schema migration tests; adapter contract tests using recorded JSON-RPC fixtures. **CI must not require live CLI logins or network access.** Add an acceptance test with every milestone.
+- **Tests**: unit tests for timeline invariants (trim, split, ripple, snapping, frame-exact arithmetic); project schema migration tests; adapter contract tests using recorded JSON-RPC fixtures. **CI must not require live CLI logins, network access or audio hardware.** Add an acceptance test with every milestone.
+- **Unit tests in `apps/desktop`**: `use gpui_kit::*;` re-exports GPUI's `#[gpui::test]` proc-macro under the bare name `test`. In any `#[cfg(test)] mod tests` that uses `use super::*;`, write `#[core::prelude::v1::test]` instead of `#[test]` (as `main.rs` already does). A plain `#[test]` resolves to the GPUI wrapper, recurses infinitely, and crashes rustc with SIGBUS.
 - **Cross-platform**: no platform-specific APIs in `crates/*`; macOS/Windows/Linux specifics belong in `apps/desktop` behind traits or `cfg`.
 - **Dependencies**: adding a dependency to a core crate requires a short justification recorded in the PR/commit and, if it changes the architecture, here.
 - **Commands**: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`. These are the intended CI contract; set them up in M0 and update this section with the real commands once CI exists.
@@ -228,4 +268,6 @@ Integrate **Codex and Antigravity** through their supported protocols before add
 
 Propose a design before adding a new engine, protocol, timeline or command path. Specifically: **do not** introduce a second timeline, a second mutation path, provider-specific logic in `editor-core`, credential handling in the editor, or float-second time in the model. Ask the user rather than guessing on those.
 
-Suggested next artifact: a detailed implementation-ready technical specification covering crate responsibilities, project JSON schemas, agent protocol interfaces and milestone acceptance tests.
+Phase B (a real playback engine) is such a change. `docs/PLAYBACK_ENGINE_DESIGN.md` is the proposal and is **design-only**; its decisions D1–D7 need explicit user sign-off before B1 begins. In particular, D4 asks whether transport state (playhead / playing / loop) is exempt from `EditorCommand` as ephemeral view state.
+
+Suggested next artifact: review and sign off `docs/PLAYBACK_ENGINE_DESIGN.md`. A separate implementation-ready technical specification covering project JSON schemas and agent protocol interfaces remains outstanding.
