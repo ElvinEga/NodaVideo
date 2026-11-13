@@ -215,6 +215,14 @@ impl TimelineEditingState {
                         bail!("Audio clip {} has invalid audio gain", audio.id());
                     }
                 }
+                Clip::Composition(composition) => {
+                    if track.kind != TrackKind::Video {
+                        bail!(
+                            "Composition clip {} requires a video track",
+                            composition.id()
+                        );
+                    }
+                }
             }
         }
         let mut intervals = self

@@ -26,6 +26,7 @@ fn text_sections(
             )),
             Clip::Video(_) => None,
             Clip::Audio(_) => None,
+            Clip::Composition(_) => None,
         })
         .collect::<Vec<_>>();
     intervals.sort_unstable();
@@ -81,6 +82,9 @@ fn compact_to_sections(
                         media.source_out = media.source_in + end - start;
                     }
                     Clip::Text(text) => text.duration = frame_rate.duration(end - start),
+                    Clip::Composition(composition) => {
+                        composition.duration = frame_rate.duration(end - start);
+                    }
                 }
                 compacted.clips.push(fragment);
             }

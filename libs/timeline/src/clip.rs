@@ -104,6 +104,7 @@ pub enum Clip {
     Video(VideoClip),
     Audio(AudioClip),
     Text(TextClip),
+    Composition(CompositionClip),
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -159,6 +160,27 @@ pub struct TextClip {
     #[serde(rename = "length")]
     pub duration: Duration,
     pub properties: TextClipProperties,
+}
+
+/// A timeline instance of a project motion-graphics composition.
+///
+/// The clip references the composition by id; the editable source stays in the
+/// project library, so placing it never flattens the composition to a rendered file.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[cfg_attr(feature = "timeline-schema", derive(schemars::JsonSchema))]
+pub struct CompositionClip {
+    #[serde(deserialize_with = "deserialize_ulid")]
+    #[cfg_attr(feature = "timeline-schema", schemars(with = "String"))]
+    id: Ulid,
+    #[serde(deserialize_with = "deserialize_ulid")]
+    #[cfg_attr(feature = "timeline-schema", schemars(with = "String"))]
+    pub track_id: Ulid,
+    #[serde(deserialize_with = "deserialize_ulid")]
+    #[cfg_attr(feature = "timeline-schema", schemars(with = "String"))]
+    pub composition_id: Ulid,
+    pub timeline_start: TimelineFrameIndex,
+    #[serde(rename = "length")]
+    pub duration: Duration,
 }
 
 // Public APIs only
@@ -270,12 +292,48 @@ impl TextClip {
 }
 
 // Public APIs only
+impl CompositionClip {
+    pub fn new(
+        id: Ulid,
+        track_id: Ulid,
+        composition_id: Ulid,
+        timeline_start: TimelineFrameIndex,
+        duration: Duration,
+    ) -> Self {
+        Self {
+            id,
+            track_id,
+            composition_id,
+            timeline_start,
+            duration,
+        }
+    }
+
+    pub fn id(&self) -> Ulid {
+        self.id
+    }
+
+    /// Creates a new clip with the supplied identity; cloning preserves identity.
+    fn copy(&self, new_id: Ulid) -> Self {
+        Self {
+            id: new_id,
+            ..self.clone()
+        }
+    }
+
+    pub fn frame_length(&self, frame_rate: FrameRate) -> TimelineFrameIndex {
+        frame_rate.frames_from_duration_nearest(self.duration)
+    }
+}
+
+// Public APIs only
 impl Clip {
     pub fn id(&self) -> Ulid {
         match self {
             Self::Video(clip) => clip.id(),
             Self::Audio(clip) => clip.id(),
             Self::Text(clip) => clip.id(),
+            Self::Composition(clip) => clip.id(),
         }
     }
 
@@ -284,6 +342,7 @@ impl Clip {
             Self::Video(clip) => Self::Video(clip.copy(new_id)),
             Self::Audio(clip) => Self::Audio(clip.copy(new_id)),
             Self::Text(clip) => Self::Text(clip.copy(new_id)),
+            Self::Composition(clip) => Self::Composition(clip.copy(new_id)),
         }
     }
 
@@ -292,6 +351,7 @@ impl Clip {
             Self::Video(clip) => clip.track_id,
             Self::Audio(clip) => clip.track_id,
             Self::Text(clip) => clip.track_id,
+            Self::Composition(clip) => clip.track_id,
         }
     }
 
@@ -300,6 +360,7 @@ impl Clip {
             Self::Video(clip) => clip.track_id = track_id,
             Self::Audio(clip) => clip.track_id = track_id,
             Self::Text(clip) => clip.track_id = track_id,
+            Self::Composition(clip) => clip.track_id = track_id,
         }
     }
 
@@ -308,6 +369,7 @@ impl Clip {
             Self::Video(clip) => clip.timeline_start,
             Self::Audio(clip) => clip.timeline_start,
             Self::Text(clip) => clip.timeline_start,
+            Self::Composition(clip) => clip.timeline_start,
         }
     }
 
@@ -316,6 +378,7 @@ impl Clip {
             Self::Video(clip) => clip.timeline_start = timeline_start,
             Self::Audio(clip) => clip.timeline_start = timeline_start,
             Self::Text(clip) => clip.timeline_start = timeline_start,
+            Self::Composition(clip) => clip.timeline_start = timeline_start,
         }
     }
 
@@ -356,6 +419,7 @@ impl Clip {
             Self::Video(clip) => Some(clip.asset_id),
             Self::Audio(clip) => Some(clip.asset_id),
             Self::Text(_) => None,
+            Self::Composition(_) => None,
         }
     }
 
@@ -364,6 +428,7 @@ impl Clip {
             Self::Video(clip) => Some(clip.source_in),
             Self::Audio(clip) => Some(clip.source_in),
             Self::Text(_) => None,
+            Self::Composition(_) => None,
         }
     }
 
@@ -372,6 +437,7 @@ impl Clip {
             Self::Video(clip) => Some(clip.source_out),
             Self::Audio(clip) => Some(clip.source_out),
             Self::Text(_) => None,
+            Self::Composition(_) => None,
         }
     }
 
@@ -382,11 +448,19 @@ impl Clip {
         Some(clip)
     }
 
+    pub fn composition(&self) -> Option<&CompositionClip> {
+        let Self::Composition(clip) = self else {
+            return None;
+        };
+        Some(clip)
+    }
+
     pub fn frame_length(&self, frame_rate: FrameRate) -> TimelineFrameIndex {
         match self {
             Self::Video(clip) => (clip.source_out - clip.source_in).max(TimelineFrameIndex::ZERO),
             Self::Audio(clip) => (clip.source_out - clip.source_in).max(TimelineFrameIndex::ZERO),
             Self::Text(clip) => clip.frame_length(frame_rate).max(TimelineFrameIndex::ZERO),
+            Self::Composition(clip) => clip.frame_length(frame_rate).max(TimelineFrameIndex::ZERO),
         }
     }
 
