@@ -1,18 +1,19 @@
 use crate::edit_action::EditAction;
 use crate::editing::ClipClipboard;
-use crate::editor::{Editor, RightDockTab};
-use crate::event_bus::AppEvent;
+use crate::editor::{Editor, RightDockTab, WorkspaceTab};
+use crate::event_bus::{AppEvent, EventBus};
 use crate::preview_events::PreviewEvent;
 use crate::timeline_interactions::TimelineTool;
 use crate::ui_components;
 use gpui::prelude::*;
-use gpui::{App, KeyBinding, Window, actions};
+use gpui::{App, KeyBinding, Menu, MenuItem, SystemMenuType, Window, actions};
+use std::path::PathBuf;
 
 pub(crate) const EDITOR_KEY_CONTEXT: &str = "Editor";
 const EDITOR_SHORTCUT_CONTEXT: &str = "Editor && !TextInput && !TextArea";
 
 actions!(
-    opencut_editor,
+    nodavideo_editor,
     [
         TogglePlayback,
         StepBackwardFrame,
@@ -35,9 +36,83 @@ actions!(
         ToggleInspector,
         ToggleAssistant,
         RevealInFinder,
-        OpenInDefaultApp
+        OpenInDefaultApp,
+        QuitApp,
+        ImportMedia,
+        ToggleMediaBrowser,
+        SwitchToEditWorkspace,
+        SwitchToColorWorkspace,
+        SwitchToAudioWorkspace,
+        SwitchToAiStudioWorkspace,
+        GoToStart,
+        GoToEnd,
+        ExportVideoAction,
+        OpenProjectFolderAction,
+        OpenProjectPickerAction,
+        OpenSettingsAction,
+        NewTimelineAction
     ]
 );
+
+pub(crate) fn set_app_menus(cx: &mut App) {
+    cx.set_menus([
+        Menu::new("NodaVideo").items([
+            MenuItem::action("About NodaVideo", gpui::NoAction).disabled(true),
+            MenuItem::separator(),
+            MenuItem::action("Settings...", OpenSettingsAction),
+            MenuItem::separator(),
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Quit NodaVideo", QuitApp),
+        ]),
+        Menu::new("File").items([
+            MenuItem::action("New Timeline...", NewTimelineAction),
+            MenuItem::action("Open Project Folder...", OpenProjectFolderAction),
+            MenuItem::action("Open Project Picker...", OpenProjectPickerAction),
+            MenuItem::separator(),
+            MenuItem::action("Import Media...", ImportMedia),
+            MenuItem::separator(),
+            MenuItem::action("Export Video...", ExportVideoAction),
+        ]),
+        Menu::new("Edit").items([
+            MenuItem::action("Undo", Undo),
+            MenuItem::action("Redo", Redo),
+            MenuItem::separator(),
+            MenuItem::action("Cut", CutSelectedClips),
+            MenuItem::action("Copy", CopySelectedClips),
+            MenuItem::action("Paste", PasteClips),
+            MenuItem::action("Duplicate", DuplicateSelected),
+            MenuItem::action("Delete", DeleteSelected),
+            MenuItem::separator(),
+            MenuItem::action("Select All", SelectAllUnlockedClips),
+            MenuItem::action("Split Clip", SplitClip),
+        ]),
+        Menu::new("View").items([
+            MenuItem::action("Toggle Fullscreen", ToggleFullscreen),
+            MenuItem::separator(),
+            MenuItem::action("Toggle Media Browser", ToggleMediaBrowser),
+            MenuItem::action("Toggle Inspector", ToggleInspector),
+            MenuItem::action("Toggle AI Assistant", ToggleAssistant),
+            MenuItem::separator(),
+            MenuItem::action("Edit Workspace", SwitchToEditWorkspace),
+            MenuItem::action("Color Workspace", SwitchToColorWorkspace),
+            MenuItem::action("Audio Workspace", SwitchToAudioWorkspace),
+            MenuItem::action("AI Studio Workspace", SwitchToAiStudioWorkspace),
+        ]),
+        Menu::new("Playback").items([
+            MenuItem::action("Play / Pause", TogglePlayback),
+            MenuItem::separator(),
+            MenuItem::action("Step Backward One Frame", StepBackwardFrame),
+            MenuItem::action("Step Forward One Frame", StepForwardFrame),
+            MenuItem::separator(),
+            MenuItem::action("Jump to Start", GoToStart),
+            MenuItem::action("Jump to End", GoToEnd),
+        ]),
+        Menu::new("Help").items([
+            MenuItem::action("NodaVideo Help", gpui::NoAction).disabled(true),
+        ]),
+    ]);
+}
 
 pub(crate) fn bind_keys(cx: &mut App) {
     ui_components::text_input::bind_keys(cx);
@@ -47,6 +122,10 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("space", TogglePlayback, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("left", StepBackwardFrame, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("right", StepForwardFrame, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("home", GoToStart, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-left", GoToStart, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("end", GoToEnd, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-right", GoToEnd, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("backspace", DeleteSelected, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("delete", DeleteSelected, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("cmd-b", SplitClip, Some(EDITOR_SHORTCUT_CONTEXT)),
@@ -82,7 +161,20 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("f", ToggleFullscreen, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("escape", ExitFullscreen, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("cmd-alt-i", ToggleInspector, None),
+        KeyBinding::new("cmd-shift-a", ToggleAssistant, None),
         KeyBinding::new("cmd-alt-a", ToggleAssistant, None),
+        KeyBinding::new("cmd-i", ImportMedia, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-alt-m", ToggleMediaBrowser, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-1", SwitchToEditWorkspace, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-2", SwitchToColorWorkspace, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-3", SwitchToAudioWorkspace, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-4", SwitchToAiStudioWorkspace, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-e", ExportVideoAction, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-o", OpenProjectFolderAction, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-shift-o", OpenProjectPickerAction, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-n", NewTimelineAction, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-,", OpenSettingsAction, None),
+        KeyBinding::new("cmd-q", QuitApp, None),
         KeyBinding::new("cmd-alt-r", RevealInFinder, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new(
             "ctrl-shift-enter",
@@ -97,6 +189,9 @@ pub(crate) fn bind_keys(cx: &mut App) {
         let _ = window.update(cx, |_, window, cx| {
             crate::gpui_inspector::toggle(window, cx)
         });
+    });
+    cx.on_action::<QuitApp>(|_, cx| {
+        cx.quit();
     });
 }
 
@@ -429,5 +524,143 @@ impl Editor {
             RightDockTab::Assistant => RightDockTab::Inspector,
         };
         cx.notify();
+    }
+
+    pub(crate) fn action_switch_to_edit_workspace(
+        &mut self,
+        _: &SwitchToEditWorkspace,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace = WorkspaceTab::Edit;
+        cx.notify();
+    }
+
+    pub(crate) fn action_switch_to_color_workspace(
+        &mut self,
+        _: &SwitchToColorWorkspace,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace = WorkspaceTab::Color;
+        cx.notify();
+    }
+
+    pub(crate) fn action_switch_to_audio_workspace(
+        &mut self,
+        _: &SwitchToAudioWorkspace,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace = WorkspaceTab::Audio;
+        cx.notify();
+    }
+
+    pub(crate) fn action_switch_to_aistudio_workspace(
+        &mut self,
+        _: &SwitchToAiStudioWorkspace,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace = WorkspaceTab::AiStudio;
+        cx.notify();
+    }
+
+    pub(crate) fn action_toggle_media_browser(
+        &mut self,
+        _: &ToggleMediaBrowser,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_media_browser = !self.show_media_browser;
+        cx.notify();
+    }
+
+    pub(crate) fn action_go_to_start(
+        &mut self,
+        _: &GoToStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(timeline) = self.timeline.as_mut() {
+            timeline.set_playhead(::timeline::TimelineFrameIndex::ZERO);
+            let _ = timeline.save();
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn action_go_to_end(
+        &mut self,
+        _: &GoToEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(timeline) = self.timeline.as_mut() {
+            let duration = timeline.editing_state.content_duration();
+            timeline.set_playhead(duration);
+            let _ = timeline.save();
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn action_export_video(
+        &mut self,
+        _: &ExportVideoAction,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(timeline) = self.timeline.as_ref() else {
+            return;
+        };
+        let timeline_path = timeline.path.clone();
+        self.emit_event(cx, AppEvent::OpenExportWindow { timeline_path });
+    }
+
+    pub(crate) fn action_open_project_folder(
+        &mut self,
+        _: &OpenProjectFolderAction,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_project_folder(cx);
+    }
+
+    pub(crate) fn action_open_project_picker(
+        &mut self,
+        _: &OpenProjectPickerAction,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let event_bus = cx.new(|_| EventBus {});
+        if let Err(error) = crate::project_picker::open(cx, event_bus, None) {
+            log::error!("Could not open project picker: {error:?}");
+        }
+    }
+
+    pub(crate) fn action_open_settings(
+        &mut self,
+        _: &OpenSettingsAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_global_settings(window, cx);
+    }
+
+    pub(crate) fn action_new_timeline(
+        &mut self,
+        _: &NewTimelineAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_create_timeline(PathBuf::new(), window, cx);
+    }
+
+    pub(crate) fn action_import_media(
+        &mut self,
+        _: &ImportMedia,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.import_media_dialog(cx);
     }
 }

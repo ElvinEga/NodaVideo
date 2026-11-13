@@ -26,11 +26,10 @@ impl Editor {
         //     entry.absolute_path.display(),
         //     self.project_root.display()
         // );
-        let path = entry
-            .absolute_path
-            .strip_prefix(&self.project_root)
-            .expect("file-tree entries are inside the project root")
-            .to_path_buf();
+        let path = crate::timeline_document::relative_asset_path(
+            &self.project_root,
+            &entry.absolute_path,
+        );
 
         let selected = self.explorer.selected_file.as_ref() == Some(&path);
         let context_menu_target =

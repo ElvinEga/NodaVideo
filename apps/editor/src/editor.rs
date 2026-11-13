@@ -34,6 +34,9 @@ pub(crate) struct Editor {
     pub(super) settings_open: bool,
     pub(super) right_dock: RightDockTab,
     pub(super) assistant: AssistantState,
+    pub(crate) workspace: WorkspaceTab,
+    pub(crate) show_media_browser: bool,
+    pub(crate) show_inspector: bool,
 
     pub(super) focus_handle: FocusHandle,
     pub(super) clipboard: Option<ClipClipboard>,
@@ -113,6 +116,9 @@ impl Editor {
             settings_open: false,
             right_dock: RightDockTab::Inspector,
             assistant,
+            workspace: WorkspaceTab::Edit,
+            show_media_browser: true,
+            show_inspector: true,
             global_settings_input: None,
             missing_media_dialog: None,
             timeline,
@@ -139,6 +145,117 @@ impl Editor {
 pub(crate) enum RightDockTab {
     Inspector,
     Assistant,
+}
+
+/// Active top-level workspace mode in NodaVideo.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum WorkspaceTab {
+    #[default]
+    Edit,
+    Color,
+    Audio,
+    AiStudio,
+}
+
+impl Editor {
+    pub(crate) fn can_undo(&self) -> bool {
+        self.timeline.as_ref().is_some_and(|t| !t.undo_stack.is_empty())
+    }
+
+    pub(crate) fn can_redo(&self) -> bool {
+        self.timeline.as_ref().is_some_and(|t| !t.redo_stack.is_empty())
+    }
+
+    pub(crate) fn import_media_dialog(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Import Media into NodaVideo".into()),
+        });
+        let project_root = self.project_root.clone();
+        cx.spawn(async move |editor, cx| {
+            if let Ok(Ok(Some(paths))) = receiver.await {
+                if paths.is_empty() {
+                    return;
+                }
+                let count = cx
+                    .background_executor()
+                    .spawn(async move { Self::copy_files_to_project_sync(&project_root, &paths) })
+                    .await;
+                if count > 0 {
+                    let _ = editor.update(cx, |editor, cx| {
+                        let _ = editor.explorer.refresh_file_tree(&editor.project_root);
+                        editor.schedule_project_waveforms(cx);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn import_external_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let project_root = self.project_root.clone();
+        let paths = paths.to_vec();
+        cx.spawn(async move |editor, cx| {
+            let count = cx
+                .background_executor()
+                .spawn(async move { Self::copy_files_to_project_sync(&project_root, &paths) })
+                .await;
+            if count > 0 {
+                let _ = editor.update(cx, |editor, cx| {
+                    let _ = editor.explorer.refresh_file_tree(&editor.project_root);
+                    editor.schedule_project_waveforms(cx);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn copy_files_to_project_sync(project_root: &Path, paths: &[PathBuf]) -> usize {
+        let mut count = 0;
+        for path in paths {
+            if !path.is_file() {
+                continue;
+            }
+            let Some(file_name) = path.file_name() else {
+                continue;
+            };
+            if path.starts_with(project_root) {
+                count += 1;
+                continue;
+            }
+            let target = project_root.join(file_name);
+            let target = if target.exists() {
+                if let (Ok(m1), Ok(m2)) = (path.metadata(), target.metadata())
+                    && m1.len() == m2.len()
+                {
+                    count += 1;
+                    continue;
+                }
+                let stem = path.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
+                let ext = path
+                    .extension()
+                    .map(|s| format!(".{}", s.to_string_lossy()))
+                    .unwrap_or_default();
+                let mut candidate = project_root.join(format!("{stem}_imported{ext}"));
+                let mut idx = 1;
+                while candidate.exists() {
+                    candidate = project_root.join(format!("{stem}_imported_{idx}{ext}"));
+                    idx += 1;
+                }
+                candidate
+            } else {
+                target
+            };
+            if std::fs::copy(path, &target).is_ok() {
+                count += 1;
+            }
+        }
+        count
+    }
 }
 
 /// 读取项目设置中的 active timeline；文件已被移走或删除时返回 None。

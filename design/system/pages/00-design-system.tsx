@@ -1,364 +1,222 @@
-import { CyberpunkShapeDefs } from "../components/cyberpunk.tsx";
-import type { Child, Markup } from "@design/jsx/jsx-runtime";
+import type { Markup } from "@design/jsx/jsx-runtime";
+import { COLOR, FONT_MONO, FONT_SANS } from "../theme.ts";
+import {
+  type ControlState,
+  NodaButton,
+  NodaGlyph,
+  NodaMark,
+  ReviewPage,
+  ReviewSection,
+} from "../components/noda-shell.tsx";
 
-type ButtonState = "Default" | "Hover" | "Pressed" | "Disabled";
-const buttonStates: ButtonState[] = ["Default", "Hover", "Pressed", "Disabled"];
-const inputStates = ["Placeholder", "Default", "Focused", "Selected", "Disabled"] as const;
-
-export default function Page00DesignSystemTailwind(): Markup {
+export default function NodaDesignSystem(): Markup {
   return (
-    <main class="relative h-[1342px] w-[900px] overflow-hidden bg-[#1e1e22] font-sans font-normal text-text">
-      {/* Reuse the decorative button assets; all layout and text are HTML/Tailwind. */}
-      <svg aria-hidden="true" class="absolute size-0">
-        <defs>
-          <CyberpunkShapeDefs />
-          <pattern id="tw-scan" width="4" height="3" patternUnits="userSpaceOnUse">
-            <rect width="4" height="1" fill="#fcee0a" fill-opacity="0.2" />
-          </pattern>
-          <pattern id="tw-scan-dim" width="4" height="3" patternUnits="userSpaceOnUse">
-            <rect width="4" height="1" fill="#ffffff" fill-opacity="0.05" />
-          </pattern>
-          {[
-            { id: "tw-glow-y", color: "#fcee0a", blur: 6, opacity: 0.45 },
-            { id: "tw-glow-y-hover", color: "#fcee0a", blur: 12, opacity: 0.75 },
-            { id: "tw-glow-c", color: "#00f0ff", blur: 5, opacity: 0.35 },
-            { id: "tw-glow-c-hover", color: "#00f0ff", blur: 10, opacity: 0.7 },
-          ].map((filter) => (
-            <filter id={filter.id} x="-30%" y="-80%" width="160%" height="260%">
-              <feDropShadow
-                dx="0"
-                dy="0"
-                stdDeviation={filter.blur}
-                flood-color={filter.color}
-                flood-opacity={filter.opacity}
+    <ReviewPage
+      title="Noda Obsidian"
+      subtitle="The shared visual language for NodaVideo: compact native controls, crisp neutral separators, and one focused indigo accent. No neon glow, cut-corner buttons, gradients, or decorative chrome."
+    >
+      <div class="grid gap-6 lg:grid-cols-[1fr_2fr]">
+        <div class="flex flex-col justify-between gap-8 rounded-[4px] border border-border bg-page p-7 text-text">
+          <div class="flex items-center gap-3">
+            <NodaMark />
+            <span class="text-2xl font-semibold tracking-tight">NodaVideo</span>
+          </div>
+          <p class="text-sm text-subtle">
+            Your timeline.<br />Your creativity.<br />Your AI.
+          </p>
+          <p class="font-mono text-[11px] text-muted">
+            00:00:06:12 <span class="ml-3 text-accent-soft">24 fps</span>
+          </p>
+        </div>
+        <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {swatches.map(([label, color]) => (
+            <div>
+              <div
+                class="h-16 rounded-[3px] border border-ink/10"
+                style={`background:${color}`}
               />
-            </filter>
-          ))}
-        </defs>
-      </svg>
-      <section aria-labelledby="line-buttons" class="absolute inset-x-0 top-0 h-[270px]">
-        <h1 id="line-buttons">
-          <BaselineText x={40} y={44} size={15} class="font-semibold text-light">C · Line</BaselineText>
-        </h1>
-        <BaselineText x={40} y={64}>
-          A square frame drawn by corner brackets, with mono uppercase labels. Hover opens the brackets; pressing fills the
-          button solid. Secondary is underlined text.
-        </BaselineText>
-        <ButtonMatrix kind="line" />
-      </section>
-      <section aria-labelledby="cyberpunk-buttons" class="absolute inset-x-0 top-[270px] h-[270px]">
-        <h2 id="cyberpunk-buttons">
-          <BaselineText x={40} y={44} size={15} class="font-semibold text-light">D · Cyberpunk</BaselineText>
-        </h2>
-        <BaselineText x={40} y={64}>
-          Cut top-left and bottom-right corners, neon yellow and cyan, hazard slashes. Hover brightens the border and glow;
-          pressing inverts.
-        </BaselineText>
-        <ButtonMatrix kind="cyberpunk" />
-      </section>
-      <section aria-labelledby="dropdown-trigger" class="absolute inset-x-0 top-[580px] h-[320px]">
-        <h2 id="dropdown-trigger">
-          <BaselineText x={40} y={29} size={22} class="font-bold text-text">Dropdown trigger</BaselineText>
-        </h2>
-        <BaselineText x={40} y={58}>
-          The entire field is clickable. Hover signals that the field can be clicked.
-        </BaselineText>
-        <h3>
-          <BaselineText x={40} y={100} size={15} class="font-semibold text-light">Gold accent</BaselineText>
-        </h3>
-        <BaselineText x={40} y={122}>Hover uses a warm surface, gold border and gold chevron.</BaselineText>
-        <div class="absolute top-[138px] left-10 h-[118px] w-[820px] rounded-[10px] bg-[#0b0b0d]">
-          {(["Default", "Hover", "Disabled"] as const).map((state, index) => (
-            <div class="absolute top-0 h-full w-[180px]" style={`left:${50 + index * 260}px`}>
-              <BaselineText x={0} y={27}>{state}</BaselineText>
-              <button
-                type="button"
-                disabled={state === "Disabled"}
-                aria-label={`Font dropdown: ${state}`}
-                aria-expanded="false"
-                class={`absolute top-[49px] left-0 h-[34px] w-[180px] rounded-md outline-[1px] outline-offset-[-0.5px] ${
-                  state === "Hover"
-                    ? "bg-accent-background outline-accent"
-                    : state === "Disabled"
-                    ? "bg-well outline-[#222226]"
-                    : "bg-surface outline-border"
-                }`}
-              >
-                <BaselineText x={10} y={22} size={13} class={state === "Disabled" ? "text-dim" : "text-text"}>
-                  Zapfino
-                </BaselineText>
-                <svg aria-hidden="true" class="absolute top-0 left-0 h-[34px] w-[180px]">
-                  <path
-                    d="M157 14l5 5 5 -5"
-                    fill="none"
-                    stroke={state === "Hover" ? "#f0b75e" : state === "Disabled" ? "#46464e" : "#777780"}
-                    stroke-width="1.5"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  />
-                </svg>
-              </button>
+              <p class="mt-2 text-xs font-medium">{label}</p>
+              <p class="mt-1 font-mono text-[10px] text-ink/65">{color}</p>
             </div>
           ))}
         </div>
-        <BaselineText x={40} y={298}>
-          The entire field is clickable · no size change on hover · disabled fields do not respond.
-        </BaselineText>
-      </section>
-      <section aria-labelledby="text-inputs" class="absolute inset-x-0 top-[940px] h-[402px]">
-        <h2 id="text-inputs">
-          <BaselineText x={40} y={26} size={22} class="text-text">Text Input</BaselineText>
-        </h2>
-        <BaselineText x={40} y={54}>
-          Primary uses a bordered field. Secondary uses an underline for a quieter appearance.
-        </BaselineText>
-        <div class="absolute top-[78px] left-10 h-[222px] w-[820px] rounded-[10px] bg-[#0b0b0d]">
-          {inputStates.map((state, index) => (
-            <BaselineText x={202 + index * 136} y={30} anchor="middle">{state}</BaselineText>
-          ))}
-          <BaselineText x={20} y={77} size={14} class="text-light">Primary</BaselineText>
-          <BaselineText x={20} y={169} size={14} class="text-light">Secondary</BaselineText>
-          {(["Primary", "Secondary"] as const).map((kind) =>
-            inputStates.map((state, index) => (
-              <div
-                class={`absolute ${kind === "Primary" ? "top-[52px]" : "top-[144px]"}`}
-                style={`left:${140 + index * 136}px`}
-              >
-                <InputExample kind={kind} state={state} />
-              </div>
-            ))
-          )}
-        </div>
-        <BaselineText x={40} y={338}>
-          40 px height · 12 px horizontal padding · 13 px monospace text · gold focus accent · blue selection
-        </BaselineText>
-        <BaselineText x={40} y={362}>Disabled inputs have no editing, focus, caret or hover response.</BaselineText>
-      </section>
-    </main>
-  );
-}
-
-// SVG positions text by its baseline. These HTML line boxes use the same font
-// metrics (ascent minus descent), so the original baseline coordinates stay exact.
-function BaselineText(props: {
-  x: number;
-  y: number;
-  size?: 12 | 13 | 14 | 15 | 22;
-  mono?: boolean;
-  anchor?: "start" | "middle" | "end";
-  class?: string;
-  children: Child;
-}): Markup {
-  const size = props.size ?? 12;
-  const ascentMinusDescent = props.mono
-    ? { 12: 8, 13: 9, 14: 10, 15: 10, 22: 15 }[size]
-    : { 12: 9, 13: 10, 14: 10, 15: 11, 22: 17 }[size];
-  return (
-    <span
-      class={`absolute block whitespace-nowrap text-[${size}px] leading-none ${props.mono ? "font-mono" : "font-sans"} ${
-        props.anchor === "middle" ? "-translate-x-1/2" : props.anchor === "end" ? "-translate-x-full" : ""
-      } ${props.class ?? "text-[#8a8a93]"}`}
-      style={`left:${props.x}px;top:${props.y - (size + ascentMinusDescent) / 2}px`}
-    >
-      {props.children}
-    </span>
-  );
-}
-
-function ButtonMatrix({ kind }: { kind: "line" | "cyberpunk" }): Markup {
-  return (
-    <div class="absolute top-20 left-10 h-[190px] w-[820px] rounded-[10px] bg-[#0b0b0d]">
-      {buttonStates.map((state, index) => <BaselineText x={240 + index * 160} y={36} anchor="middle">{state}
-      </BaselineText>)}
-      <BaselineText x={24} y={87} size={14} class="text-light">Primary</BaselineText>
-      <BaselineText x={24} y={151} size={14} class="text-light">Secondary</BaselineText>
-      {[true, false].map((primary) =>
-        buttonStates.map((state, index) => (
-          <div class={`absolute ${primary ? "top-[62px]" : "top-[126px]"}`} style={`left:${176 + index * 160}px`}>
-            {kind === "line"
-              ? <LineButton primary={primary} state={state} />
-              : <CyberpunkButton primary={primary} state={state} />}
+      </div>
+      <ReviewSection
+        title="Controls"
+        caption="One 28 px shape, a 3 px corner radius, and a 1 px border. States change fill and border, never dimensions. The deeper indigo action fill keeps small white labels legible; the brand accent remains #6366f1."
+      >
+        <div class="overflow-auto rounded-[4px] border border-border bg-page p-5 text-text">
+          <div class="grid min-w-[860px] grid-cols-[110px_repeat(5,1fr)] items-center gap-x-6 gap-y-6">
+            <span />
+            {states.map((state) => (
+              <span class="text-[11px] text-muted">{state}</span>
+            ))}
+            {(["Primary", "Secondary", "Icon"] as const).map((kind) => (
+              <>
+                <span class="text-xs text-subtle">{kind}</span>
+                {states.map((state) => (
+                  <div>
+                    <NodaButton
+                      label={kind === "Primary"
+                        ? "Import Media"
+                        : kind === "Icon"
+                        ? "Media Browser"
+                        : "Cancel"}
+                      icon={kind === "Primary"
+                        ? "import"
+                        : kind === "Icon"
+                        ? "media"
+                        : undefined}
+                      primary={kind === "Primary"}
+                      iconOnly={kind === "Icon"}
+                      state={state}
+                    />
+                  </div>
+                ))}
+              </>
+            ))}
           </div>
-        ))
-      )}
-    </div>
+        </div>
+      </ReviewSection>
+      <ReviewSection
+        title="Fields and selection"
+        caption="Search and numeric controls use the same matte inset surface. Focus uses indigo; selected text uses a translucent indigo fill. No animation is needed to communicate either state."
+      >
+        <div class="overflow-auto rounded-[4px] border border-border bg-page p-5">
+          <div class="grid min-w-[820px] grid-cols-5 gap-5">
+            {["Placeholder", "Entered", "Focused", "Selected", "Disabled"].map((
+              state,
+            ) => (
+              <div>
+                <p class="mb-3 text-[11px] text-muted">{state}</p>
+                <div
+                  class={`flex h-7 items-center gap-2 rounded-[3px] border bg-page px-2 text-[11px] ${
+                    state === "Focused"
+                      ? "border-accent outline-1 outline-accent"
+                      : "border-border"
+                  } ${state === "Disabled" ? "text-dim" : "text-muted"}`}
+                >
+                  <NodaGlyph name="search" />
+                  <span
+                    class={state === "Selected"
+                      ? "bg-accent-background text-text"
+                      : state === "Entered" || state === "Focused"
+                      ? "text-text"
+                      : ""}
+                  >
+                    {state === "Placeholder" || state === "Disabled"
+                      ? "Search media…"
+                      : "street"}
+                  </span>
+                  {state === "Focused" && <span class="h-3 w-px bg-text" />}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </ReviewSection>
+      <ReviewSection
+        title="Type and density"
+        caption="Use the operating-system sans face for the interface and monospace only for frame positions, durations, and numeric values. Branding is a compact wordmark, not a display headline inside the editor."
+      >
+        <div class="grid gap-6 md:grid-cols-2">
+          <div class="rounded-[4px] border border-border bg-surface p-6 text-text">
+            <p class="text-sm font-semibold">NodaVideo</p>
+            <p class="mt-5 text-xs font-medium">Media Browser</p>
+            <p class="mt-3 text-[11px] text-muted">
+              Drop video, audio, or images here to import.
+            </p>
+            <p class="mt-5 font-mono text-[11px] text-accent-soft">
+              00:00:06:12
+            </p>
+          </div>
+          <dl class="grid min-w-0 grid-cols-[120px_minmax(0,1fr)] gap-3 text-xs leading-5">
+            <dt class="font-medium">Toolbar</dt>
+            <dd>48 px; workspace tabs remain centered.</dd>
+            <dt class="font-medium">Panel header</dt>
+            <dd>40 px; 12 px title, 10 px metadata.</dd>
+            <dt class="font-medium">Controls</dt>
+            <dd>28 px; icon controls are square.</dd>
+            <dt class="font-medium">Panel gutters</dt>
+            <dd>1 px separators; resizable hit targets remain wider.</dd>
+            <dt class="font-medium">Corners</dt>
+            <dd>3 px controls, 5 px outer window.</dd>
+            <dt class="font-medium">UI font</dt>
+            <dd class="[overflow-wrap:anywhere]">{FONT_SANS}</dd>
+            <dt class="font-medium">Time font</dt>
+            <dd class="[overflow-wrap:anywhere]">{FONT_MONO}</dd>
+          </dl>
+        </div>
+      </ReviewSection>
+      <ReviewSection
+        title="Semantic feedback"
+        caption="Status never relies on hue alone. Valid drops combine a ghost with placement text; blocked drops have a reason and hatching. Track fills are deliberately subdued to leave selection visible."
+      >
+        <div class="grid gap-3 md:grid-cols-3">
+          <div class="rounded-[3px] border border-border bg-surface p-4 text-text">
+            <div class="flex items-center gap-2 text-xs">
+              <span class="text-success">
+                <NodaGlyph name="check" />
+              </span>Import complete
+            </div>
+            <p class="mt-2 text-[11px] text-muted">All 6 files are ready.</p>
+          </div>
+          <div class="rounded-[3px] border border-border bg-surface p-4 text-text">
+            <div class="flex items-center gap-2 text-xs">
+              <span class="text-warning">!</span>Source missing
+            </div>
+            <p class="mt-2 text-[11px] text-muted">
+              Restore the file to use this asset.
+            </p>
+          </div>
+          <div class="rounded-[3px] border border-error/50 bg-error-background p-4 text-error-text">
+            <div class="flex items-center gap-2 text-xs">
+              <NodaGlyph name="close" />Incompatible track
+            </div>
+            <p class="mt-2 text-[11px]">Video needs a video track.</p>
+          </div>
+        </div>
+        <div class="mt-4 grid gap-3 md:grid-cols-3">
+          {[["Video", COLOR.clipVideo], ["Audio", COLOR.clipAudio], [
+            "Text",
+            COLOR.clipTitle,
+          ]].map(([label, color]) => (
+            <div
+              class="rounded-[3px] border border-border px-3 py-3 text-xs text-text"
+              style={`background:${color}`}
+            >
+              {label}
+            </div>
+          ))}
+        </div>
+      </ReviewSection>
+      <p class="mt-8 text-sm">
+        <a href="20-top-bar.html" class="underline underline-offset-4">
+          Review the desktop shell
+        </a>
+        <span class="mx-3">·</span>
+        <a href="21-file-explorer.html" class="underline underline-offset-4">
+          Review media interactions
+        </a>
+      </p>
+    </ReviewPage>
   );
 }
 
-function LineButton({ primary, state }: { primary: boolean; state: ButtonState }): Markup {
-  const disabled = state === "Disabled";
-  const pressed = state === "Pressed";
-  const hover = state === "Hover";
-  const color = primary
-    ? disabled ? "text-[#4f4f56]" : pressed ? "text-[#0b0b0d]" : hover ? "text-[#d9ff7a]" : "text-[#c8f25a]"
-    : disabled
-    ? "text-[#46464c]"
-    : pressed
-    ? "text-white"
-    : hover
-    ? "text-text"
-    : "text-subtle";
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      aria-label={`${primary ? "Export" : "Cancel"}: ${state}`}
-      class={`relative block h-10 w-32 ${
-        primary
-          ? pressed ? "bg-[#c8f25a]" : disabled ? "" : hover ? "bg-[#c8f25a]/12" : "bg-[#c8f25a]/5"
-          : pressed
-          ? "bg-white/7"
-          : ""
-      }`}
-    >
-      {primary && !pressed &&
-        (["top-left", "top-right", "bottom-left", "bottom-right"] as const).map((corner) => (
-          <span
-            class={`absolute size-2.5 ${disabled ? "border-grey" : "border-[#c8f25a]"} ${
-              corner === "top-left"
-                ? "top-0 left-0 border-t-[1.5px] border-l-[1.5px]"
-                : corner === "top-right"
-                ? "top-0 right-0 border-t-[1.5px] border-r-[1.5px]"
-                : corner === "bottom-left"
-                ? "bottom-0 left-0 border-b-[1.5px] border-l-[1.5px]"
-                : "right-0 bottom-0 border-r-[1.5px] border-b-[1.5px]"
-            } ${hover ? (corner.includes("left") ? "-translate-x-[3px]" : "translate-x-[3px]") : ""} ${
-              hover ? (corner.includes("top") ? "-translate-y-[3px]" : "translate-y-[3px]") : ""
-            }`}
-          />
-        ))}
-      <BaselineText
-        x={primary ? 84 : 65}
-        y={24.5}
-        size={13}
-        mono
-        anchor={primary ? "end" : "middle"}
-        class={`font-bold tracking-[2px] ${color}`}
-      >
-        {primary ? "EXPORT" : "CANCEL"}
-      </BaselineText>
-      {primary && (
-        <BaselineText x={hover || pressed ? 94 : 90} y={24.5} size={13} mono class={`font-bold ${color}`}>→</BaselineText>
-      )}
-      {!primary && !disabled && (
-        <span
-          class={`absolute ${
-            pressed
-              ? "top-[31.5px] left-4 h-0.5 w-24 bg-white"
-              : hover
-              ? "top-8 left-4 h-px w-24 bg-text"
-              : "top-8 left-[34px] h-px w-[60px] bg-[#4a4a52]"
-          }`}
-        />
-      )}
-    </button>
-  );
-}
-
-function CyberpunkButton({ primary, state }: { primary: boolean; state: ButtonState }): Markup {
-  const disabled = state === "Disabled";
-  const pressed = state === "Pressed";
-  const hover = state === "Hover";
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      aria-label={`${primary ? "Export" : "Cancel"}: ${state}`}
-      class={`relative block h-10 w-32 ${primary && pressed ? "translate-x-0.5 translate-y-0.5" : ""}`}
-    >
-      <svg aria-hidden="true" class="absolute inset-0 h-10 w-32 overflow-visible">
-        {primary
-          ? (
-            <>
-              <use
-                href="#dPrimaryShape"
-                fill={disabled ? "url(#tw-scan-dim)" : pressed ? "#0a0a0b" : "#fcee0a"}
-                stroke={disabled ? "#3a3926" : hover ? "#fff9b8" : pressed ? "#fcee0a" : undefined}
-                stroke-width={disabled ? 1 : 1.5}
-                filter={disabled ? undefined : hover || pressed ? "url(#tw-glow-y-hover)" : "url(#tw-glow-y)"}
-              />
-              {pressed && <use href="#dPrimaryShape" fill="url(#tw-scan)" />}
-              <use href="#dSlashes" fill={disabled ? "#3a3926" : pressed ? "#fcee0a" : "#0a0a0b"} />
-            </>
-          )
-          : (
-            <>
-              {pressed && <use href="#dSecondaryShape" x="3" y="3" fill="#ff2a6d" />}
-              <use
-                href="#dSecondaryShape"
-                fill={disabled ? "url(#tw-scan-dim)" : "#00f0ff"}
-                fill-opacity={disabled || pressed ? 1 : hover ? 0.16 : 0.06}
-                stroke={disabled ? "#1f3337" : pressed ? undefined : hover ? "#7ffbff" : "#00f0ff"}
-                filter={disabled ? undefined : hover || pressed ? "url(#tw-glow-c-hover)" : "url(#tw-glow-c)"}
-              />
-              {hover && <rect x="0" y="10" width="4" height="30" fill="#00f0ff" />}
-            </>
-          )}
-      </svg>
-      <BaselineText
-        x={primary ? 57 : 65}
-        y={24.5}
-        size={13}
-        mono
-        anchor="middle"
-        class={`font-extrabold tracking-[2px] ${
-          primary
-            ? disabled
-              ? "text-cyber-disabled-text"
-              : pressed
-              ? "text-cyber-yellow [filter:url(#tw-glow-y)]"
-              : "text-cyber-ink"
-            : disabled
-            ? "text-[#34494d]"
-            : pressed
-            ? "text-[#050506]"
-            : hover
-            ? "text-[#b5fcff]"
-            : "text-cyber-cyan"
-        }`}
-      >
-        {primary ? "EXPORT" : "CANCEL"}
-      </BaselineText>
-    </button>
-  );
-}
-
-function InputExample({ kind, state }: { kind: "Primary" | "Secondary"; state: typeof inputStates[number] }): Markup {
-  const disabled = state === "Disabled";
-  return (
-    <div
-      role="img"
-      aria-label={`${kind} input: ${state}`}
-      class={`relative h-10 w-[124px] ${
-        kind === "Primary"
-          ? `rounded-md outline-[1px] outline-offset-[-0.5px] ${
-            disabled
-              ? "bg-well outline-[#222226]"
-              : state === "Focused"
-              ? "bg-surface outline-accent"
-              : "bg-surface outline-border"
-          }`
-          : ""
-      }`}
-    >
-      {kind === "Secondary" && (
-        <span
-          class={`absolute top-[39px] left-0 h-px w-full ${
-            disabled ? "bg-[#222226]" : state === "Focused" ? "bg-accent" : "bg-border"
-          }`}
-        />
-      )}
-      {state === "Selected" && <span class="absolute top-2.5 left-3 h-5 w-[47px] rounded-[2px] bg-[#52779a]/40" />}
-      <BaselineText
-        x={12}
-        y={25}
-        size={13}
-        mono
-        class={disabled ? "text-dim" : state === "Placeholder" ? "text-muted" : "text-text"}
-      >
-        {state === "Placeholder" ? "Enter…" : "Sample"}
-      </BaselineText>
-      {state === "Focused" && <span class="absolute top-2.5 left-[59px] h-5 w-px bg-[#d8d8dc]" />}
-    </div>
-  );
-}
+const states: ControlState[] = [
+  "Default",
+  "Hover",
+  "Pressed",
+  "Focused",
+  "Disabled",
+];
+const swatches = [
+  ["Background", COLOR.page],
+  ["Surface", COLOR.surface],
+  ["Hover", COLOR.hover],
+  ["Border", COLOR.border],
+  ["Brand accent", COLOR.accent],
+  ["Action / hover", COLOR.accentHover],
+  ["Primary text", COLOR.text],
+  ["Muted text", COLOR.muted],
+];

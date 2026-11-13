@@ -108,6 +108,7 @@ fn main() -> anyhow::Result<()> {
         gpui_tokio::init(cx);
         gpui_inspector::init(cx);
         actions::bind_keys(cx);
+        actions::set_app_menus(cx);
         cx.set_quit_mode(gpui::QuitMode::Explicit);
 
         let event_bus = cx.new(|_| EventBus {});

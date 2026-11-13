@@ -16,6 +16,7 @@ pub(crate) enum IconName {
     MicOff,
     Minus,
     Mute,
+    NodaMark,
     PickerGlow,
     Playhead,
     Plus,
@@ -45,6 +46,7 @@ impl IconName {
             Self::MicOff => "icons/mic-off.svg",
             Self::Minus => "icons/minus.svg",
             Self::Mute => "icons/mute.svg",
+            Self::NodaMark => "icons/noda-mark.svg",
             Self::PickerGlow => "icons/picker-glow.svg",
             Self::Playhead => "icons/playhead.svg",
             Self::Plus => "icons/plus.svg",
@@ -82,7 +84,7 @@ impl AssetSource for EditorAssets {
 
 // Private APIs only
 impl IconName {
-    const ALL: [Self; 23] = [
+    const ALL: [Self; 24] = [
         Self::AlertTriangle,
         Self::App,
         Self::ArrowDown,
@@ -96,6 +98,7 @@ impl IconName {
         Self::MicOff,
         Self::Minus,
         Self::Mute,
+        Self::NodaMark,
         Self::PickerGlow,
         Self::Playhead,
         Self::Plus,
@@ -123,6 +126,7 @@ impl IconName {
             Self::MicOff => include_bytes!("../../../icons/mic-off.svg"),
             Self::Minus => include_bytes!("../../../icons/minus.svg"),
             Self::Mute => include_bytes!("../../../icons/mute.svg"),
+            Self::NodaMark => include_bytes!("../../../icons/noda-mark.svg"),
             Self::PickerGlow => include_bytes!("../../../icons/picker-glow.svg"),
             Self::Playhead => include_bytes!("../../../icons/playhead.svg"),
             Self::Plus => include_bytes!("../../../icons/plus.svg"),

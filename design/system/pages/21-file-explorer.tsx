@@ -1,203 +1,165 @@
-import type { Child, Markup } from "@design/jsx/jsx-runtime";
+import type { Markup } from "@design/jsx/jsx-runtime";
+import {
+  AssistantPanel,
+  type BinState,
+  MediaBin,
+  PreviewMonitor,
+  ReviewFigure,
+  ReviewPage,
+  ReviewSection,
+  TimelinePanel,
+} from "../components/noda-shell.tsx";
 
-type ExplorerState = "media-hover" | "timeline-hover";
-type CursorKind = "grab" | "default";
-type BadgeKind = "video" | "audio" | "image" | "srt" | "other";
-
-const BADGE_CLASS: Record<BadgeKind, string> = {
-  video: "border-video-badge-border text-video-badge-text",
-  audio: "border-audio-badge-border text-audio-badge-text",
-  image: "border-image-badge-border text-image-badge-text",
-  srt: "border-srt-badge-border text-srt-badge-text",
-  other: "border-other-badge-border text-other-badge-text",
-};
-
-const videos = [
-  { name: "broll-cafe.mp4", extension: "MP4", size: "31.9 MB" },
-  { name: "broll-street.mov", extension: "MOV", size: "87.6 MB" },
-  { name: "broll-station.mp4", extension: "MP4", size: "42.1 MB" },
-];
-
-export default function Page21FileExplorer(): Markup {
+export default function MediaBrowserPage(): Markup {
   return (
-    <main class="w-[1240px] bg-page px-12 pt-10 pb-12 font-sans text-text">
-      <h1 class="text-2xl leading-7 font-bold">File Explorer</h1>
-      <p class="mt-2 text-sm leading-5 text-muted">File hover reflects drag support.</p>
-      <div class="mt-6 grid grid-cols-2 gap-8">
-        <section aria-labelledby="draggable-hover">
-          <h2 id="draggable-hover" class="text-sm leading-5 font-semibold">Draggable · hover</h2>
-          <p class="mt-1 text-xs leading-[18px] text-muted">
-            Video, audio, images and SRT files use the open hand.
-          </p>
-          <div class="mt-2">
-            <Explorer state="media-hover" />
-          </div>
-        </section>
-        <section aria-labelledby="not-draggable-hover">
-          <h2 id="not-draggable-hover" class="text-sm leading-5 font-semibold">Not draggable · hover</h2>
-          <p class="mt-1 text-xs leading-[18px] text-muted">
-            Timeline files, folders and unsupported files use the arrow.
-          </p>
-          <div class="mt-2">
-            <Explorer state="timeline-hover" />
-          </div>
-        </section>
-      </div>
-      <hr class="mt-9 border-border" />
-      <section class="mt-6" aria-labelledby="file-entries">
-        <h2 id="file-entries" class="text-sm leading-5 font-semibold">File entries</h2>
-        <p class="mt-1 text-xs leading-[18px] text-muted">
-          Each kind of entry on its own. Gray is only for files OpenCut does not support.
-        </p>
-        <div class="mt-4 grid grid-cols-3 gap-x-8 gap-y-6">
-          <Entry title="Video" caption="Open hand · drag to a track">
-            <FileRow name="broll-cafe.mp4" extension="MP4" size="31.9 MB" standalone />
-          </Entry>
-          <Entry title="Audio" caption="Open hand · drag to a track">
-            <FileRow name="voice-over.m4a" extension="M4A" size="4.2 MB" badge="audio" standalone />
-          </Entry>
-          <Entry title="Image" caption="Open hand · drag to a track">
-            <FileRow name="title-card.png" extension="PNG" size="860 KB" badge="image" standalone />
-          </Entry>
-          <Entry title="Subtitles" caption="Open hand · drag to a track">
-            <FileRow name="interview.srt" extension="SRT" size="2 KB" badge="srt" standalone />
-          </Entry>
-          <Entry title="Timeline · active" caption="Arrow · the open timeline is tinted and tagged">
-            <FileRow name="timeline-1.timeline" extension="TL" active standalone />
-          </Entry>
-          <Entry title="Unsupported file" caption="Arrow · cannot be dragged">
-            <FileRow name="notes.txt" extension="TXT" size="1 KB" badge="other" standalone />
-          </Entry>
-          <Entry title="Folder · expanded" caption="Arrow">
-            <FolderRow name="media" expanded standalone />
-          </Entry>
-          <Entry title="Folder · collapsed" caption="Arrow">
-            <FolderRow name="audio" standalone />
-          </Entry>
-        </div>
-      </section>
-    </main>
-  );
-}
-
-function Explorer({ state }: { state: ExplorerState }): Markup {
-  return (
-    <div class="h-[400px] overflow-hidden rounded-[10px] bg-panel shadow-popover outline-1 -outline-offset-1 outline-border">
-      <div class="flex h-[38px] cursor-default items-center border-b border-border bg-surface px-4 font-mono text-sm text-muted">
-        Filter files…
-      </div>
-      <ul aria-label="Project files">
-        <FolderRow name="market-vlog" expanded root />
-        <FolderRow name="media" expanded />
-        {videos.map((video) => (
-          <FileRow
-            {...video}
-            highlighted={video.name === "broll-street.mov" && state === "media-hover"}
-            cursor={video.name === "broll-street.mov" && state === "media-hover" ? "grab" : undefined}
-          />
-        ))}
-        <FileRow name="interview.srt" extension="SRT" size="2 KB" badge="srt" />
-        <FileRow name="notes.txt" extension="TXT" size="1 KB" badge="other" />
-        <FolderRow name="audio" />
-        <FileRow
-          name="timeline-1.timeline"
-          extension="TL"
-          active
-          highlighted={state === "timeline-hover"}
-          cursor={state === "timeline-hover" ? "default" : undefined}
-        />
-      </ul>
-    </div>
-  );
-}
-
-/// One entry on its own: a title, a caption and the row in a small panel.
-function Entry(props: { title: string; caption: string; children: Child }): Markup {
-  return (
-    <figure>
-      <h3 class="text-sm leading-5 font-semibold">{props.title}</h3>
-      <p class="mt-0.5 text-xs leading-4 text-muted">{props.caption}</p>
-      <ul class="mt-2 overflow-hidden rounded-[10px] bg-panel outline-1 -outline-offset-1 outline-border">
-        {props.children}
-      </ul>
-    </figure>
-  );
-}
-
-function FolderRow({ name, expanded = false, root = false, standalone = false }: {
-  name: string;
-  expanded?: boolean;
-  root?: boolean;
-  standalone?: boolean;
-}): Markup {
-  return (
-    <li class={`flex h-[38px] cursor-default items-center gap-2 pr-3 ${root || standalone ? "pl-3" : "pl-7"}`}>
-      <span aria-hidden="true" class="w-3.5 text-[13px] text-muted">{expanded ? "▾" : "▸"}</span>
-      <span class={`font-mono text-sm ${root ? "font-semibold" : "text-subtle"}`}>{name}</span>
-    </li>
-  );
-}
-
-function FileRow({
-  name,
-  extension,
-  size,
-  badge = "video",
-  active = false,
-  highlighted = false,
-  standalone = false,
-  cursor,
-}: {
-  name: string;
-  extension: string;
-  badge?: BadgeKind;
-  size?: string;
-  active?: boolean;
-  highlighted?: boolean;
-  /// Shown on its own rather than indented in the tree.
-  standalone?: boolean;
-  cursor?: CursorKind;
-}): Markup {
-  const background = highlighted ? "bg-hover" : active ? "bg-active-timeline" : "";
-  const indent = standalone ? "pl-3" : active ? "pl-[26px]" : "pl-[42px]";
-  const pointer = active || badge === "other" ? "cursor-default" : "cursor-grab";
-  return (
-    <li class={`relative flex h-[38px] items-center gap-2 pr-3 ${indent} ${pointer} ${background}`}>
-      <span
-        class={`flex h-[18px] w-[38px] shrink-0 items-center justify-center rounded-[3px] border text-[11px] font-semibold ${
-          active ? "border-accent-border text-accent" : BADGE_CLASS[badge]
-        }`}
-      >
-        {extension}
-      </span>
-      <span class={`min-w-0 flex-1 truncate font-mono text-sm ${active ? "font-semibold" : ""}`}>{name}</span>
-      {active
-        ? (
-          <span class="flex h-5 w-[60px] items-center justify-center rounded-[3px] border border-accent-border bg-accent-background font-mono text-[11px] font-semibold text-accent">
-            ACTIVE
-          </span>
-        )
-        : <span class="font-mono text-xs text-dim">{size}</span>}
-      {cursor && <Cursor kind={cursor} class="absolute top-1 left-[72%]" />}
-    </li>
-  );
-}
-
-// Cursor illustrations are icons; the panels and rows use HTML layout.
-function Cursor({ kind, class: className }: { kind: CursorKind; class: string }): Markup {
-  return (
-    <svg
-      aria-hidden="true"
-      viewBox="-2 -2 34 34"
-      class={`pointer-events-none size-8 fill-text stroke-cursor-outline ${className}`}
-      stroke-width="1.5"
-      stroke-linejoin="round"
+    <ReviewPage
+      title="From source to sequence"
+      subtitle="One media bin, two ways to edit: drag an asset directly onto a track, or open it in the source monitor and mark the range you need. Media, thumbnails, waveforms, and tool activity below are illustrative design fixtures, not application data."
     >
-      <path
-        d={kind === "grab"
-          ? "M7 15 3 11C1 9-1 12 1 15L7 24Q9 28 13 28H19Q24 27 25 22L28 9Q29 6 26 6Q24 6 24 9L22 16 23 4Q23 1 21 1Q18 1 18 4L17 14V2Q17-1 14-1Q12-1 12 2V14L10 5Q9 2 7 3Q5 4 6 7Z"
-          : "M0 0V20L5.5 15.5 10 25 14 23 9.5 13.5 17 13Z"}
-      />
-    </svg>
+      <div class="grid gap-x-6 gap-y-2 lg:grid-cols-3">
+        <ReviewFigure
+          title="Grid · selected asset"
+          caption="Cached, aspect-preserving previews with filename, duration, resolution, and an audio indicator. Double-click opens the source."
+        >
+          <div class="h-[460px] min-w-[280px] border border-border">
+            <MediaBin />
+          </div>
+        </ReviewFigure>
+        <ReviewFigure
+          title="List · same assets"
+          caption="A compact alternative for longer names and larger bins. Search, selection, and category are preserved when switching views."
+        >
+          <div class="h-[460px] min-w-[280px] border border-border">
+            <MediaBin state="list" />
+          </div>
+        </ReviewFigure>
+        <ReviewFigure
+          title="Source · marked range"
+          caption="In is inclusive; Out is exclusive. I / O or handles mark at least one frame. Insert or drag the range; the original file is unchanged."
+        >
+          <div class="h-[460px] min-w-[320px] border border-border">
+            <PreviewMonitor source />
+          </div>
+        </ReviewFigure>
+      </div>
+      <ReviewSection
+        title="Import and recovery states"
+        caption="The native multi-file picker and operating-system drops share one bounded background import queue. Duplicate references are reported, failures stay visible, and missing media keeps its identity instead of disappearing."
+      >
+        <div class="grid gap-x-6 gap-y-2 lg:grid-cols-3">
+          {states.map(({ state, title, caption }) => (
+            <ReviewFigure title={title} caption={caption}>
+              <div class="h-[440px] min-w-[280px] border border-border">
+                <MediaBin state={state} />
+              </div>
+            </ReviewFigure>
+          ))}
+        </div>
+      </ReviewSection>
+      <ReviewSection
+        title="Playlist → timeline"
+        caption="Placement uses the existing frame-based edit and undo system. Video and graphics target video tracks; audio targets audio tracks. OS files dropped on the timeline first import asynchronously, then place at the captured target position."
+      >
+        <div class="grid grid-cols-1 gap-6">
+          <div>
+            <h3 class="mb-1 text-sm font-semibold">
+              Compatible track · snapped to an edge
+            </h3>
+            <p class="mb-3 text-xs leading-5 text-ink/70">
+              The translucent indigo ghost has the actual source-range duration.
+              Snap is shared with clip movement, not a separate placement
+              algorithm.
+            </p>
+            <div class="overflow-auto rounded-[4px] border border-border">
+              <div class="min-w-[900px]">
+                <TimelinePanel drop="valid" />
+              </div>
+            </div>
+          </div>
+          <div>
+            <h3 class="mb-1 text-sm font-semibold">
+              Rejected track · no timeline mutation
+            </h3>
+            <p class="mb-3 text-xs leading-5 text-ink/70">
+              Incompatible types, locked tracks, and overlaps show a reason and
+              a blocked cursor. Releasing an invalid drop leaves the timeline
+              and undo stack untouched.
+            </p>
+            <div class="overflow-auto rounded-[4px] border border-border">
+              <div class="min-w-[900px]">
+                <TimelinePanel drop="invalid" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </ReviewSection>
+      <ReviewSection
+        title="AI remains optional"
+        caption="The right dock can show Inspector or Assistant. Provider cycling preserves existing integrations. This is the proposed approval state, not a claim that panel tools already execute timeline mutations."
+      >
+        <div class="grid max-w-[840px] gap-x-6 gap-y-2 md:grid-cols-2">
+          <ReviewFigure
+            title="Ready for a request"
+            caption="No invented conversation. Hide the panel to return all available width to editing."
+          >
+            <div class="h-[450px] border border-border">
+              <AssistantPanel />
+            </div>
+          </ReviewFigure>
+          <ReviewFigure
+            title="Review a proposed edit"
+            caption="An explicit approval card describes the operation before a timeline change. Reject leaves the edit untouched."
+          >
+            <div class="h-[450px] border border-border">
+              <AssistantPanel approval />
+            </div>
+          </ReviewFigure>
+        </div>
+      </ReviewSection>
+      <p class="mt-8 text-sm">
+        <a href="20-top-bar.html" class="underline underline-offset-4">
+          Back to the complete desktop shell
+        </a>
+      </p>
+    </ReviewPage>
   );
 }
+
+const states: { state: BinState; title: string; caption: string }[] = [
+  {
+    state: "empty",
+    title: "Empty bin",
+    caption:
+      "Explain both import paths. No sample assets appear in a new project.",
+  },
+  {
+    state: "drop",
+    title: "Files over the drop target",
+    caption:
+      "Highlight only the accepting panel. Release imports references without copying the source files.",
+  },
+  {
+    state: "filtered",
+    title: "No search results",
+    caption:
+      "A search miss is not an empty project. Keep import available and offer a clear search reset.",
+  },
+  {
+    state: "importing",
+    title: "Import in progress",
+    caption:
+      "Completed assets are usable while the queue continues. Metadata and thumbnails do not block input.",
+  },
+  {
+    state: "error",
+    title: "One file failed",
+    caption:
+      "Keep successful imports. Name the failed file and explain the problem without hiding it in a log.",
+  },
+  {
+    state: "missing",
+    title: "Missing source on reopen",
+    caption:
+      "Retain the reference, mark it unavailable, and prevent preview or drag until the file is restored.",
+  },
+];

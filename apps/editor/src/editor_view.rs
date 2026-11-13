@@ -1,7 +1,7 @@
 use crate::actions::EDITOR_KEY_CONTEXT;
 use crate::asset::IconName;
 use crate::dialog_missing_media::missing_media_dialog_view;
-use crate::editor::{Editor, RightDockTab};
+use crate::editor::{Editor, RightDockTab, WorkspaceTab};
 use crate::event_bus::{AppEvent, EventBus};
 use crate::layout::{
     MIN_MEDIA_PANEL_WIDTH, MIN_PREVIEW_WIDTH, MIN_PROPERTY_PANEL_WIDTH, MIN_TIMELINE_HEIGHT,
@@ -10,7 +10,9 @@ use crate::layout::{
 use crate::project_picker;
 use crate::property_panel::property_panel_view;
 use crate::settings::settings_modal_view;
-use crate::theme::{ACCENT, BACKGROUND, BORDER, MUTED, PANEL, SURFACE, SURFACE_HOVER, TEXT};
+use crate::theme::{
+    ACCENT, BACKGROUND, BORDER, MUTED, PANEL, SURFACE, SURFACE_HOVER, TEXT,
+};
 use crate::ui_components::cyberpunk_button::{
     button_cyberpunk_primary, button_cyberpunk_secondary,
 };
@@ -126,6 +128,19 @@ impl Render for Editor {
             .on_action(cx.listener(Self::action_toggle_assistant))
             .on_action(cx.listener(Self::action_reveal_in_finder))
             .on_action(cx.listener(Self::action_open_in_default_app))
+            .on_action(cx.listener(Self::action_switch_to_edit_workspace))
+            .on_action(cx.listener(Self::action_switch_to_color_workspace))
+            .on_action(cx.listener(Self::action_switch_to_audio_workspace))
+            .on_action(cx.listener(Self::action_switch_to_aistudio_workspace))
+            .on_action(cx.listener(Self::action_toggle_media_browser))
+            .on_action(cx.listener(Self::action_go_to_start))
+            .on_action(cx.listener(Self::action_go_to_end))
+            .on_action(cx.listener(Self::action_export_video))
+            .on_action(cx.listener(Self::action_open_project_folder))
+            .on_action(cx.listener(Self::action_open_project_picker))
+            .on_action(cx.listener(Self::action_new_timeline))
+            .on_action(cx.listener(Self::action_open_settings))
+            .on_action(cx.listener(Self::action_import_media))
             .capture_any_mouse_down(cx.listener(|editor, event: &MouseDownEvent, window, cx| {
                 if event.button == MouseButton::Left {
                     editor.focus_handle.focus(window, cx);
@@ -195,23 +210,528 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let constraints = HorizontalSplitConstraints {
-            min_left: MIN_MEDIA_PANEL_WIDTH,
-            min_center: MIN_PREVIEW_WIDTH,
-            min_right: MIN_PROPERTY_PANEL_WIDTH,
-        };
-        let widths = self.upper_split_state.read(cx).widths(width, constraints);
-        HorizontalSplit::new(
-            "editor-upper-workspace",
-            self.upper_split_state.clone(),
-            self.event_bus.clone(),
-            width,
-            constraints,
-            self.explorer_panel(cx),
-            self.preview_player(widths.center, preview_height, cx),
-            self.right_dock_view(window, cx),
-        )
-        .into_any_element()
+        match self.workspace {
+            WorkspaceTab::Edit => self.edit_workspace(width, preview_height, window, cx),
+            WorkspaceTab::Color => self.color_workspace(width, preview_height, window, cx),
+            WorkspaceTab::Audio => self.audio_workspace(width, preview_height, cx),
+            WorkspaceTab::AiStudio => self.ai_studio_workspace(width, preview_height, window, cx),
+        }
+    }
+
+    fn edit_workspace(
+        &self,
+        width: f32,
+        preview_height: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        if self.show_media_browser && self.show_inspector {
+            let constraints = HorizontalSplitConstraints {
+                min_left: MIN_MEDIA_PANEL_WIDTH,
+                min_center: MIN_PREVIEW_WIDTH,
+                min_right: MIN_PROPERTY_PANEL_WIDTH,
+            };
+            let widths = self.upper_split_state.read(cx).widths(width, constraints);
+            HorizontalSplit::new(
+                "editor-upper-workspace",
+                self.upper_split_state.clone(),
+                self.event_bus.clone(),
+                width,
+                constraints,
+                self.explorer_panel(cx),
+                self.preview_player(widths.center, preview_height, cx),
+                self.right_dock_view(window, cx),
+            )
+            .into_any_element()
+        } else if self.show_media_browser {
+            let left_width = 320.0f32;
+            let center_width = (width - left_width).max(MIN_PREVIEW_WIDTH);
+            div()
+                .size_full()
+                .flex()
+                .child(div().w(px(left_width)).h_full().child(self.explorer_panel(cx)))
+                .child(self.preview_player(center_width, preview_height, cx))
+                .into_any_element()
+        } else if self.show_inspector {
+            let right_width = 300.0f32;
+            let center_width = (width - right_width).max(MIN_PREVIEW_WIDTH);
+            div()
+                .size_full()
+                .flex()
+                .child(self.preview_player(center_width, preview_height, cx))
+                .child(
+                    div()
+                        .w(px(right_width))
+                        .h_full()
+                        .child(self.right_dock_view(window, cx)),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .size_full()
+                .flex()
+                .child(self.preview_player(width, preview_height, cx))
+                .into_any_element()
+        }
+    }
+
+    fn color_workspace(
+        &self,
+        width: f32,
+        preview_height: f32,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let left_width = 280.0f32;
+        let right_width = 320.0f32;
+        let center_width = (width - left_width - right_width).max(MIN_PREVIEW_WIDTH);
+
+        div()
+            .size_full()
+            .flex()
+            .bg(rgb(BACKGROUND))
+            // Left: Scopes & Color Analyzers
+            .child(
+                div()
+                    .w(px(left_width))
+                    .h_full()
+                    .border_r_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(PANEL))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(36.0))
+                            .px_3()
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(TEXT))
+                                    .child("SCOPES & HISTOGRAM"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .px_1p5()
+                                    .rounded(px(3.0))
+                                    .bg(rgb(SURFACE))
+                                    .text_color(rgb(MUTED))
+                                    .child("RGB Parade"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            // Scope Box 1: Waveform / Parade
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .rounded(px(6.0))
+                                    .bg(rgb(0x0c0d10))
+                                    .border_1()
+                                    .border_color(rgb(BORDER))
+                                    .p_2()
+                                    .flex()
+                                    .flex_col()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_size(px(9.0))
+                                            .text_color(rgb(MUTED))
+                                            .child("100 IRE ──"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_around()
+                                            .h(px(60.0))
+                                            .child(
+                                                div()
+                                                    .w(px(24.0))
+                                                    .h_full()
+                                                    .bg(rgb(0xef4444))
+                                                    .opacity(0.35)
+                                                    .rounded_sm(),
+                                            )
+                                            .child(
+                                                div()
+                                                    .w(px(24.0))
+                                                    .h_full()
+                                                    .bg(rgb(0x10b981))
+                                                    .opacity(0.35)
+                                                    .rounded_sm(),
+                                            )
+                                            .child(
+                                                div()
+                                                    .w(px(24.0))
+                                                    .h_full()
+                                                    .bg(rgb(0x3b82f6))
+                                                    .opacity(0.35)
+                                                    .rounded_sm(),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(9.0))
+                                            .text_color(rgb(MUTED))
+                                            .child("  0 IRE ──"),
+                                    ),
+                            )
+                            // Scope Box 2: Vectorscope
+                            .child(
+                                div()
+                                    .h(px(140.0))
+                                    .rounded(px(6.0))
+                                    .bg(rgb(0x0c0d10))
+                                    .border_1()
+                                    .border_color(rgb(BORDER))
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .size(px(90.0))
+                                            .rounded_full()
+                                            .border_1()
+                                            .border_color(rgb(0x2e313a))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                div()
+                                                    .size(px(40.0))
+                                                    .rounded_full()
+                                                    .border_1()
+                                                    .border_color(rgb(0x3f4350)),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .text_color(rgb(MUTED))
+                                            .child("Vectorscope (Rec.709)"),
+                                    ),
+                            ),
+                    ),
+            )
+            // Center: Large Preview Monitor
+            .child(self.preview_player(center_width, preview_height, cx))
+            // Right: Color Grading Wheels & Controls
+            .child(
+                div()
+                    .w(px(right_width))
+                    .h_full()
+                    .border_l_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(PANEL))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(36.0))
+                            .px_3()
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(TEXT))
+                                    .child("COLOR WHEELS & LOOKS"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .px_1p5()
+                                    .rounded(px(3.0))
+                                    .bg(rgb(0x23243a))
+                                    .text_color(rgb(ACCENT))
+                                    .child("Primary"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            // Color Wheels (Lift / Gamma / Gain)
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(color_wheel_widget("Lift (Shadows)"))
+                                    .child(color_wheel_widget("Gamma (Mid)"))
+                                    .child(color_wheel_widget("Gain (Highlight)")),
+                            )
+                            // Grading Sliders
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .p_2()
+                                    .rounded(px(6.0))
+                                    .bg(rgb(SURFACE))
+                                    .child(color_slider_row("Exposure", "0.0 EV"))
+                                    .child(color_slider_row("Contrast", "+15"))
+                                    .child(color_slider_row("Highlights", "-5"))
+                                    .child(color_slider_row("Shadows", "+10"))
+                                    .child(color_slider_row("Temperature", "5600 K"))
+                                    .child(color_slider_row("Tint", "0"))
+                                    .child(color_slider_row("Saturation", "100%")),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn audio_workspace(
+        &self,
+        width: f32,
+        preview_height: f32,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let mixer_width = (width * 0.58).clamp(420.0, 720.0);
+        let preview_width = (width - mixer_width).max(MIN_PREVIEW_WIDTH);
+
+        div()
+            .size_full()
+            .flex()
+            .bg(rgb(BACKGROUND))
+            // Left: Multitrack Audio Mixer
+            .child(
+                div()
+                    .w(px(mixer_width))
+                    .h_full()
+                    .border_r_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(PANEL))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(36.0))
+                            .px_3()
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(TEXT))
+                                    .child("MULTITRACK AUDIO MIXER"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(MUTED))
+                                    .child("48 kHz · 24-bit · Stereo Out"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .p_3()
+                            .flex()
+                            .gap_3()
+                            .overflow_hidden()
+                            .child(audio_channel_strip("A1: Video Audio", -2.5, false, false))
+                            .child(audio_channel_strip("A2: Voiceover", 0.0, false, false))
+                            .child(audio_channel_strip("A3: Music BGM", -6.0, false, false))
+                            .child(audio_channel_strip("A4: Sound FX", -4.0, false, false))
+                            .child(audio_master_strip("MASTER OUT", -0.5)),
+                    ),
+            )
+            // Right: Audio Preview Player & EQ
+            .child(
+                div()
+                    .w(px(preview_width))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(self.preview_player(preview_width, preview_height * 0.65, cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .border_t_1()
+                            .border_color(rgb(BORDER))
+                            .bg(rgb(PANEL))
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(TEXT))
+                                    .child("MASTER PARAMETRIC EQ & DYNAMICS"),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .rounded(px(6.0))
+                                    .bg(rgb(0x0c0d10))
+                                    .border_1()
+                                    .border_color(rgb(BORDER))
+                                    .p_2()
+                                    .flex()
+                                    .items_center()
+                                    .justify_around()
+                                    .child(eq_band_node("Low (80Hz)", "+2dB"))
+                                    .child(eq_band_node("Low-Mid (250Hz)", "-1dB"))
+                                    .child(eq_band_node("High-Mid (2.5kHz)", "+3dB"))
+                                    .child(eq_band_node("High (12kHz)", "+1dB")),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn ai_studio_workspace(
+        &self,
+        width: f32,
+        _preview_height: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let left_width = 300.0f32;
+        let right_width = 360.0f32;
+        let center_width = (width - left_width - right_width).max(320.0);
+
+        div()
+            .size_full()
+            .flex()
+            .bg(rgb(BACKGROUND))
+            // Left: Shot Director & Prompt Tools
+            .child(
+                div()
+                    .w(px(left_width))
+                    .h_full()
+                    .border_r_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(PANEL))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(36.0))
+                            .px_3()
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(TEXT))
+                                    .child("AI SHOT DIRECTOR"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .px_1p5()
+                                    .rounded(px(3.0))
+                                    .bg(rgb(0x23243a))
+                                    .text_color(rgb(ACCENT))
+                                    .child("Active"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(ai_tool_card("Smart Scene Cuts", "Detect shot boundaries and cut silence automatically.", "Detect Cuts"))
+                            .child(ai_tool_card("Auto Captions", "Transcribe audio speech tracks into styled timeline captions.", "Generate Captions"))
+                            .child(ai_tool_card("B-Roll Finder", "Match script keywords with media bin footage and suggest inserts.", "Find B-Roll"))
+                            .child(ai_tool_card("Style Color Match", "Analyze a reference image and apply consistent grade across clips.", "Color Match")),
+                    ),
+            )
+            // Center: Storyboard & Shot Canvas
+            .child(
+                div()
+                    .w(px(center_width))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(BACKGROUND))
+                    .child(
+                        div()
+                            .h(px(36.0))
+                            .px_3()
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(TEXT))
+                                    .child("STORYBOARD & SCENE PROMPTS"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(MUTED))
+                                    .child("4 Scenes · 12 Shots Planned"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .p_4()
+                            .flex()
+                            .flex_wrap()
+                            .gap_3()
+                            .child(storyboard_scene_card("Scene 1: Introduction", "Wide establishing shot of city morning with title fade-in.", "00:00 - 00:08"))
+                            .child(storyboard_scene_card("Scene 2: Interview", "Medium close-up speaker dialogue with clean voiceover track.", "00:08 - 00:32"))
+                            .child(storyboard_scene_card("Scene 3: Product Demo", "Overhead macro shots of device with smooth kinetic transitions.", "00:32 - 01:15"))
+                            .child(storyboard_scene_card("Scene 4: Outro & Call to Action", "Hero shot with logo reveal, background music swell, and end card.", "01:15 - 01:30")),
+                    ),
+            )
+            // Right: AI Assistant Dock
+            .child(
+                div()
+                    .w(px(right_width))
+                    .h_full()
+                    .border_l_1()
+                    .border_color(rgb(BORDER))
+                    .child(self.assistant_panel_view(window, cx)),
+            )
+            .into_any_element()
     }
 
     /// The right dock: a tab strip over the inspector or the AI assistant.
@@ -248,7 +768,7 @@ impl Editor {
         let selected = self.right_dock == tab;
         let (element_id, label) = match tab {
             RightDockTab::Inspector => ("right-dock-tab-inspector", "Inspector"),
-            RightDockTab::Assistant => ("right-dock-tab-assistant", "AI"),
+            RightDockTab::Assistant => ("right-dock-tab-assistant", "AI Studio"),
         };
         div()
             .id(element_id)
@@ -261,7 +781,10 @@ impl Editor {
             .text_size(px(11.0))
             .font_weight(FontWeight::SEMIBOLD)
             .when(selected, |this| {
-                this.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT))
+                this.bg(rgb(0x23243a))
+                    .border_1()
+                    .border_color(rgb(ACCENT))
+                    .text_color(rgb(TEXT))
             })
             .when(!selected, |this| {
                 this.text_color(rgb(MUTED))
@@ -276,15 +799,15 @@ impl Editor {
     }
 
     fn topbar(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let timeline_name = self
-            .timeline
-            .as_ref()
-            .map(|timeline| timeline.path.as_path())
-            .and_then(|path| path.file_name())
+        let project_name = self
+            .project_root
+            .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "No timeline".to_string());
+            .unwrap_or_else(|| "Untitled project".to_string());
 
         let export_enabled = self.timeline.is_some();
+        let can_undo = self.can_undo();
+        let can_redo = self.can_redo();
 
         div()
             .id("editor-topbar")
@@ -293,74 +816,231 @@ impl Editor {
             .flex()
             .items_center()
             .justify_between()
-            .gap_4()
-            .px_5()
+            .px_4()
             .border_b_1()
             .border_color(rgb(BORDER))
-            .bg(rgb(PANEL))
+            .bg(rgb(BACKGROUND))
+            // Left: NodaMark, NodaVideo, Divider, Project Name, Unsaved Dot
             .child(
                 div()
                     .flex()
-                    .flex_1()
                     .min_w_0()
                     .items_center()
-                    .gap_4()
+                    .gap_2p5()
+                    .child(img(IconName::NodaMark.path()).size(px(24.0)).flex_shrink_0())
                     .child(
                         div()
-                            .flex()
-                            .flex_shrink_0()
-                            .items_center()
-                            .gap_1()
-                            .child(img(IconName::App.path()).size(px(40.0)).flex_shrink_0())
-                            .child(
-                                div()
-                                    .text_xl()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .child("OpenCut"),
-                            ),
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(TEXT))
+                            .child("NodaVideo"),
                     )
+                    .child(div().mx_1().h(px(16.0)).border_r_1().border_color(rgb(BORDER)))
                     .child(
                         div()
-                            .min_w_0()
-                            .text_ellipsis()
                             .text_xs()
-                            .font_family("monospace")
                             .text_color(rgb(MUTED))
-                            .child(format!("EDITOR · {timeline_name} · AUTOSAVED")),
-                    ),
+                            .text_ellipsis()
+                            .child(project_name),
+                    )
+                    .when(export_enabled, |this| {
+                        this.child(
+                            div()
+                                .size(px(6.0))
+                                .rounded_full()
+                                .bg(rgb(0x818cf8)),
+                        )
+                    }),
             )
+            // Center: Workspaces navigation tabs
+            .child(
+                div()
+                    .h_full()
+                    .flex()
+                    .items_stretch()
+                    .gap_1()
+                    .child(self.workspace_nav_tab("workspace-edit", "Edit", WorkspaceTab::Edit, cx))
+                    .child(self.workspace_nav_tab("workspace-color", "Color", WorkspaceTab::Color, cx))
+                    .child(self.workspace_nav_tab("workspace-audio", "Audio", WorkspaceTab::Audio, cx))
+                    .child(self.workspace_nav_tab("workspace-ai", "AI Studio", WorkspaceTab::AiStudio, cx)),
+            )
+            // Right: Undo/Redo, Dividers, Panel Toggles, Projects, Export
             .child(
                 div()
                     .flex()
-                    .flex_shrink_0()
                     .items_center()
-                    .gap_3()
+                    .justify_end()
+                    .gap_1p5()
+                    // Undo
                     .child(
-                        button_cyberpunk_secondary("topbar-settings", "Settings", true, window, cx)
-                            .w(px(128.0))
-                            .px_0()
-                            .on_click(cx.listener(|editor, _, window, cx| {
-                                editor.open_global_settings(window, cx)
-                            })),
+                        div()
+                            .id("topbar-undo")
+                            .h(px(28.0))
+                            .w(px(28.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(3.0))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .when(can_undo, |this| {
+                                this.bg(rgb(SURFACE))
+                                    .text_color(rgb(TEXT))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(SURFACE_HOVER)))
+                                    .on_click(cx.listener(|editor, _, window, cx| {
+                                        editor.action_undo(&crate::actions::Undo, window, cx);
+                                    }))
+                            })
+                            .when(!can_undo, |this| {
+                                this.bg(rgb(SURFACE))
+                                    .text_color(rgb(0x4a4d57))
+                                    .cursor_not_allowed()
+                            })
+                            .text_size(px(13.0))
+                            .child("↶"),
                     )
+                    // Redo
                     .child(
-                        button_cyberpunk_secondary(
-                            "topbar-open-folder",
-                            "Open Folder",
-                            true,
-                            window,
-                            cx,
-                        )
-                        .w(px(152.0))
-                        .px_0()
-                        .on_click(cx.listener(|editor, _, _, cx| {
-                            editor.open_project_folder(cx);
-                        })),
+                        div()
+                            .id("topbar-redo")
+                            .h(px(28.0))
+                            .w(px(28.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(3.0))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .when(can_redo, |this| {
+                                this.bg(rgb(SURFACE))
+                                    .text_color(rgb(TEXT))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(SURFACE_HOVER)))
+                                    .on_click(cx.listener(|editor, _, window, cx| {
+                                        editor.action_redo(&crate::actions::Redo, window, cx);
+                                    }))
+                            })
+                            .when(!can_redo, |this| {
+                                this.bg(rgb(SURFACE))
+                                    .text_color(rgb(0x4a4d57))
+                                    .cursor_not_allowed()
+                            })
+                            .text_size(px(13.0))
+                            .child("↷"),
                     )
+                    // Divider
+                    .child(div().mx_1().h(px(16.0)).border_r_1().border_color(rgb(BORDER)))
+                    // Media Panel Toggle
+                    .child(
+                        div()
+                            .id("toggle-media-panel-btn")
+                            .h(px(28.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(3.0))
+                            .border_1()
+                            .cursor_pointer()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .when(self.show_media_browser, |this| {
+                                this.border_color(rgb(ACCENT))
+                                    .bg(rgb(0x23243a))
+                                    .text_color(rgb(TEXT))
+                            })
+                            .when(!self.show_media_browser, |this| {
+                                this.border_color(rgb(BORDER))
+                                    .bg(rgb(SURFACE))
+                                    .text_color(rgb(MUTED))
+                                    .hover(|s| s.text_color(rgb(TEXT)))
+                            })
+                            .on_click(cx.listener(|editor, _, _, cx| {
+                                editor.show_media_browser = !editor.show_media_browser;
+                                cx.notify();
+                            }))
+                            .child("Media"),
+                    )
+                    // Inspector Toggle
+                    .child(
+                        div()
+                            .id("toggle-inspector-btn")
+                            .h(px(28.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(3.0))
+                            .border_1()
+                            .cursor_pointer()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .when(self.show_inspector && self.right_dock == RightDockTab::Inspector, |this| {
+                                this.border_color(rgb(ACCENT))
+                                    .bg(rgb(0x23243a))
+                                    .text_color(rgb(TEXT))
+                            })
+                            .when(!self.show_inspector || self.right_dock != RightDockTab::Inspector, |this| {
+                                this.border_color(rgb(BORDER))
+                                    .bg(rgb(SURFACE))
+                                    .text_color(rgb(MUTED))
+                                    .hover(|s| s.text_color(rgb(TEXT)))
+                            })
+                            .on_click(cx.listener(|editor, _, _, cx| {
+                                if editor.show_inspector && editor.right_dock == RightDockTab::Inspector {
+                                    editor.show_inspector = false;
+                                } else {
+                                    editor.show_inspector = true;
+                                    editor.right_dock = RightDockTab::Inspector;
+                                }
+                                cx.notify();
+                            }))
+                            .child("Inspector"),
+                    )
+                    // AI Assistant Toggle
+                    .child(
+                        div()
+                            .id("toggle-assistant-btn")
+                            .h(px(28.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(3.0))
+                            .border_1()
+                            .cursor_pointer()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .when(self.show_inspector && self.right_dock == RightDockTab::Assistant, |this| {
+                                this.border_color(rgb(ACCENT))
+                                    .bg(rgb(0x23243a))
+                                    .text_color(rgb(TEXT))
+                            })
+                            .when(!self.show_inspector || self.right_dock != RightDockTab::Assistant, |this| {
+                                this.border_color(rgb(BORDER))
+                                    .bg(rgb(SURFACE))
+                                    .text_color(rgb(MUTED))
+                                    .hover(|s| s.text_color(rgb(TEXT)))
+                            })
+                            .on_click(cx.listener(|editor, _, _, cx| {
+                                if editor.show_inspector && editor.right_dock == RightDockTab::Assistant {
+                                    editor.show_inspector = false;
+                                } else {
+                                    editor.show_inspector = true;
+                                    editor.right_dock = RightDockTab::Assistant;
+                                }
+                                cx.notify();
+                            }))
+                            .child("AI"),
+                    )
+                    // Divider
+                    .child(div().mx_1().h(px(16.0)).border_r_1().border_color(rgb(BORDER)))
+                    // Projects
                     .child(
                         button_cyberpunk_secondary("topbar-projects", "Projects", true, window, cx)
-                            .w(px(128.0))
-                            .px_0()
+                            .h(px(28.0))
+                            .px_2p5()
                             .on_click(cx.listener(|_, _, _, cx| {
                                 let event_bus = cx.new(|_| EventBus {});
                                 if let Err(error) = project_picker::open(cx, event_bus, None) {
@@ -368,18 +1048,17 @@ impl Editor {
                                 }
                             })),
                     )
+                    // Export Video Primary Button
                     .child(
                         button_cyberpunk_primary(
                             "topbar-export",
-                            "Export",
+                            "Export Video",
                             export_enabled,
                             window,
                             cx,
                         )
-                        .w(px(128.0))
-                        .pl(px(20.0))
-                        .pr(px(34.0))
-                        .justify_center()
+                        .h(px(28.0))
+                        .px_3()
                         .when(export_enabled, |button| {
                             button.on_click(cx.listener(|editor, _, _, cx| {
                                 let Some(timeline) = editor.timeline.as_ref() else {
@@ -393,6 +1072,414 @@ impl Editor {
             )
             .into_any_element()
     }
+
+    fn workspace_nav_tab(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        tab: WorkspaceTab,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let selected = self.workspace == tab;
+        div()
+            .id(id)
+            .h_full()
+            .px_4()
+            .flex()
+            .items_center()
+            .justify_center()
+            .border_b_2()
+            .cursor_pointer()
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .when(selected, |this| {
+                this.border_color(rgb(ACCENT)).text_color(rgb(TEXT))
+            })
+            .when(!selected, |this| {
+                this.border_color(rgb(0x00000000))
+                    .text_color(rgb(MUTED))
+                    .hover(|s| s.text_color(rgb(TEXT)))
+            })
+            .on_click(cx.listener(move |editor, _, _, cx| {
+                editor.workspace = tab;
+                cx.notify();
+            }))
+            .child(label)
+            .into_any_element()
+    }
+}
+
+// Helpers for Color, Audio, and AI Studio views
+fn color_wheel_widget(label: &'static str) -> gpui::AnyElement {
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_1()
+        .child(
+            div()
+                .size(px(72.0))
+                .rounded_full()
+                .border_1()
+                .border_color(rgb(BORDER))
+                .bg(rgb(0x0c0d10))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(div().size(px(8.0)).rounded_full().bg(rgb(ACCENT))),
+        )
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(MUTED))
+                .child(label),
+        )
+        .into_any_element()
+}
+
+fn color_slider_row(name: &'static str, val: &'static str) -> gpui::AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .text_xs()
+        .child(div().text_color(rgb(MUTED)).child(name))
+        .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(val))
+        .into_any_element()
+}
+
+fn audio_channel_strip(
+    name: &'static str,
+    db: f32,
+    _muted: bool,
+    _solo: bool,
+) -> gpui::AnyElement {
+    div()
+        .w(px(88.0))
+        .h_full()
+        .rounded(px(6.0))
+        .bg(rgb(SURFACE))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .p_2()
+        .flex()
+        .flex_col()
+        .justify_between()
+        .items_center()
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(TEXT))
+                .text_ellipsis()
+                .child(name),
+        )
+        // Pan Knob
+        .child(
+            div()
+                .text_size(px(9.0))
+                .px_1p5()
+                .rounded_sm()
+                .bg(rgb(PANEL))
+                .text_color(rgb(MUTED))
+                .child("PAN < C >"),
+        )
+        // Mute / Solo
+        .child(
+            div()
+                .flex()
+                .gap_1()
+                .child(
+                    div()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded(px(2.0))
+                        .bg(rgb(PANEL))
+                        .text_size(px(9.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(MUTED))
+                        .child("M"),
+                )
+                .child(
+                    div()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded(px(2.0))
+                        .bg(rgb(PANEL))
+                        .text_size(px(9.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(MUTED))
+                        .child("S"),
+                ),
+        )
+        // Vertical Meter & Fader
+        .child(
+            div()
+                .flex_1()
+                .w_full()
+                .py_2()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                // VU Meter bar
+                .child(
+                    div()
+                        .w(px(6.0))
+                        .h(px(100.0))
+                        .rounded_full()
+                        .bg(rgb(0x0a0b0d))
+                        .flex()
+                        .flex_col()
+                        .justify_end()
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(65.0))
+                                .rounded_full()
+                                .bg(rgb(0x10b981)),
+                        ),
+                )
+                // Fader track & handle
+                .child(
+                    div()
+                        .w(px(14.0))
+                        .h(px(100.0))
+                        .rounded_sm()
+                        .bg(rgb(0x0c0d10))
+                        .relative()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .absolute()
+                                .w(px(20.0))
+                                .h(px(8.0))
+                                .rounded_sm()
+                                .bg(rgb(0x8a90a2))
+                                .border_1()
+                                .border_color(rgb(0x2e313a)),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_family("monospace")
+                .text_color(rgb(TEXT))
+                .child(format!("{db:+.1} dB")),
+        )
+        .into_any_element()
+}
+
+fn audio_master_strip(name: &'static str, db: f32) -> gpui::AnyElement {
+    div()
+        .w(px(96.0))
+        .h_full()
+        .rounded(px(6.0))
+        .bg(rgb(0x1d1e26))
+        .border_1()
+        .border_color(rgb(ACCENT))
+        .p_2()
+        .flex()
+        .flex_col()
+        .justify_between()
+        .items_center()
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(0x818cf8))
+                .child(name),
+        )
+        .child(
+            div()
+                .text_size(px(9.0))
+                .px_1p5()
+                .rounded_sm()
+                .bg(rgb(0x23243a))
+                .text_color(rgb(TEXT))
+                .child("STEREO 0.0"),
+        )
+        .child(
+            div()
+                .flex_1()
+                .w_full()
+                .py_2()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(8.0))
+                        .h(px(100.0))
+                        .rounded_full()
+                        .bg(rgb(0x0a0b0d))
+                        .flex()
+                        .flex_col()
+                        .justify_end()
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(72.0))
+                                .rounded_full()
+                                .bg(rgb(0x10b981)),
+                        ),
+                )
+                .child(
+                    div()
+                        .w(px(16.0))
+                        .h(px(100.0))
+                        .rounded_sm()
+                        .bg(rgb(0x0c0d10))
+                        .relative()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .absolute()
+                                .w(px(22.0))
+                                .h(px(10.0))
+                                .rounded_sm()
+                                .bg(rgb(ACCENT)),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_family("monospace")
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(TEXT))
+                .child(format!("{db:+.1} dB")),
+        )
+        .into_any_element()
+}
+
+fn eq_band_node(label: &'static str, gain: &'static str) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_1()
+        .child(
+            div()
+                .size(px(20.0))
+                .rounded_full()
+                .bg(rgb(ACCENT))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(9.0))
+                .text_color(rgb(0x131417))
+                .font_weight(FontWeight::BOLD)
+                .child("●"),
+        )
+        .child(div().text_size(px(10.0)).text_color(rgb(MUTED)).child(label))
+        .child(div().text_size(px(10.0)).font_weight(FontWeight::BOLD).text_color(rgb(TEXT)).child(gain))
+        .into_any_element()
+}
+
+fn ai_tool_card(title: &'static str, desc: &'static str, btn: &'static str) -> gpui::AnyElement {
+    div()
+        .p_3()
+        .rounded(px(6.0))
+        .bg(rgb(SURFACE))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .flex()
+        .flex_col()
+        .gap_1p5()
+        .child(
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(TEXT))
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(MUTED))
+                .line_height(px(16.0))
+                .child(desc),
+        )
+        .child(
+            div()
+                .h(px(24.0))
+                .mt_1()
+                .px_2p5()
+                .self_start()
+                .rounded(px(4.0))
+                .bg(rgb(0x23243a))
+                .border_1()
+                .border_color(rgb(ACCENT))
+                .text_color(rgb(0x818cf8))
+                .text_size(px(10.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(ACCENT)).text_color(rgb(0x131417)))
+                .child(btn),
+        )
+        .into_any_element()
+}
+
+fn storyboard_scene_card(title: &'static str, desc: &'static str, duration: &'static str) -> gpui::AnyElement {
+    div()
+        .w(px(220.0))
+        .p_3()
+        .rounded(px(6.0))
+        .bg(rgb(SURFACE))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .hover(|s| s.border_color(rgb(ACCENT)))
+        .flex()
+        .flex_col()
+        .gap_2()
+        // Thumbnail box
+        .child(
+            div()
+                .w_full()
+                .h(px(90.0))
+                .rounded(px(4.0))
+                .bg(rgb(0x0c0d10))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(24.0))
+                .opacity(0.3)
+                .child("🎬"),
+        )
+        .child(
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(TEXT))
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(MUTED))
+                .line_height(px(15.0))
+                .child(desc),
+        )
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_family("monospace")
+                .text_color(rgb(ACCENT))
+                .child(duration),
+        )
+        .into_any_element()
 }
 
 const WORKSPACE_SPLIT_CONSTRAINTS: VerticalSplitConstraints = VerticalSplitConstraints {

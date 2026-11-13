@@ -29,6 +29,23 @@ pub(super) struct NewTimelineDialogState {
     pub(crate) input: Entity<TextInput>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum MediaCategoryFilter {
+    #[default]
+    All,
+    Video,
+    Audio,
+    Image,
+    Captions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum MediaViewMode {
+    #[default]
+    List,
+    Grid,
+}
+
 pub(crate) struct ExplorerState {
     pub(crate) file_tree: Vec<FileTreeEntry>,
     pub(crate) expanded_directories: HashSet<PathBuf>,
@@ -42,6 +59,8 @@ pub(crate) struct ExplorerState {
     pub(crate) rename_dialog: Option<RenameDialogState>,
     pub(crate) new_timeline_dialog: Option<NewTimelineDialogState>,
     pub(crate) trash_timeline_dialog_open: bool, // 确认把当前打开的时间线移到废纸篓。
+    pub(crate) category: MediaCategoryFilter,
+    pub(crate) view_mode: MediaViewMode,
     _file_tree_watch: Task<()>,                  // drop 时停止监听项目目录。
 }
 
@@ -85,6 +104,8 @@ impl ExplorerState {
             rename_dialog: None,
             new_timeline_dialog: None,
             trash_timeline_dialog_open: false,
+            category: MediaCategoryFilter::All,
+            view_mode: MediaViewMode::List,
             _file_tree_watch: watch_file_tree(project_root.to_path_buf(), cx),
         }
     }
