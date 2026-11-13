@@ -3,12 +3,11 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use nodavideo_project::{AssetId, TimeRational};
 
+use crate::binaries::ffmpeg_command;
 use crate::error::MediaEngineError;
-use crate::probe::is_ffmpeg_available;
 
 /// Points generated per second of audio for timeline visualization.
 pub const WAVEFORM_POINTS_PER_SECOND: u32 = 100;
@@ -82,12 +81,8 @@ pub fn generate_waveform(
         }
     }
 
-    if !is_ffmpeg_available() {
-        return Err(MediaEngineError::FfmpegNotFound);
-    }
-
     // Decode audio to mono 8kHz 32-bit float raw PCM to stdout
-    let output = Command::new("ffmpeg")
+    let output = ffmpeg_command()?
         .arg("-i")
         .arg(source_path)
         .arg("-vn")
