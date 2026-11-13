@@ -3,12 +3,14 @@
 //! Provides FFmpeg stream probing, metadata inspection, thumbnail generation,
 //! audio waveform extraction, and SQLite-backed media caching.
 
+pub mod binaries;
 pub mod cache;
 pub mod error;
 pub mod export;
 pub mod preview;
 pub mod probe;
 pub mod thumbnail;
+pub mod time_math;
 pub mod waveform;
 
 use std::path::{Path, PathBuf};
@@ -16,11 +18,18 @@ use std::path::{Path, PathBuf};
 use nodavideo_project::{AssetId, MediaAsset, MediaType, ProjectDocument};
 use nodavideo_timeline::Sequence;
 
+pub use binaries::{
+    FFMPEG_ENV_VAR, FFPROBE_ENV_VAR, ffmpeg_command, ffmpeg_path, ffprobe_command, ffprobe_path,
+    is_ffmpeg_available, is_ffprobe_available,
+};
 pub use cache::{CachedMediaRecord, MediaCacheDb};
 pub use error::MediaEngineError;
 pub use export::{ExportReport, ExportSettings, export_sequence};
-pub use preview::{extract_preview_frame, render_sequence_frame, resolve_active_video_clip};
-pub use probe::{is_ffmpeg_available, is_ffprobe_available, probe_media_file};
+pub use preview::{
+    extract_preview_frame, render_sequence_frame, resolve_active_video_clip,
+    resolve_renderable_video_clip,
+};
+pub use probe::probe_media_file;
 pub use thumbnail::generate_thumbnail;
 pub use waveform::{WaveformData, generate_waveform};
 
@@ -255,7 +264,8 @@ mod tests {
 
         // 1. Generate a small synthetic 2-second video with FFmpeg for testing
         let video_path = dir.path().join("source.mp4");
-        let status = std::process::Command::new("ffmpeg")
+        let status = ffmpeg_command()
+            .unwrap()
             .arg("-f")
             .arg("lavfi")
             .arg("-i")
@@ -326,5 +336,115 @@ mod tests {
         assert_eq!(probed.width, Some(320));
         assert_eq!(probed.height, Some(240));
         assert!(probed.duration.is_some());
+    }
+
+    /// Regression: audio clips must be mixed without `amix` normalizing them into
+    /// near-silence, and an asset/sequence fps mismatch must still produce a valid
+    /// constant-frame-rate MP4 at the requested sequence rate.
+    #[test]
+    fn test_export_with_audio_and_frame_rate_retiming() {
+        if !is_ffmpeg_available() || !is_ffprobe_available() {
+            eprintln!("Skipping retiming export test: ffmpeg/ffprobe not available");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("cache");
+        let processor = MediaProcessor::new(&cache_dir).unwrap();
+
+        let video_path = dir.path().join("av_source.mp4");
+        let status = ffmpeg_command()
+            .unwrap()
+            .arg("-f")
+            .arg("lavfi")
+            .arg("-i")
+            .arg("testsrc=size=320x240:rate=24:duration=2")
+            .arg("-f")
+            .arg("lavfi")
+            .arg("-i")
+            .arg("sine=frequency=440:duration=2")
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg("-c:a")
+            .arg("aac")
+            .arg("-t")
+            .arg("2")
+            .arg("-y")
+            .arg(&video_path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let asset = processor.process_file(&video_path).unwrap();
+        assert_eq!(asset.frame_rate, Some(nodavideo_project::FrameRate::FPS_24));
+        assert!(
+            asset.audio_codec.is_some(),
+            "source must carry an audio stream"
+        );
+
+        let mut project = ProjectDocument::new("AV Export Test");
+        let asset_id = asset.id;
+        project.add_asset(asset).unwrap();
+
+        let mut sequence = Sequence::default_1080p24();
+        let v1_id = sequence.tracks[1].id;
+        let a1_id = sequence.tracks[2].id;
+        sequence
+            .add_clip(
+                v1_id,
+                nodavideo_timeline::Clip::new(
+                    nodavideo_timeline::ClipId::new(),
+                    asset_id,
+                    v1_id,
+                    "Video",
+                    0,
+                    0,
+                    24,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        sequence
+            .add_clip(
+                a1_id,
+                nodavideo_timeline::Clip::new(
+                    nodavideo_timeline::ClipId::new(),
+                    asset_id,
+                    a1_id,
+                    "Audio",
+                    0,
+                    0,
+                    24,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        // 30 fps sequence, 24 fps source: forces the retiming + atempo path.
+        let export_path = dir.path().join("retimed_av.mp4");
+        let settings = ExportSettings {
+            output_path: export_path.clone(),
+            width: 320,
+            height: 240,
+            fps: nodavideo_project::FrameRate::FPS_30,
+            ..Default::default()
+        };
+
+        let report = processor
+            .export(&sequence, &project, &settings)
+            .expect("export must succeed with audio and a frame-rate mismatch");
+        assert_eq!(report.total_clips_exported, 2);
+        assert!(report.file_size_bytes > 0);
+        // 24 timeline frames at 30 fps == 0.8 seconds.
+        assert!((report.duration_seconds - 0.8).abs() < 1e-6);
+
+        let probed = probe_media_file(&export_path).unwrap();
+        assert_eq!(
+            probed.frame_rate,
+            Some(nodavideo_project::FrameRate::FPS_30)
+        );
+        assert!(probed.audio_codec.is_some(), "audio stream must be present");
     }
 }
