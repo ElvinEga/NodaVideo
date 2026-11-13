@@ -12,7 +12,11 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+ulid.workspace = true
+log.workspace = true
 tempfile.workspace = true
+resvg.workspace = true
+image.workspace = true
 
 [lints]
 workspace = true
