@@ -3,12 +3,12 @@
 use chrono::Utc;
 use serde::Deserialize;
 use std::path::Path;
-use std::process::Command;
 
 use nodavideo_project::{
     AssetId, FrameRate, MediaAsset, MediaAssetStatus, MediaType, TimeRational,
 };
 
+use crate::binaries::{ffprobe_command, is_ffprobe_available};
 use crate::error::MediaEngineError;
 
 #[derive(Debug, Deserialize)]
@@ -57,22 +57,6 @@ fn parse_rational_fps(s: &str) -> Option<FrameRate> {
         }
     }
     None
-}
-
-/// Verify if `ffprobe` is available on the system PATH.
-pub fn is_ffprobe_available() -> bool {
-    Command::new("ffprobe")
-        .arg("-version")
-        .output()
-        .is_ok_and(|out| out.status.success())
-}
-
-/// Verify if `ffmpeg` is available on the system PATH.
-pub fn is_ffmpeg_available() -> bool {
-    Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-        .is_ok_and(|out| out.status.success())
 }
 
 /// Inspect a media file on disk and construct a fully populated `MediaAsset`.
@@ -154,7 +138,7 @@ pub fn probe_media_file(path: &Path) -> Result<MediaAsset, MediaEngineError> {
         return Err(MediaEngineError::FfprobeNotFound);
     }
 
-    let output = Command::new("ffprobe")
+    let output = ffprobe_command()?
         .arg("-v")
         .arg("quiet")
         .arg("-print_format")
