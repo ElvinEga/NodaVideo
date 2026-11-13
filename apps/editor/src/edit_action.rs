@@ -25,6 +25,12 @@ pub(crate) enum EditAction {
         clips: Vec<Clip>,
         assets: Vec<Asset>,
     },
+    /// Creates a track and places clips on it as one undoable edit.
+    AddTrackWithClips {
+        track: Track,
+        clips: Vec<Clip>,
+        assets: Vec<Asset>,
+    },
     RemoveClips {
         clip_ids: HashSet<Ulid>,
         close_track_gaps: bool,
@@ -564,6 +570,16 @@ impl TimelineEditExt for TimelineEditingState {
                 data = remove_gaps(self);
             }
             EditAction::AddClips { clips, assets } => {
+                data.assets.extend(assets);
+                validate_clips_placements(&data, &clips)?;
+                data.clips.extend(clips);
+            }
+            EditAction::AddTrackWithClips {
+                track,
+                clips,
+                assets,
+            } => {
+                data.tracks.push(track);
                 data.assets.extend(assets);
                 validate_clips_placements(&data, &clips)?;
                 data.clips.extend(clips);

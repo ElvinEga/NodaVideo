@@ -427,35 +427,11 @@ impl Editor {
             eprintln!("Create or select a timeline before adding tracks.");
             return Ok(());
         };
-        let number = timeline
-            .editing_state
-            .tracks
-            .iter()
-            .filter(|track| track.kind == kind)
-            .count()
-            + 1;
-        let prefix = match kind {
-            TrackKind::Video => "Video",
-            TrackKind::Audio => "Audio",
-            TrackKind::Text => "Text",
-        };
-        let id = Ulid::generate();
+        let track = next_track(&timeline.editing_state.tracks, kind);
         let Some(timeline) = self.timeline.as_mut() else {
             return Ok(());
         };
-        edit_timeline(
-            timeline,
-            EditAction::AddTrack {
-                track: Track {
-                    id,
-                    name: format!("{prefix} {number}"),
-                    kind,
-                    locked: false,
-                    muted: false,
-                    visible: true,
-                },
-            },
-        )?;
+        edit_timeline(timeline, EditAction::AddTrack { track })?;
         timeline.save()
     }
 
@@ -513,6 +489,28 @@ impl Editor {
             return;
         };
         timeline.track_magnet_enabled = !timeline.track_magnet_enabled;
+    }
+}
+
+/// Builds an unlocked track of `kind`, numbered after the existing tracks of that kind.
+pub(crate) fn next_track(existing_tracks: &[Track], kind: TrackKind) -> Track {
+    let number = existing_tracks
+        .iter()
+        .filter(|track| track.kind == kind)
+        .count()
+        + 1;
+    let prefix = match kind {
+        TrackKind::Video => "Video",
+        TrackKind::Audio => "Audio",
+        TrackKind::Text => "Text",
+    };
+    Track {
+        id: Ulid::generate(),
+        name: format!("{prefix} {number}"),
+        kind,
+        locked: false,
+        muted: false,
+        visible: true,
     }
 }
 

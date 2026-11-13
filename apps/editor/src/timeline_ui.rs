@@ -1,4 +1,5 @@
 use crate::asset::IconName;
+use crate::clip_placement::DEFAULT_IMAGE_DURATION_SECONDS;
 use crate::context_menu::ContextMenu;
 use crate::edit_action::EditAction;
 use crate::editor::Editor;
@@ -1207,7 +1208,7 @@ impl Editor {
         let playhead = timeline.playhead();
         let duration = timeline
             .editing_state
-            .nearest_time(asset.duration().unwrap_or(0.0))
+            .nearest_time(asset.duration().unwrap_or(DEFAULT_IMAGE_DURATION_SECONDS))
             .max(TimelineFrameIndex::ONE_FRAME);
 
         let mut target_track_id = timeline
@@ -1241,9 +1242,27 @@ impl Editor {
             end_time
         };
 
-        if let Some(track_id) = target_track_id
+        let placement = match target_track_id {
+            Some(track_id) => Some((Some(track_id), start_pos)),
+            None => {
+                if timeline
+                    .editing_state
+                    .tracks
+                    .iter()
+                    .any(|t| t.kind == expected_kind)
+                {
+                    log::error!(
+                        "Failed to place dropped external media: no unlocked {expected_kind:?} track is available"
+                    );
+                    None
+                } else {
+                    Some((None, playhead)) // 没有同类轨道：新建轨道并连同片段一起提交。
+                }
+            }
+        };
+        if let Some((track_id, start)) = placement
             && let Err(error) =
-                self.place_explorer_asset(canonical, track_id, start_pos, asset, None, cx)
+                self.place_explorer_asset(canonical, track_id, start, asset, None, cx)
         {
             log::error!("Failed to place dropped external media: {error:?}");
         }

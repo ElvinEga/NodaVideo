@@ -303,6 +303,7 @@ impl Editor {
                                 }
                                 editor.schedule_project_waveforms(cx);
                             }
+                            editor.schedule_media_thumbnails(cx);
                         }
                         Err(error) => {
                             log::error!("Could not import {}: {error:?}", path.display());

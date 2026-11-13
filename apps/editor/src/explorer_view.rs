@@ -588,6 +588,8 @@ impl Editor {
             .p_2()
             .flex()
             .flex_wrap()
+            .items_start()
+            .content_start()
             .gap_2()
             .children(cards)
             .into_any_element()
@@ -634,9 +636,35 @@ impl Editor {
             None => format_file_size(entry.size_bytes.unwrap_or(0)),
         };
 
+        let video_thumbnail = match entry.kind {
+            FileTreeEntryKind::Video => {
+                if let Some(cached) = self.explorer.thumbnail_cache.get(&entry.absolute_path) {
+                    Some(cached.clone())
+                } else if let Ok(cached_path) =
+                    crate::media_thumbnail::thumbnail_cache_path(&entry.absolute_path)
+                {
+                    if cached_path.is_file() {
+                        Some(cached_path)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        let duration_badge = self
+            .explorer
+            .media_metadata
+            .get(&entry.absolute_path)
+            .and_then(|a| a.duration())
+            .map(format_card_duration);
+
         div()
             .id(("media-card", index))
-            .w(px(140.0))
+            .w(px(136.0))
             .flex_shrink_0()
             .flex()
             .flex_col()
@@ -763,7 +791,14 @@ impl Editor {
                         this.child(
                             gpui::img(entry.absolute_path.clone())
                                 .size_full()
-                                .object_fit(gpui::ObjectFit::Contain),
+                                .object_fit(gpui::ObjectFit::Cover),
+                        )
+                    })
+                    .when_some(video_thumbnail, |this, thumbnail| {
+                        this.child(
+                            gpui::img(thumbnail)
+                                .size_full()
+                                .object_fit(gpui::ObjectFit::Cover),
                         )
                     })
                     .child(
@@ -773,6 +808,22 @@ impl Editor {
                             .left(px(4.0))
                             .child(explorer_file_badge(entry)),
                     )
+                    .when_some(duration_badge, |this, duration| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .bottom(px(4.0))
+                                .right(px(4.0))
+                                .px(px(4.0))
+                                .py(px(1.0))
+                                .rounded(px(3.0))
+                                .bg(gpui::rgba(0x000000cc))
+                                .font_family("monospace")
+                                .text_size(px(9.0))
+                                .text_color(rgb(0xd4d4d8))
+                                .child(duration),
+                        )
+                    })
                     .when(is_missing, |this| {
                         this.child(
                             div()
@@ -807,6 +858,20 @@ impl Editor {
                     .child(metadata_text),
             )
             .into_any_element()
+    }
+}
+
+fn format_card_duration(duration: f64) -> String {
+    let total_seconds = duration.round() as u64;
+    if total_seconds >= 3600 {
+        format!(
+            "{}:{:02}:{:02}",
+            total_seconds / 3600,
+            (total_seconds % 3600) / 60,
+            total_seconds % 60
+        )
+    } else {
+        format!("{}:{:02}", total_seconds / 60, total_seconds % 60)
     }
 }
 

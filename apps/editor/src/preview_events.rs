@@ -1,3 +1,4 @@
+use crate::clip_placement::DEFAULT_IMAGE_DURATION_SECONDS;
 use crate::editor::Editor;
 use crate::preview::{PreviewTarget, SourceMarks};
 use crate::timeline::TimelineFrameIndex;
@@ -176,7 +177,7 @@ impl Editor {
             .ok_or_else(|| anyhow!("Media info for {} is not ready yet", path.display()))?;
         let full_duration = timeline
             .editing_state
-            .nearest_time(asset.duration().unwrap_or(0.0))
+            .nearest_time(asset.duration().unwrap_or(DEFAULT_IMAGE_DURATION_SECONDS))
             .max(TimelineFrameIndex::ONE_FRAME);
         let marks = self
             .preview
@@ -194,17 +195,29 @@ impl Editor {
             bail!("The source out point must be after the in point");
         }
         let track_kind = match asset.kind() {
-            MediaKind::Video => TrackKind::Video,
+            MediaKind::Video | MediaKind::Image => TrackKind::Video,
             MediaKind::Audio => TrackKind::Audio,
-            MediaKind::Image => bail!("Image placement is not supported yet"),
         };
-        let track_id = timeline
+        let track_id = match timeline
             .editing_state
             .tracks
             .iter()
             .find(|track| track.kind == track_kind && !track.locked)
             .map(|track| track.id)
-            .ok_or_else(|| anyhow!("No unlocked {track_kind:?} track is available"))?;
+        {
+            Some(track_id) => Some(track_id),
+            None => {
+                if timeline
+                    .editing_state
+                    .tracks
+                    .iter()
+                    .any(|track| track.kind == track_kind)
+                {
+                    bail!("No unlocked {track_kind:?} track is available");
+                }
+                None // 没有同类轨道：新建轨道并连同片段一起提交。
+            }
+        };
         let start = timeline.playhead();
         self.place_explorer_asset(
             absolute_path,

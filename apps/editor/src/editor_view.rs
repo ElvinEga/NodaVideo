@@ -17,12 +17,15 @@ use crate::theme::{
 use crate::ui_components::cyberpunk_button::{
     button_cyberpunk_primary, button_cyberpunk_secondary,
 };
+use crate::preview::PreviewTarget;
+use crate::preview_events::PreviewEvent;
 use crate::ui_components::{
     HorizontalSplit, HorizontalSplitConstraints, VerticalSplit, VerticalSplitConstraints,
 };
 use gpui::prelude::*;
 use gpui::{
     App, CursorStyle, FontWeight, MouseButton, MouseDownEvent, Window, canvas, div, img, px, rgb,
+    svg,
 };
 
 impl Render for Editor {
@@ -265,7 +268,7 @@ impl Editor {
                 width,
                 constraints,
                 self.explorer_panel(cx),
-                self.preview_player(widths.center, preview_height, cx),
+                self.monitor_panel(widths.center, preview_height, cx),
                 self.right_dock_view(window, cx),
             )
             .into_any_element()
@@ -276,7 +279,7 @@ impl Editor {
                 .size_full()
                 .flex()
                 .child(div().w(px(left_width)).h_full().child(self.explorer_panel(cx)))
-                .child(self.preview_player(center_width, preview_height, cx))
+                .child(self.monitor_panel(center_width, preview_height, cx))
                 .into_any_element()
         } else if self.show_inspector {
             let right_width = 300.0f32;
@@ -284,7 +287,7 @@ impl Editor {
             div()
                 .size_full()
                 .flex()
-                .child(self.preview_player(center_width, preview_height, cx))
+                .child(self.monitor_panel(center_width, preview_height, cx))
                 .child(
                     div()
                         .w(px(right_width))
@@ -296,9 +299,264 @@ impl Editor {
             div()
                 .size_full()
                 .flex()
-                .child(self.preview_player(width, preview_height, cx))
+                .child(self.monitor_panel(width, preview_height, cx))
                 .into_any_element()
         }
+    }
+
+    fn monitor_panel(
+        &self,
+        width: f32,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let (title, detail) = match &self.preview.target {
+            PreviewTarget::Timeline { .. } => {
+                let name = self
+                    .timeline
+                    .as_ref()
+                    .and_then(|t| t.path.file_stem())
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Sequence 01".to_string());
+                ("Timeline", name)
+            }
+            PreviewTarget::VideoFile { path, .. }
+            | PreviewTarget::AudioFile { path, .. }
+            | PreviewTarget::ImageFile(path) => {
+                let name = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Source".to_string());
+                ("Source", name)
+            }
+            PreviewTarget::None => ("Preview", "No Media".to_string()),
+            PreviewTarget::Error { .. } => ("Preview", "Error".to_string()),
+        };
+
+        let (current_tc, total_tc) = self.preview_timecode_and_duration(cx);
+        let playing = self.is_preview_playing(cx);
+        let is_empty = matches!(self.preview.target, PreviewTarget::None);
+
+        let header_height = 36.0f32;
+        let control_height = 40.0f32;
+        let screen_height = (height - header_height - control_height).max(60.0);
+
+        div()
+            .w(px(width))
+            .h(px(height))
+            .flex()
+            .flex_col()
+            .bg(rgb(PANEL))
+            // Monitor Header
+            .child(
+                div()
+                    .h(px(header_height))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(PANEL))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(TEXT))
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(MUTED))
+                                    .child(detail),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(MUTED))
+                                    .child("Fit"),
+                            )
+                            .child(
+                                div()
+                                    .id("monitor-fullscreen-toggle")
+                                    .w(px(24.0))
+                                    .h(px(24.0))
+                                    .rounded(px(4.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(SURFACE_HOVER)))
+                                    .on_click(cx.listener(|editor, _, _, cx| {
+                                        editor.preview.fullscreen = !editor.preview.fullscreen;
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        svg()
+                                            .path(IconName::Expand.path())
+                                            .size(px(13.0))
+                                            .text_color(rgb(MUTED)),
+                                    ),
+                            ),
+                    ),
+            )
+            // Screen Viewport
+            .child(
+                div()
+                    .w(px(width))
+                    .h(px(screen_height))
+                    .bg(rgb(0x090a0d))
+                    .overflow_hidden()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(self.preview_player(width, screen_height, cx)),
+            )
+            // Monitor Control Bar
+            .child(
+                div()
+                    .h(px(control_height))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(PANEL))
+                    // Left: Monospace Timecode
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .justify_start()
+                            .child(
+                                div()
+                                    .font_family("monospace")
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(0x818cf8))
+                                    .child(current_tc),
+                            ),
+                    )
+                    // Center: Transport controls (Previous, Play/Pause, Next)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            // Back / Previous frame
+                            .child(
+                                div()
+                                    .id("monitor-prev-frame")
+                                    .w(px(28.0))
+                                    .h(px(26.0))
+                                    .rounded(px(4.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(SURFACE_HOVER)))
+                                    .on_click(cx.listener(|editor, _, _, cx| {
+                                        if let Err(error) = editor.step_playhead(-1) {
+                                            log::debug!("step playhead error: {error:?}");
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        svg()
+                                            .path(IconName::Previous.path())
+                                            .size(px(13.0))
+                                            .text_color(rgb(if is_empty { MUTED } else { TEXT })),
+                                    ),
+                            )
+                            // Play / Pause Toggle
+                            .child(
+                                div()
+                                    .id("monitor-play-toggle")
+                                    .h(px(26.0))
+                                    .px_2()
+                                    .rounded(px(4.0))
+                                    .bg(rgb(SURFACE))
+                                    .border_1()
+                                    .border_color(rgb(BORDER))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(SURFACE_HOVER)).border_color(rgb(ACCENT)))
+                                    .on_click(cx.listener(|editor, _, _, cx| {
+                                        editor.emit_event(
+                                            cx,
+                                            AppEvent::Preview(PreviewEvent::TogglePlayback),
+                                        );
+                                    }))
+                                    .child(
+                                        svg()
+                                            .path(if playing {
+                                                IconName::Pause.path()
+                                            } else {
+                                                IconName::Play.path()
+                                            })
+                                            .size(px(13.0))
+                                            .text_color(rgb(TEXT)),
+                                    ),
+                            )
+                            // Next frame
+                            .child(
+                                div()
+                                    .id("monitor-next-frame")
+                                    .w(px(28.0))
+                                    .h(px(26.0))
+                                    .rounded(px(4.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(SURFACE_HOVER)))
+                                    .on_click(cx.listener(|editor, _, _, cx| {
+                                        if let Err(error) = editor.step_playhead(1) {
+                                            log::debug!("step playhead error: {error:?}");
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        svg()
+                                            .path(IconName::Next.path())
+                                            .size(px(13.0))
+                                            .text_color(rgb(if is_empty { MUTED } else { TEXT })),
+                                    ),
+                            ),
+                    )
+                    // Right: Duration / FPS
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .font_family("monospace")
+                                    .text_size(px(10.5))
+                                    .text_color(rgb(MUTED))
+                                    .child(total_tc),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn color_workspace(
@@ -455,7 +713,7 @@ impl Editor {
                     ),
             )
             // Center: Large Preview Monitor
-            .child(self.preview_player(center_width, preview_height, cx))
+            .child(self.monitor_panel(center_width, preview_height, cx))
             // Right: Color Grading Wheels & Controls
             .child(
                 div()
@@ -599,7 +857,7 @@ impl Editor {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .child(self.preview_player(preview_width, preview_height * 0.65, cx))
+                    .child(self.monitor_panel(preview_width, preview_height * 0.65, cx))
                     .child(
                         div()
                             .flex_1()

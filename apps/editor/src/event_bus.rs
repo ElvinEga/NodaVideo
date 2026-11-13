@@ -1,7 +1,7 @@
-use crate::clip_placement::validate_clip_placement;
+use crate::clip_placement::{DEFAULT_IMAGE_DURATION_SECONDS, validate_clip_placement};
 use crate::dialog_missing_media::missing_media_dialog;
 use crate::edit_action::{EditAction, edit_timeline};
-use crate::editing::validate_clips_placements;
+use crate::editing::{next_track, validate_clips_placements};
 use crate::editor::Editor;
 use crate::explorer_drag::AssetBeingDragged;
 use crate::explorer_file_entry::select_preview_file;
@@ -779,15 +779,15 @@ async fn handle_app_event(
                                 as f64,
                         );
                         let (start_time, snap_guide) = match &editor.active_asset_drag {
-                            AssetBeingDragged::Media(asset)
-                                if matches!(
-                                    asset.metadata.kind(),
-                                    MediaKind::Video | MediaKind::Audio
-                                ) =>
-                            {
+                            AssetBeingDragged::Media(asset) => {
                                 let duration = timeline
                                     .editing_state
-                                    .nearest_time(asset.metadata.duration().unwrap_or(0.0))
+                                    .nearest_time(
+                                        asset
+                                            .metadata
+                                            .duration()
+                                            .unwrap_or(DEFAULT_IMAGE_DURATION_SECONDS),
+                                    )
                                     .max(TimelineFrameIndex::ONE_FRAME);
                                 timeline.snap_clip_start_ignoring(
                                     raw_start,
@@ -795,9 +795,7 @@ async fn handle_app_event(
                                     &HashSet::new(),
                                 )
                             }
-                            AssetBeingDragged::Media(_) | AssetBeingDragged::Srt(_) => {
-                                (raw_start, None)
-                            }
+                            AssetBeingDragged::Srt(_) => (raw_start, None),
                             AssetBeingDragged::None => return (None, None),
                         };
                         let preview = PreviewDropAsset {
@@ -874,12 +872,9 @@ async fn handle_app_event(
                         }
                     }
                     AssetBeingDragged::Media(asset) => {
-                        if !matches!(asset.metadata.kind(), MediaKind::Video | MediaKind::Audio) {
-                            return Ok(());
-                        }
                         editor.place_explorer_asset(
                             asset.absolute_path.clone(),
-                            preview.track_id,
+                            Some(preview.track_id),
                             preview.start_time,
                             asset.metadata,
                             None,
@@ -978,7 +973,7 @@ impl Editor {
     pub(crate) fn place_explorer_asset(
         &mut self,
         media_path: PathBuf,
-        track_id: Ulid,
+        track_id: Option<Ulid>, // None 表示没有同类轨道，连同片段一起原子新建。
         start: TimelineFrameIndex,
         mut asset: Asset,
         source_range: Option<(TimelineFrameIndex, TimelineFrameIndex)>, // None 表示使用素材完整时长。
@@ -989,7 +984,7 @@ impl Editor {
         };
         let full_duration = timeline
             .editing_state
-            .nearest_time(asset.duration().unwrap_or(0.0))
+            .nearest_time(asset.duration().unwrap_or(DEFAULT_IMAGE_DURATION_SECONDS))
             .max(TimelineFrameIndex::ONE_FRAME);
         let (source_in, source_out) = match source_range {
             Some((in_frame, out_frame)) => {
@@ -1002,20 +997,33 @@ impl Editor {
             None => (TimelineFrameIndex::ZERO, full_duration),
         };
         let duration = source_out - source_in;
-        let track_kind = timeline
-            .editing_state
-            .tracks
-            .iter()
-            .find(|track| track.id == track_id)
-            .map(|track| track.kind);
-        validate_clip_placement(
-            &timeline.editing_state,
-            track_id,
-            asset.kind(),
-            duration,
-            start,
-            &HashSet::new(),
-        )?;
+        let (track_id, track_kind, new_track) = match track_id {
+            Some(track_id) => {
+                validate_clip_placement(
+                    &timeline.editing_state,
+                    track_id,
+                    asset.kind(),
+                    duration,
+                    start,
+                    &HashSet::new(),
+                )?;
+                let track_kind = timeline
+                    .editing_state
+                    .tracks
+                    .iter()
+                    .find(|track| track.id == track_id)
+                    .map(|track| track.kind);
+                (track_id, track_kind, None)
+            }
+            None => {
+                let kind = match asset.kind() {
+                    MediaKind::Audio => TrackKind::Audio,
+                    MediaKind::Video | MediaKind::Image => TrackKind::Video,
+                };
+                let track = next_track(&timeline.editing_state.tracks, kind);
+                (track.id, Some(kind), Some(track))
+            }
+        };
 
         let Some(timeline) = self.timeline.as_mut() else {
             return Ok(());
@@ -1063,13 +1071,23 @@ impl Editor {
             _ => bail!("the drop target is not a media track"),
         };
 
-        let should_save = edit_timeline(
-            timeline,
-            EditAction::AddClips {
-                clips: vec![media_clip],
-                assets,
-            },
-        )?;
+        let should_save = match new_track {
+            Some(track) => edit_timeline(
+                timeline,
+                EditAction::AddTrackWithClips {
+                    track,
+                    clips: vec![media_clip],
+                    assets,
+                },
+            )?,
+            None => edit_timeline(
+                timeline,
+                EditAction::AddClips {
+                    clips: vec![media_clip],
+                    assets,
+                },
+            )?,
+        };
 
         self.explorer.selected_file = media_path
             .strip_prefix(&self.project_root)

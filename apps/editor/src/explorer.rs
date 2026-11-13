@@ -71,6 +71,10 @@ pub(crate) struct ExplorerState {
     pub(crate) import_errors: Vec<String>,
     pub(crate) import_queue: VecDeque<(PathBuf, bool)>, // true 表示导入进媒体库，false 仅补齐元数据。
     pub(crate) import_task: Option<Task<()>>,
+    pub(crate) thumbnail_cache: HashMap<PathBuf, PathBuf>, // 源视频绝对路径 → 磁盘缓存 PNG。
+    pub(crate) thumbnail_queue: VecDeque<PathBuf>,
+    pub(crate) thumbnail_task: Option<Task<()>>,
+    pub(crate) thumbnail_failed: HashSet<PathBuf>, // 本次会话内不再重试。
     _file_tree_watch: Task<()>,                  // drop 时停止监听项目目录。
 }
 
@@ -153,6 +157,10 @@ impl ExplorerState {
             import_errors,
             import_queue: VecDeque::new(),
             import_task: None,
+            thumbnail_cache: HashMap::new(),
+            thumbnail_queue: VecDeque::new(),
+            thumbnail_task: None,
+            thumbnail_failed: HashSet::new(),
             _file_tree_watch: watch_file_tree(project_root.to_path_buf(), cx),
         }
     }

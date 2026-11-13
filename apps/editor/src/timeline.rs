@@ -1,4 +1,6 @@
-use crate::clip_placement::{ClipPlacementRejection, validate_clip_placement};
+use crate::clip_placement::{
+    ClipPlacementRejection, DEFAULT_IMAGE_DURATION_SECONDS, validate_clip_placement,
+};
 use crate::editing::validate_clips_placements;
 use crate::explorer_drag::AssetBeingDragged;
 use crate::layout::DEFAULT_TIMELINE_PIXELS_PER_SECOND;
@@ -92,11 +94,13 @@ impl PreviewDropAsset {
         match &self.asset {
             AssetBeingDragged::None => Err(ClipPlacementRejection::NoPlacements.into()),
             AssetBeingDragged::Media(asset) => {
-                if matches!(asset.metadata, timeline::Asset::Image(_)) {
-                    bail!("Image placement is not supported");
-                }
                 let duration = timeline
-                    .nearest_time(asset.metadata.duration().unwrap_or(0.0))
+                    .nearest_time(
+                        asset
+                            .metadata
+                            .duration()
+                            .unwrap_or(DEFAULT_IMAGE_DURATION_SECONDS),
+                    )
                     .max(TimelineFrameIndex::ONE_FRAME);
                 validate_clip_placement(
                     timeline,

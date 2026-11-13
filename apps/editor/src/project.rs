@@ -253,6 +253,7 @@ impl Editor {
                 .collect();
             let _ = save_imported_media(&self.project_root, &assets);
             self.schedule_project_waveforms(cx);
+            self.schedule_media_thumbnails(cx);
         }
 
         // Determine timeline name from file stem
@@ -292,7 +293,7 @@ impl Editor {
 
         self.place_explorer_asset(
             canonical,
-            track_id,
+            Some(track_id),
             TimelineFrameIndex::ZERO,
             asset,
             None,

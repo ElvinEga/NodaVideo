@@ -1,4 +1,5 @@
 use crate::asset::IconName;
+use crate::clip_placement::DEFAULT_IMAGE_DURATION_SECONDS;
 use crate::edit_action::EditAction;
 use crate::editor::Editor;
 use crate::event_bus::AppEvent;
@@ -882,7 +883,12 @@ fn preview_drop_asset(
             let left =
                 TIMELINE_PADDING + timeline.seconds(preview.start_time) as f32 * pixels_per_second;
             let duration = timeline
-                .nearest_time(asset.metadata.duration().unwrap_or(0.0))
+                .nearest_time(
+                    asset
+                        .metadata
+                        .duration()
+                        .unwrap_or(DEFAULT_IMAGE_DURATION_SECONDS),
+                )
                 .max(TimelineFrameIndex::ONE_FRAME);
             let width = (timeline.seconds(duration) as f32 * pixels_per_second).max(1.0);
             Some(clip_placement_preview_view(

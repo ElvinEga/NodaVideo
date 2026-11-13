@@ -56,6 +56,10 @@ impl AudioPlayer {
     pub fn duration(&self) -> Duration {
         self.audio_backend.metadata.duration
     }
+
+    pub fn is_playing(&self) -> bool {
+        matches!(self.playback_state, PlaybackState::Playing)
+    }
 }
 
 pub(crate) enum PlaybackState {

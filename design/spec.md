@@ -1,4 +1,4 @@
-# OpenCut Design Spec
+# NodaVideo Design Spec
 
 - [x] Implemented
 - [ ] Not Implemented
@@ -168,18 +168,27 @@ Mockups: [timeline editing area](pages/17-timeline-editing-area.html),
 
 ### Top bar
 
-- [x] A fixed 64-point top bar shows the app icon to the left of **OpenCut**,
-      followed by the timeline filename (or **No timeline**) and autosave label.
-- [x] **Settings**, **Open Folder**, and **Projects** are always available.
-      **Export** is enabled only when a timeline is open.
-- [ ] Actions match the cyberpunk design: cyan secondary buttons, a neon-yellow
-      primary Export button, cut corners, primary hazard slashes, and the specified
-      label typography. Disabled Export uses the dimmed variant.
+Mockup: [desktop shell](pages/20-top-bar.html).
 
-Review: the icon, actions, button shapes, colors, and disabled state are present;
-label weight and spacing still differ. The two top-bar cases are **Timeline open**
-and **No timeline**. Button interaction variants are defined in the
-[design system](pages/00-design-system.html).
+- [x] A fixed 48-point top bar shows the NodaVideo emblem and wordmark, a divider,
+      the project name, and an indicator dot when a timeline is open.
+- [x] Workspace tabs switch between **Edit**, **Color**, **Audio**, and
+      **AI Studio**. The timeline stays visible across workspaces; Color and Audio
+      are honest placeholders, not simulated tools.
+- [x] **Undo** and **Redo** reflect history availability; the disabled state is
+      dimmed and non-interactive.
+- [x] **Media**, **Inspector**, and **AI** toggle their panels independently.
+      The active panel's toggle uses the accent border and tinted surface.
+- [x] **Projects** is always available. **Export Video** is enabled only when a
+      timeline is open; disabled Export uses the dimmed variant.
+- [x] Controls follow the Noda Obsidian palette: indigo accent primary button,
+      surface-and-border secondary buttons, small corner radii, and compact
+      28-point control heights. No neon colors, cut corners, or hazard slashes.
+
+Review: the two top-bar cases are **Timeline open** and **No timeline**. The
+indicator dot currently tracks whether a timeline is open; a dedicated
+unsaved-edits indicator remains open. Button interaction variants are defined in
+the [design system](pages/00-design-system.html).
 
 ## 8. Preview
 
@@ -240,7 +249,7 @@ Mockups: [transcription window](pages/14-transcription-window.html),
       Clip transcription writes `<source stem>_<clip id>.srt`, with subtitle timestamps
       relative to the beginning of the extracted clip range.
 - [x] Completion shows the output path and **Reveal in Finder**. Failure shows
-      the request error. Start and Cancel use the cyberpunk button variants.
+      the request error. Start and Cancel use the shared Noda button variants.
 - [x] Transcription uses MiniMax. The API key is entered under **Settings** in the
       top bar.
 
@@ -360,7 +369,7 @@ Mockups: [property panel](pages/15-property-panel.html),
 2. when medias are missing when loading a timeline, the program should not exit. The timeline clips should be properly displayed with missing clips indicated.
    - Right click on the missing clips, the user is able to open a missing media dialog like in [./pages/19-missing-media-dialog.tsx].
 
-3. The user can right click on a file, a clip, a timeline and `open terminal`. OpenCut will open the terminal at the location of the file/resource and automatically make the OpenCut cli available in the terminal, with shell auto-completion.
+3. The user can right click on a file, a clip, a timeline and `open terminal`. NodaVideo will open the terminal at the location of the file/resource and automatically make the NodaVideo cli available in the terminal, with shell auto-completion.
    这样会很强大，因为我可以同时获得GUI，CLI，以及Agent的好处。可以让我快速测试agentic editing的ideal workflow是什么
 
 4. 选中多个 clip 一起拖动时，吸附（snap guide）应该以整个选择为单位。不管抓哪个，都用整段的最左边缘和最右边缘去吸附，参考线也显示在整段的对齐边缘上。

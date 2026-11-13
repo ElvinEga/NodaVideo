@@ -135,8 +135,12 @@ impl VideoPlayer {
         })
     }
 
-    pub(crate) fn duration(&self) -> Duration {
+    pub fn duration(&self) -> Duration {
         self.video_backend.metadata.duration
+    }
+
+    pub fn is_playing(&self) -> bool {
+        matches!(self.playback_state, PlaybackState::Playing)
     }
 
     /// Current playback position: the displayed frame's PTS, or the full duration once ended.
