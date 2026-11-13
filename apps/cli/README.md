@@ -1,0 +1,239 @@
+# OpenCut CLI
+
+A headless application that reads the same timeline JSON as the OpenCut editor.
+The CLI probes media with FFmpeg; the editor updates the same timeline model.
+The shared [timeline crate](../../libs/timeline/src/lib.rs) defines the format and serialization
+rules and file I/O, without backend state. CLI-specific services live beneath this
+application module; the shared FFmpeg engine lives in `libs/engine`.
+
+## Build and run
+
+From the Rust directory, `cargo cli` (Windows: `cargo cli-win`) runs with the vendored
+FFmpeg environment:
+
+```sh
+cargo cli --help
+cargo cli probe /path/to/media.mp4 --json
+cargo cli validate scenes/episode.timeline.json --json
+cargo cli probe scenes/episode.timeline.json --json
+```
+
+Timeline and output arguments resolve from the working directory. Relative media
+paths inside a timeline resolve from the directory containing that timeline file,
+including `..` references. Absolute asset paths are unchanged.
+
+Document writes use `<output filename>.tmp` in the output directory, sync it,
+then rename it to the destination. An existing temporary file is rejected.
+New destinations are checked before renaming; do not concurrently write the same
+destination from another process, because ordinary rename is not exclusive.
+
+From the repository root:
+
+```sh
+bash rust/scripts/cargo-cli.sh build -p opencut
+```
+
+The wrapper links the existing `rust/vendor/ffmpeg-8.1.2` libraries. It never builds
+FFmpeg or invokes Python. Timeline export uses GPUI through the shared engine.
+
+## Export timelines (macOS, Windows)
+
+```sh
+cargo cli export /project/episode.timeline.json -o episode.mp4
+cargo cli export /project/timelines/episode.json -o episode.mp4 --project-root /project --bitrate 8000 --json
+```
+
+Exports the complete timeline synchronously to MP4 with H.264 video and stereo
+AAC audio, using the timeline's dimensions, frame rate, and audio sample rate.
+`--project-root` overrides the timeline directory when resolving relative asset
+paths. `--bitrate` is in kbps (1 kbps = 1,000 bits per second) and defaults to 8,000.
+macOS renders with Metal and encodes with VideoToolbox. Windows renders with
+DirectX in a window that is never shown and encodes with the vendored FFmpeg's
+software `libx264`. Existing output files
+require `--overwrite`; source media cannot be replaced. On success, stdout
+reports the output path and frame count.
+
+## Remove timeline gaps
+
+```sh
+opencut timeline remove-gaps input.timeline --output compacted.timeline
+opencut timeline remove-gaps input.timeline --write-inplace --json
+```
+
+Removes leading and internal time ranges with no clips on any track. Video,
+audio, image, and text clips all count, including hidden, muted, and locked tracks.
+Overlapping or adjacent clips keep their relative timing; only clip start positions
+change. Clip IDs, order, durations, source trims, properties, and track settings
+are preserved. Empty timelines succeed with zero removed frames.
+
+Exactly one of `--output` or `--write-inplace` is required. `--output` refuses
+existing files and rebases relative asset paths when the destination directory
+changes; the directory must exist. `--write-inplace` saves atomically after
+validation. Source media is never decoded or modified. The saved playhead and
+horizontal scroll reset to the start. Stdout reports `path`, `before_frames`,
+`after_frames`, and `removed_frames`; `--json` is supported.
+
+## Keep text-covered sections
+
+```sh
+opencut timeline keep-text-sections input.timeline --output edited.timeline
+opencut timeline keep-text-sections input.timeline --write-inplace
+```
+
+Exactly one of `--output` or `--write-inplace` is required. The command keeps the
+union of all text-clip intervals, padded by approximately 25ms on each side
+(rounded to timeline frames and bounded by the timeline), and removes the remaining
+uncovered time across every track. This preserves about 50ms of original audio/video
+between separated speech sections; shorter gaps are kept in full.
+Overlapping or adjacent intervals form one section. Clips crossing removed gaps
+are split and trimmed, then retained sections are joined in order, preserving
+source offsets and synchronization. Subtitle durations are unchanged; no silence
+or black frames are inserted.
+
+Hidden, muted, and locked tracks participate; track settings and clip properties
+are preserved. Timelines without nonempty text sections are rejected. Source
+media is never modified or decoded. `--output` refuses existing destinations and
+rebases relative media paths when the output directory changes; that directory
+must exist. `--write-inplace` replaces the input atomically after validation.
+The saved playhead and horizontal scroll reset to the start. Stdout reports the
+output path and original, retained, and removed frame counts; `--json` is supported.
+
+## Probe media and timelines
+
+`probe <file>` accepts video, audio, image, and timeline files. Media paths must
+be absolute; relative media paths are rejected. Files with a `.json`
+extension (case-insensitive, including `.timeline.json`) are loaded as timelines
+and summarized with duration, settings, clips, tracks, gaps, and asset usage.
+Other files report media streams, codecs, duration, dimensions, and keyframe spacing
+where applicable. Timeline probing does not open referenced media; use `validate`
+to check those files. The separate `inspect` command has been removed.
+
+## Shared timeline contract
+
+See the [complete example](../../libs/timeline/tests/fixtures/shared.timeline.json).
+
+- Root fields are `editing_state` and `view_state`. Editing state contains
+  `settings`, `assets`, `tracks`, and `clips`.
+  There is no CLI-specific `version` field. The `editing_state` object is required;
+  `view_state` is optional. Serde defaults and field aliases remain supported.
+- Settings include width, height, rational `frame_rate`, and `audio_sample_rate`.
+- Assets include ULID, path, media kind, display name, duration, dimensions,
+  frame-rate metadata, codec, and `has_audio`.
+- Tracks use `Video`, `Audio`, or `Text`, with `locked`, `muted`, and `visible`.
+- Clips use `{"kind":"Video"|"Audio"|"Text","data":{...}}`. Media data includes
+  IDs, `timeline_start`, `source_in`, `source_out`, and video/audio properties.
+  Images are video clips referencing an asset whose kind is `Image`.
+- Media source bounds and timeline positions are integer frames at the timeline
+  rate. Text length uses `{ "secs": ..., "nanos": ... }`. Ranges are end-exclusive.
+- Video position is a **pixel offset from the centered placement** in project
+  dimensions. Scale 1 fits the source inside the frame. Text positions specify a
+  normalized center, clamped to the canvas; text color is big-endian ARGB.
+- Earlier tracks appear above later tracks, including both video and text.
+  Put text tracks above video tracks when subtitles should appear on top.
+- Visibility controls visual output; hiding a video track does not mute its audio.
+  Track and clip muting control audio. Locking affects editing, not export.
+- View state survives serialization. Timeline editing commands preserve vertical
+  scroll, zoom, and snapping preferences, and reset the playhead and horizontal
+  scroll to the start.
+
+Create timelines in the editor or author JSON using the schema. Input timelines are read without rewriting them. Subtitle import is not yet available in the CLI; existing GUI import/edit
+operations remain available.
+
+**Legacy timelines and the `edit` command are unsupported.** Root-level editing
+fields and integer subtitle lengths are not migrated. Load first deserializes the
+current document structure with Serde, then validates the timeline's data. Structural
+errors use Serde's diagnostics; semantic errors describe the invalid data.
+CLI-only effects, opacity, background color, and transitions are not part of this format.
+
+## Transcription
+
+`transcribe` uploads audio to the [MiniMax speech-to-text API](https://platform.minimax.cn/docs/api-reference/speech-to-text).
+Set `MINIMAX_API_KEY` in the environment before running it:
+
+```sh
+cargo cli transcribe recording.mp4 --json
+cargo cli transcribe recording.wav --format srt -o subtitles.srt
+cargo cli transcribe recording.mp4 --format verbose_json --language zh
+```
+
+Local audio and video inputs are decoded with the vendored FFmpeg libraries. The
+best audio stream is normalized to mono 16 kHz PCM WAV in memory before upload.
+Source-relative timing is preserved, including silence before speech and timestamp
+gaps. The CLI accepts at most 500 seconds in every output format, including SRT;
+overlong audio is rejected, never truncated or split. When metadata does not
+provide a duration, the decoded WAV determines whether the audio fits. The
+normalized WAV is at most about 16 MB. Video-only files are rejected.
+Input and output paths resolve from the working directory.
+
+`--format` accepts `json`, `verbose_json` (default), `srt`, or `vtt`.
+With `--format srt`, add `--post-merge` to merge consecutive cues whose gap is
+less than 100 ms before printing or saving. This groups character/word cues. Text is concatenated and cues are renumbered.
+Verbose JSON includes speaker labels, timestamps, and the provider trace ID.
+All requests use word-level timestamps (ignored by MiniMax for plain `json`). Optional `--language` supplies a BCP-47 hint such as `zh`, `yue`,
+or `en`; omitting it enables mixed-language recognition. Requests use `asr-1.0`
+with `stream=false`; streaming and automatic subtitle insertion are not included.
+SRT output can be imported using the editor's existing SRT support.
+
+Without `-o`, the result goes to stdout. Global `--json` prints a JSON object for
+JSON formats and a JSON string for subtitle formats. With `-o`, the selected
+format is written atomically and stdout reports its path and format. Existing
+files require `--overwrite`, and the input cannot be used as the output.
+
+HTTP uses async reqwest on Tokio, with a 30-second connection timeout and a
+10-minute request timeout. There are no automatic retries. FFmpeg decoding runs
+synchronously on the calling runtime thread; the atomic file writer uses Tokio's
+blocking pool. Runtime failures, including missing credentials, unusable media,
+HTTP failures, and output-file errors, use exit code 1. Clap argument errors use
+exit code 2; stdout serialization or writing failures use exit code 6. Provider
+HTTP errors include the status and request ID when available; keys are not
+included in diagnostics.
+
+The shared [transcribe crate](../../libs/transcribe/src/lib.rs) provides
+`transcribe::transcribe(path, api_key, &options).await` without GUI dependencies;
+Clap derives are enabled by its optional `cli` feature. This parsed-SRT API splits
+long audio into sections of at most 500 seconds and combines their timestamps.
+The editor uses the equivalent `transcribe_wav` API. The CLI uses
+`transcribe_response`, which returns raw JSON or subtitle text and enforces the
+500-second total limit. Its local module re-exports that API and the option types.
+
+```rust,no_run
+use transcribe::{self, Format, Options};
+use std::path::Path;
+
+use anyhow::Result;
+
+async fn example(api_key: &str) -> Result<()> {
+    let result = transcribe::transcribe(Path::new("recording.mp4"), api_key, &Options {
+        format: Format::Srt,
+        language: Some("zh".into()),
+    }).await?;
+    // The result is a parsed SRT; Display serializes it to subtitle text.
+    println!("{result}");
+    Ok(())
+}
+```
+
+The library accepts credentials explicitly and requires a Tokio runtime. It does
+not read environment variables. Automated tests use local mock HTTP responses;
+they require no API key and do not make paid MiniMax requests.
+
+## Output and errors
+
+The `still` command and the GPUI `render` demo have been removed. Use `export`
+to export timelines; still preview generation is currently unavailable.
+
+All commands accept `--json`. Results go to stdout and diagnostics go to stderr.
+Runtime failures use anyhow and exit code 1; Clap usage errors use exit code 2.
+Failures serializing or writing a successful result to stdout use exit code 6.
+JSON failures have the shape `{"error":{"message":"..."}}`. Diagnostic labels,
+paths, and source locations are included in the message. `validate` uses the shared timeline validator and stops at the first document
+or media probe error. Media probe errors include the asset path.
+
+## Verification
+
+```sh
+# Shared format alone, without either media backend:
+cargo test --manifest-path rust/Cargo.toml -p timeline --features timeline-schema
+# CLI and FFmpeg integration:
+bash rust/scripts/cargo-cli.sh test -p opencut -p timeline
+```

@@ -1,0 +1,35 @@
+[package]
+name = "editor"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+editor-tests = ["gpui/test-support"]
+
+[dependencies]
+engine.workspace = true
+timeline.workspace = true
+transcribe.workspace = true
+player-ui.workspace = true
+waveform.workspace = true
+platform-fs.workspace = true
+anyhow.workspace = true
+env_logger.workspace = true
+futures.workspace = true
+gpui_platform.workspace = true
+gpui_tokio.workspace = true
+image.workspace = true
+log.workspace = true
+notify.workspace = true
+resvg.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+ulid.workspace = true
+unicode-segmentation.workspace = true
+gpui = { workspace = true, features = ["inspector"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSImage"] }
+objc2-foundation = { workspace = true, features = ["NSData"] }

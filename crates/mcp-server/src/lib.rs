@@ -1,8 +1,11 @@
 //! Model Context Protocol (MCP) tool exposure for NodaVideo editor commands.
 //!
 //! Exposes typed tools that external AI agent CLIs can discover and invoke.
-//! All mutations are routed through [`nodavideo_command_system::EditorCommand`]
-//! to ensure unified undo/redo history and user approval enforcement.
+//!
+//! Phase 1: Tool schemas are fully defined. The executor is a stub that
+//! validates tool names and approval requirements. Full mutation support
+//! will be added in Phase 2 when the MCP server is rewired to OpenCut's
+//! `EditingState` mutation API.
 
 pub mod error;
 pub mod executor;
@@ -15,9 +18,6 @@ pub use schema::McpToolDefinition;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodavideo_command_system::CommandHistory;
-    use nodavideo_project::{AssetId, ProjectDocument};
-    use nodavideo_timeline::Sequence;
 
     #[test]
     fn test_all_tools_schema_definition() {
@@ -42,497 +42,35 @@ mod tests {
     }
 
     #[test]
-    fn test_mcp_query_tools() {
-        let project = ProjectDocument::default();
-        let mut sequence = Sequence::default_1080p24();
-        let mut history = CommandHistory::new(50);
-
+    fn test_executor_stub_returns_placeholder() {
         let res = McpExecutor::execute(
             "get_timeline",
             &serde_json::json!({}),
-            &project,
-            &mut sequence,
-            &mut history,
-            true,
+            false,
         )
         .unwrap();
 
-        assert_eq!(res["name"], "Main Sequence");
-        assert_eq!(res["tracks"].as_array().unwrap().len(), 4);
+        assert_eq!(res["status"], "not_yet_implemented");
+        assert_eq!(res["tool"], "get_timeline");
     }
 
     #[test]
-    fn test_mcp_add_and_split_clip_through_history() {
-        let project = ProjectDocument::default();
-        let mut sequence = Sequence::default_1080p24();
-        let mut history = CommandHistory::new(50);
-
-        let v1_id = sequence.tracks[1].id;
-        let asset_id = AssetId::new();
-
-        // 1. Add clip
-        let add_res = McpExecutor::execute(
-            "add_clip",
-            &serde_json::json!({
-                "track_id": v1_id.to_string(),
-                "asset_id": asset_id.to_string(),
-                "name": "Clip A",
-                "start_frame": 0,
-                "source_in": 0,
-                "source_out": 48
-            }),
-            &project,
-            &mut sequence,
-            &mut history,
-            true,
-        )
-        .unwrap();
-
-        let clip_id = add_res["clip_id"].as_str().unwrap().to_string();
-        assert_eq!(sequence.tracks[1].clips.len(), 1);
-        assert_eq!(sequence.duration_frames(), 48);
-        assert!(history.can_undo());
-
-        // 2. Attempt split without approval -> should fail
-        let split_err = McpExecutor::execute(
+    fn test_executor_stub_enforces_approval() {
+        let err = McpExecutor::execute(
             "split_clip",
-            &serde_json::json!({
-                "clip_id": clip_id,
-                "split_frame": 24
-            }),
-            &project,
-            &mut sequence,
-            &mut history,
+            &serde_json::json!({"clip_id": "test", "split_frame": 10}),
             false,
         );
-        assert!(matches!(split_err, Err(McpError::ApprovalRequired { .. })));
-
-        // 3. Split with approval -> should succeed
-        let split_res = McpExecutor::execute(
-            "split_clip",
-            &serde_json::json!({
-                "clip_id": clip_id,
-                "split_frame": 24
-            }),
-            &project,
-            &mut sequence,
-            &mut history,
-            true,
-        )
-        .unwrap();
-
-        assert_eq!(split_res["status"], "success");
-        assert_eq!(sequence.tracks[1].clips.len(), 2);
-
-        // 4. Test Undo through history
-        history.undo(&mut sequence).unwrap();
-        assert_eq!(sequence.tracks[1].clips.len(), 1);
-
-        history.undo(&mut sequence).unwrap();
-        assert_eq!(sequence.tracks[1].clips.len(), 0);
+        assert!(matches!(err, Err(McpError::ApprovalRequired { .. })));
     }
 
     #[test]
-    fn test_preview_and_propose_changeset() {
-        let project = ProjectDocument::default();
-        let mut sequence = Sequence::default_1080p24();
-        let mut history = CommandHistory::new(50);
-
-        let v1_id = sequence.tracks[1].id;
-        let asset_id = AssetId::new();
-
-        let changeset_payload = serde_json::json!({
-            "title": "Smart Cut Proposal",
-            "description": "Add 2 clips in sequence",
-            "skill_id": "smart-cuts",
-            "commands": [
-                {
-                    "tool": "add_clip",
-                    "track_id": v1_id.to_string(),
-                    "asset_id": asset_id.to_string(),
-                    "name": "Clip Part 1",
-                    "start_frame": 0,
-                    "source_in": 0,
-                    "source_out": 24
-                },
-                {
-                    "tool": "add_clip",
-                    "track_id": v1_id.to_string(),
-                    "asset_id": asset_id.to_string(),
-                    "name": "Clip Part 2",
-                    "start_frame": 24,
-                    "source_in": 30,
-                    "source_out": 60
-                }
-            ]
-        });
-
-        // 1. Preview changeset does not require approval and does not mutate sequence
-        let prev_res = McpExecutor::execute(
-            "preview_changeset",
-            &changeset_payload,
-            &project,
-            &mut sequence,
-            &mut history,
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(prev_res["status"], "preview");
-        assert_eq!(prev_res["diff"]["staged_clip_count"], 2);
-        assert_eq!(prev_res["diff"]["staged_duration_frames"], 54);
-        assert_eq!(sequence.tracks[1].clips.len(), 0);
-
-        // 2. Propose changeset without approval -> requires approval
-        let prop_err = McpExecutor::execute(
-            "propose_changeset",
-            &changeset_payload,
-            &project,
-            &mut sequence,
-            &mut history,
-            false,
-        );
-        assert!(matches!(prop_err, Err(McpError::ApprovalRequired { .. })));
-
-        // 3. Propose changeset with approval -> commits atomically
-        let prop_res = McpExecutor::execute(
-            "propose_changeset",
-            &changeset_payload,
-            &project,
-            &mut sequence,
-            &mut history,
-            true,
-        )
-        .unwrap();
-
-        assert_eq!(prop_res["status"], "committed");
-        assert_eq!(sequence.tracks[1].clips.len(), 2);
-        assert_eq!(sequence.duration_frames(), 54);
-
-        // 4. Undo reverts the entire staged batch in one step!
-        assert!(history.can_undo());
-        let undone = history.undo(&mut sequence).unwrap();
-        assert_eq!(undone, Some("Smart Cut Proposal".to_string()));
-        assert_eq!(sequence.tracks[1].clips.len(), 0);
-        assert_eq!(sequence.duration_frames(), 0);
-    }
-
-    #[test]
-    fn test_list_and_add_composition_tools() {
-        let project = ProjectDocument::default();
-        let mut sequence = Sequence::default_1080p24();
-        let mut history = CommandHistory::new(50);
-        let v2_id = sequence.tracks[0].id; // V2 track for overlays
-
-        // 1. List composition templates
-        let list_res = McpExecutor::execute(
-            "list_composition_templates",
+    fn test_executor_stub_unknown_tool() {
+        let err = McpExecutor::execute(
+            "nonexistent_tool",
             &serde_json::json!({}),
-            &project,
-            &mut sequence,
-            &mut history,
-            false,
-        )
-        .unwrap();
-
-        let templates = list_res["templates"].as_array().unwrap();
-        assert_eq!(templates.len(), 4);
-        assert!(templates.iter().any(|t| t["id"] == "lower-third-modern"));
-
-        // 2. Add composition clip
-        let add_res = McpExecutor::execute(
-            "add_composition",
-            &serde_json::json!({
-                "template_id": "lower-third-modern",
-                "track_id": v2_id.to_string(),
-                "start_frame": 10,
-                "name": "Guest Interview Lower Third",
-                "parameters": {
-                    "title": "Dr. Sarah Connor",
-                    "subtitle": "Lead AI Researcher",
-                    "accent_color": "#8b5cf6"
-                }
-            }),
-            &project,
-            &mut sequence,
-            &mut history,
             true,
-        )
-        .unwrap();
-
-        assert_eq!(add_res["status"], "success");
-        assert_eq!(add_res["duration_frames"], 96);
-        assert_eq!(sequence.tracks[0].clips.len(), 1);
-        assert_eq!(sequence.duration_frames(), 106);
-
-        // 3. Undo removes the composition clip
-        assert!(history.can_undo());
-        let undone = history.undo(&mut sequence).unwrap();
-        assert_eq!(
-            undone,
-            Some("Add Composition 'Guest Interview Lower Third'".to_string())
         );
-        assert_eq!(sequence.tracks[0].clips.len(), 0);
-        assert_eq!(sequence.duration_frames(), 0);
-    }
-
-    #[test]
-    fn test_set_clip_transform_tool() {
-        let project = ProjectDocument::new("Test Project");
-        let mut sequence = Sequence::default_1080p24();
-        let mut history = CommandHistory::new(10);
-        let v1_id = sequence.tracks[1].id;
-        let asset_id = AssetId::new();
-
-        // Add a clip first
-        let add_res = McpExecutor::execute(
-            "add_clip",
-            &serde_json::json!({
-                "track_id": v1_id.to_string(),
-                "asset_id": asset_id.to_string(),
-                "start_frame": 0,
-                "source_in": 0,
-                "source_out": 72,
-                "name": "Interview Shot"
-            }),
-            &project,
-            &mut sequence,
-            &mut history,
-            true,
-        )
-        .unwrap();
-
-        let clip_id = add_res["clip_id"].as_str().unwrap();
-
-        // Update transform via MCP tool
-        let transform_res = McpExecutor::execute(
-            "set_clip_transform",
-            &serde_json::json!({
-                "clip_id": clip_id,
-                "position_x": 100.0,
-                "position_y": -50.0,
-                "scale_x": 1.2,
-                "scale_y": 1.2,
-                "rotation": 15.0,
-                "opacity": 0.9
-            }),
-            &project,
-            &mut sequence,
-            &mut history,
-            true,
-        )
-        .unwrap();
-
-        assert_eq!(transform_res["status"], "success");
-        assert_eq!(transform_res["transform"]["position_x"], 100.0);
-        assert_eq!(transform_res["transform"]["position_y"], -50.0);
-        assert_eq!(transform_res["transform"]["scale_x"], 1.2);
-        assert_eq!(transform_res["transform"]["scale_y"], 1.2);
-        assert_eq!(transform_res["transform"]["rotation"], 15.0);
-        assert_eq!(transform_res["transform"]["opacity"], 0.9);
-
-        // Verify sequence clip state updated
-        let clip = sequence.tracks[1].clips.first().unwrap();
-        assert_eq!(clip.transform.position_x, 100.0);
-        assert_eq!(clip.transform.position_y, -50.0);
-        assert_eq!(clip.transform.opacity, 0.9);
-
-        // Undo restores identity transform
-        assert!(history.can_undo());
-        history.undo(&mut sequence).unwrap();
-        let clip_restored = sequence.tracks[1].clips.first().unwrap();
-        assert!(clip_restored.transform.is_identity());
-    }
-
-    #[test]
-    fn test_add_transition_tool() {
-        let project = ProjectDocument::new("Test Project");
-        let mut sequence = Sequence::default_1080p24();
-        let mut history = CommandHistory::new(10);
-        let v1_id = sequence.tracks[1].id;
-        let asset_id = AssetId::new();
-
-        // Add 2 adjacent clips: [0..48) and [48..96)
-        let c1 = McpExecutor::execute(
-            "add_clip",
-            &serde_json::json!({
-                "track_id": v1_id.to_string(),
-                "asset_id": asset_id.to_string(),
-                "start_frame": 0,
-                "source_in": 0,
-                "source_out": 48,
-                "name": "Scene 1"
-            }),
-            &project,
-            &mut sequence,
-            &mut history,
-            true,
-        )
-        .unwrap();
-
-        let c2 = McpExecutor::execute(
-            "add_clip",
-            &serde_json::json!({
-                "track_id": v1_id.to_string(),
-                "asset_id": asset_id.to_string(),
-                "start_frame": 48,
-                "source_in": 0,
-                "source_out": 48,
-                "name": "Scene 2"
-            }),
-            &project,
-            &mut sequence,
-            &mut history,
-            true,
-        )
-        .unwrap();
-
-        let c1_id = c1["clip_id"].as_str().unwrap();
-        let c2_id = c2["clip_id"].as_str().unwrap();
-
-        // Add a Crossfade transition
-        let trans_res = McpExecutor::execute(
-            "add_transition",
-            &serde_json::json!({
-                "track_id": v1_id.to_string(),
-                "from_clip_id": c1_id,
-                "to_clip_id": c2_id,
-                "transition_type": "crossfade",
-                "alignment": "centered",
-                "duration_frames": 24
-            }),
-            &project,
-            &mut sequence,
-            &mut history,
-            true,
-        )
-        .unwrap();
-
-        assert_eq!(trans_res["status"], "success");
-        assert_eq!(trans_res["cut_frame"], 48);
-        assert_eq!(trans_res["duration_frames"], 24);
-        assert_eq!(sequence.tracks[1].transitions.len(), 1);
-
-        // Undo removes the transition
-        assert!(history.can_undo());
-        let undone = history.undo(&mut sequence).unwrap();
-        assert_eq!(undone, Some("Add Crossfade Transition".to_string()));
-        assert_eq!(sequence.tracks[1].transitions.len(), 0);
-    }
-
-    #[test]
-    fn test_add_text_overlay_and_generate_captions_tools() {
-        let project = ProjectDocument::new("Test Project");
-        let mut sequence = Sequence::default_1080p24();
-        let mut history = CommandHistory::new(10);
-        let v0_id = sequence.tracks[0].id;
-
-        // 1. Add Text Overlay
-        let overlay_res = McpExecutor::execute(
-            "add_text_overlay",
-            &serde_json::json!({
-                "track_id": v0_id.to_string(),
-                "text": "Welcome to NodaVideo",
-                "start_frame": 12,
-                "duration_frames": 48,
-                "font_family": "Inter",
-                "font_size": 48,
-                "color": "#ffffff",
-                "alignment": "bottom"
-            }),
-            &project,
-            &mut sequence,
-            &mut history,
-            true,
-        )
-        .expect("add_text_overlay should succeed");
-
-        assert_eq!(overlay_res["status"], "success");
-        assert_eq!(overlay_res["text"], "Welcome to NodaVideo");
-        assert_eq!(sequence.tracks[0].clips.len(), 1);
-
-        let clip = &sequence.tracks[0].clips[0];
-        assert_eq!(clip.start_frame, 12);
-        assert_eq!(clip.duration_frames(), 48);
-        let overlay = clip
-            .text_overlay
-            .as_ref()
-            .expect("text overlay should exist");
-        assert_eq!(overlay.text, "Welcome to NodaVideo");
-
-        // Undo & redo text overlay
-        assert!(history.can_undo());
-        let undone = history.undo(&mut sequence).unwrap();
-        assert_eq!(
-            undone,
-            Some("Add Text Overlay 'Text: Welcome to NodaVideo'".to_string())
-        );
-        assert_eq!(sequence.tracks[0].clips.len(), 0);
-
-        let redone = history.redo(&mut sequence).unwrap();
-        assert_eq!(
-            redone,
-            Some("Add Text Overlay 'Text: Welcome to NodaVideo'".to_string())
-        );
-        assert_eq!(sequence.tracks[0].clips.len(), 1);
-
-        // 2. Generate Subtitle Captions
-        let captions_res = McpExecutor::execute(
-            "generate_captions",
-            &serde_json::json!({
-                "track_id": v0_id.to_string(),
-                "captions": [
-                    { "text": "First caption line", "start_frame": 100, "end_frame": 150 },
-                    { "text": "Second caption line", "start_frame": 160, "end_frame": 220 }
-                ],
-                "font_size": 36,
-                "color": "#ffff00"
-            }),
-            &project,
-            &mut sequence,
-            &mut history,
-            true,
-        )
-        .expect("generate_captions should succeed");
-
-        assert_eq!(captions_res["status"], "success");
-        assert_eq!(captions_res["captions_generated"], 2);
-        assert_eq!(sequence.tracks[0].clips.len(), 3);
-
-        // Undo removes both captions atomically
-        let undone_captions = history.undo(&mut sequence).unwrap();
-        assert_eq!(undone_captions, Some("Generate 2 Captions".to_string()));
-        assert_eq!(sequence.tracks[0].clips.len(), 1);
-
-        // Redo restores both captions
-        let redone_captions = history.redo(&mut sequence).unwrap();
-        assert_eq!(redone_captions, Some("Generate 2 Captions".to_string()));
-        assert_eq!(sequence.tracks[0].clips.len(), 3);
-
-        // 3. Propose Changeset with text overlay and captions
-        let changeset_res = McpExecutor::execute(
-            "propose_changeset",
-            &serde_json::json!({
-                "title": "Add Lower Third and Auto-Captions",
-                "description": "Auto-generated subtitle track",
-                "commands": [
-                    {
-                        "tool": "add_text_overlay",
-                        "track_id": v0_id.to_string(),
-                        "text": "Chapter 2: Conclusion",
-                        "start_frame": 250,
-                        "duration_frames": 50
-                    }
-                ]
-            }),
-            &project,
-            &mut sequence,
-            &mut history,
-            true,
-        )
-        .expect("propose_changeset with add_text_overlay should succeed");
-
-        assert_eq!(changeset_res["status"], "committed");
-        assert_eq!(sequence.tracks[0].clips.len(), 4);
+        assert!(matches!(err, Err(McpError::ToolNotFound(_))));
     }
 }

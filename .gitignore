@@ -15,8 +15,38 @@ Thumbs.db
 
 # Logs and environment
 *.log
-.env
+*.env
 .env.*.local
 
 # Agent / local work directories
 .workbuddy-ai/
+
+# Original OpenCut source (copied into project, not tracked)
+/opencut/
+
+# Media files (not tracked in git)
+*.aac
+*.m4a
+*.mp3
+*.mp4
+*.jpeg
+*.dylib
+*.dll
+*.otf
+
+# Vendored FFmpeg (must be obtained separately)
+vendor/ffmpeg*
+
+# Vendored Zed GPUI (set up via: git submodule add https://github.com/zed-industries/zed.git vendor/zed)
+vendor/zed/
+
+# Design pages (generated)
+/design/pages/
+
+# Test data
+.testdata/
+libs/media-backend/.testdata/
+
+# Delta / dist
+.delta/
+/dist/

@@ -1,0 +1,3 @@
+[submodule "rust/vendor/zed"]
+	path = rust/vendor/zed
+	url = https://github.com/zed-industries/zed.git

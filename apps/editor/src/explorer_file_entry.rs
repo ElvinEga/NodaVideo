@@ -1,0 +1,537 @@
+use crate::context_menu::ContextMenu;
+use crate::editor::Editor;
+use crate::event_bus::AppEvent;
+use crate::explorer::explorer_file_badge;
+use crate::explorer_drag::{AssetBeingDragged, ExplorerDragView};
+use crate::preview::PreviewTarget;
+use crate::preview_events::PreviewEvent;
+use crate::theme::{ACCENT, MUTED, PANEL, SURFACE_HOVER, TEXT};
+use anyhow::{Result, anyhow};
+use engine::media_asset::{is_audio_path, is_image_path, is_video_path};
+use gpui::prelude::*;
+use gpui::{AsyncApp, CursorStyle, Entity, MouseButton, MouseDownEvent, div, px, rgb};
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+impl Editor {
+    pub(crate) fn explorer_file_entry(
+        &self,
+        index: usize,
+        entry: &FileTreeEntry,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        // eprintln!(
+        //     "path\n{}\n{}",
+        //     entry.absolute_path.display(),
+        //     self.project_root.display()
+        // );
+        let path = entry
+            .absolute_path
+            .strip_prefix(&self.project_root)
+            .expect("file-tree entries are inside the project root")
+            .to_path_buf();
+
+        let selected = self.explorer.selected_file.as_ref() == Some(&path);
+        let context_menu_target =
+            matches!(&self.context_menu, ContextMenu::File(menu) if menu.relative_path == path);
+        let active_timeline = matches!(entry.kind, FileTreeEntryKind::Timeline)
+            && self
+                .timeline
+                .as_ref()
+                .is_some_and(|timeline| timeline.path == entry.absolute_path);
+
+        let metadata = file_entry_metadata(entry, active_timeline);
+        let draggable = match entry.kind {
+            FileTreeEntryKind::Video
+            | FileTreeEntryKind::Image
+            | FileTreeEntryKind::Audio
+            | FileTreeEntryKind::Srt => true,
+            FileTreeEntryKind::Directory { .. }
+            | FileTreeEntryKind::Timeline
+            | FileTreeEntryKind::Other => false,
+        };
+
+        let event_bus = self.event_bus.clone();
+        let drag_editor = cx.entity().downgrade();
+        div()
+            .id(("project-file", index))
+            .relative()
+            .h(px(38.0))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .pr_2()
+            .pl(px(10.0 + (entry.depth + 1) as f32 * 16.0))
+            .bg(rgb(if context_menu_target {
+                SURFACE_HOVER
+            } else if active_timeline {
+                0x211a0f
+            } else if selected {
+                0x1e1b13
+            } else {
+                PANEL
+            }))
+            .cursor(if draggable {
+                CursorStyle::OpenHand
+            } else {
+                CursorStyle::Arrow
+            })
+            .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+            .when(draggable, |this| {
+                this.on_drag(entry.clone(), move |entry, _, _, app_cx| {
+                    let asset = match AssetBeingDragged::from_file_entry(entry) {
+                        Ok(asset) => asset,
+                        Err(error) => {
+                            log::error!(
+                                "could not drag {}: {error:?}",
+                                entry.absolute_path.display()
+                            );
+                            return app_cx.new(|_| ExplorerDragView {
+                                asset: AssetBeingDragged::None,
+                                editor: drag_editor.clone(),
+                            });
+                        }
+                    };
+                    event_bus.update(app_cx, |_, cx| {
+                        cx.emit(AppEvent::DragStarted(asset.clone()));
+                    });
+                    app_cx.new(|_| ExplorerDragView {
+                        asset,
+                        editor: drag_editor.clone(),
+                    })
+                })
+            })
+            .on_click(cx.listener({
+                let entry = entry.clone();
+                let path = path.clone();
+                move |editor, _, _, cx| {
+                    match entry.kind {
+                        FileTreeEntryKind::Directory { .. } => {
+                            let project_root = editor.project_root.clone();
+                            if let Err(error) = editor
+                                .explorer
+                                .toggle_directory(&project_root, path.clone())
+                                .and_then(|_| editor.save_explorer_expansion())
+                            {
+                                eprintln!("{error}");
+                            }
+                        }
+                        FileTreeEntryKind::Timeline => {
+                            editor.emit_event(cx, AppEvent::OpenTimeline { path: path.clone() });
+                            editor.emit_event(cx, AppEvent::RefreshPropertyPanel);
+                        }
+                        FileTreeEntryKind::Video => {
+                            editor.emit_event(
+                                cx,
+                                AppEvent::Preview(PreviewEvent::SelectFile(path.clone())),
+                            );
+                            editor.emit_event(
+                                cx,
+                                AppEvent::VideoFileSelected {
+                                    path: path.clone(),
+                                    size_bytes: entry.size_bytes,
+                                },
+                            );
+                        }
+                        FileTreeEntryKind::Srt => {
+                            editor.emit_event(
+                                cx,
+                                AppEvent::Preview(PreviewEvent::SelectFile(path.clone())),
+                            );
+                            editor.emit_event(cx, AppEvent::SrtFileSelected { path: path.clone() });
+                        }
+                        FileTreeEntryKind::Image
+                        | FileTreeEntryKind::Audio
+                        | FileTreeEntryKind::Other => {
+                            editor.emit_event(
+                                cx,
+                                AppEvent::Preview(PreviewEvent::SelectFile(path.clone())),
+                            );
+                            editor.emit_event(cx, AppEvent::RefreshPropertyPanel);
+                        }
+                    }
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener({
+                    let entry = entry.clone();
+                    let path = path.clone();
+                    move |editor, event: &MouseDownEvent, _, cx| {
+                        editor.show_file_context_menu(
+                            path.clone(),
+                            matches!(entry.kind, FileTreeEntryKind::Directory { .. }),
+                            event,
+                            cx,
+                        );
+                    }
+                }),
+            )
+            .when(selected, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(2.0))
+                        .bg(rgb(ACCENT)),
+                )
+            })
+            .child(
+                div()
+                    .w(px(
+                        if matches!(entry.kind, FileTreeEntryKind::Directory { .. }) {
+                            14.0
+                        } else {
+                            38.0
+                        },
+                    ))
+                    .h(px(20.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when_some(
+                        match entry.kind {
+                            FileTreeEntryKind::Directory { expanded } => Some(expanded),
+                            _ => None,
+                        },
+                        |this, expanded| {
+                            this.text_color(rgb(MUTED)).child(if expanded {
+                                "▾"
+                            } else {
+                                "▸"
+                            })
+                        },
+                    )
+                    .when(
+                        !matches!(entry.kind, FileTreeEntryKind::Directory { .. }),
+                        |this| this.child(explorer_file_badge(entry)),
+                    ),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .text_sm()
+                    .font_family("monospace")
+                    .when(active_timeline, |this| {
+                        this.font_weight(gpui::FontWeight::SEMIBOLD)
+                    })
+                    .text_ellipsis()
+                    .text_color(rgb(if entry.kind != FileTreeEntryKind::Other {
+                        TEXT
+                    } else {
+                        MUTED
+                    }))
+                    .child(entry.name.clone()),
+            )
+            .when_some(metadata, |this, metadata| {
+                this.child(
+                    div()
+                        .flex_shrink_0()
+                        .font_family("monospace")
+                        .text_xs()
+                        .text_ellipsis()
+                        .when(active_timeline, |this| {
+                            this.h(px(20.0))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(rgb(0x8a652d))
+                                .bg(rgb(0x2a241b))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(ACCENT))
+                        })
+                        .when(!active_timeline, |this| {
+                            this.max_w(px(58.0)).text_color(rgb(0x55555e))
+                        })
+                        .child(metadata),
+                )
+            })
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct FileTreeEntry {
+    pub(crate) absolute_path: PathBuf,
+    name: String,
+    depth: usize,
+    pub(crate) kind: FileTreeEntryKind,
+    pub(crate) size_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FileTreeEntryKind {
+    Directory { expanded: bool },
+    Video,
+    Image,
+    Audio,
+    Srt,
+    Timeline,
+    Other,
+}
+
+pub(crate) fn visible_tree(
+    project_root: &Path,
+    expanded_directories: &HashSet<PathBuf>,
+) -> Result<Vec<FileTreeEntry>> {
+    let mut entries = Vec::new();
+    read_directory(
+        project_root,
+        Path::new(""),
+        0,
+        expanded_directories,
+        &mut entries,
+    )?;
+    Ok(entries)
+}
+
+/// Searches the complete project tree, independently of which folders are expanded.
+/// Matching ancestor directories are included so results retain their hierarchy.
+pub(crate) fn search_tree(project_root: &Path, query: &str) -> Result<Vec<FileTreeEntry>> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    search_directory(project_root, Path::new(""), 0, &query, true)
+}
+
+fn search_directory(
+    project_root: &Path,
+    relative_directory: &Path,
+    depth: usize,
+    query: &str,
+    is_root: bool,
+) -> Result<Vec<FileTreeEntry>> {
+    let directory = project_root.join(relative_directory);
+    let children = match directory_children(&directory) {
+        Ok(children) => children,
+        Err(error) if !is_root => {
+            eprintln!("{error}");
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(error),
+    };
+    let mut matches = Vec::new();
+
+    for (name, is_directory, size_bytes) in children {
+        let relative_path = relative_directory.join(&name);
+        if is_directory {
+            let descendants =
+                search_directory(project_root, &relative_path, depth + 1, query, false)?;
+            let directory_matches = relative_path
+                .to_string_lossy()
+                .to_lowercase()
+                .contains(query);
+            if directory_matches || !descendants.is_empty() {
+                matches.push(file_tree_entry(
+                    project_root,
+                    relative_path,
+                    name,
+                    depth,
+                    true,
+                    None,
+                    !descendants.is_empty(),
+                ));
+                matches.extend(descendants);
+            }
+        } else if relative_path
+            .to_string_lossy()
+            .to_lowercase()
+            .contains(query)
+        {
+            matches.push(file_tree_entry(
+                project_root,
+                relative_path,
+                name,
+                depth,
+                false,
+                size_bytes,
+                false,
+            ));
+        }
+    }
+
+    Ok(matches)
+}
+
+fn read_directory(
+    project_root: &Path,
+    relative_directory: &Path,
+    depth: usize,
+    expanded_directories: &HashSet<PathBuf>,
+    entries: &mut Vec<FileTreeEntry>,
+) -> Result<()> {
+    let directory = project_root.join(relative_directory);
+    let children = directory_children(&directory)?;
+
+    for (name, is_directory, size_bytes) in children {
+        let relative_path = relative_directory.join(&name);
+        let expanded = is_directory && expanded_directories.contains(&relative_path);
+        entries.push(file_tree_entry(
+            project_root,
+            relative_path.clone(),
+            name,
+            depth,
+            is_directory,
+            size_bytes,
+            expanded,
+        ));
+        if expanded {
+            read_directory(
+                project_root,
+                &relative_path,
+                depth + 1,
+                expanded_directories,
+                entries,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn directory_children(directory: &Path) -> Result<Vec<(String, bool, Option<u64>)>> {
+    let mut children = fs::read_dir(directory)
+        .map_err(|error| anyhow!("could not read {}: {error}", directory.display()))?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            let size_bytes = (!file_type.is_dir())
+                .then(|| entry.metadata().ok().map(|metadata| metadata.len()))
+                .flatten();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("._") || matches!(name.as_str(), ".DS_Store" | ".git" | ".opencut")
+            {
+                return None;
+            }
+            Some((name, file_type.is_dir(), size_bytes))
+        })
+        .collect::<Vec<_>>();
+    children.sort_by(|(left_name, left_dir, _), (right_name, right_dir, _)| {
+        right_dir
+            .cmp(left_dir)
+            .then_with(|| left_name.to_lowercase().cmp(&right_name.to_lowercase()))
+    });
+    Ok(children)
+}
+
+fn file_tree_entry(
+    project_root: &Path,
+    relative_path: PathBuf,
+    name: String,
+    depth: usize,
+    is_directory: bool,
+    size_bytes: Option<u64>,
+    expanded: bool,
+) -> FileTreeEntry {
+    let kind = if is_directory {
+        FileTreeEntryKind::Directory { expanded }
+    } else if crate::timeline_document::is_timeline_path(&relative_path) {
+        FileTreeEntryKind::Timeline
+    } else if is_video_path(&relative_path) {
+        FileTreeEntryKind::Video
+    } else if is_image_path(&relative_path) {
+        FileTreeEntryKind::Image
+    } else if is_audio_path(&relative_path) {
+        FileTreeEntryKind::Audio
+    } else if is_srt_path(&relative_path) {
+        FileTreeEntryKind::Srt
+    } else {
+        FileTreeEntryKind::Other
+    };
+    FileTreeEntry {
+        absolute_path: project_root.join(relative_path),
+        name,
+        depth,
+        kind,
+        size_bytes,
+    }
+}
+
+pub(crate) fn is_srt_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "srt"))
+}
+
+pub(crate) async fn select_preview_file(
+    editor: Entity<Editor>,
+    relative_path: PathBuf,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    let is_image = is_image_path(&relative_path);
+    let is_video = is_video_path(&relative_path);
+    let is_audio = is_audio_path(&relative_path);
+
+    let (project_root, previous) = editor.update(cx, |editor, cx| {
+        editor.select_only_clip(None);
+        editor.explorer.selected_file = Some(relative_path.clone());
+
+        let previous = if is_image || is_video || is_audio {
+            // The timeline remains loaded when a file is selected; file backends
+            // are retired below, including ones that have failed.
+            let target = match (is_video, is_audio) {
+                (true, _) | (_, true) => PreviewTarget::None,
+                _ => PreviewTarget::ImageFile(relative_path.clone()),
+            };
+            let previous = std::mem::replace(&mut editor.preview.target, target);
+            Some(previous)
+        } else {
+            None
+        };
+        if is_video || is_audio {
+            log::debug!("Loading preview for {}…", relative_path.display());
+        }
+        cx.notify();
+        (editor.project_root.clone(), previous)
+    });
+
+    // Cancel playback before releasing its entity, on the same lane as the playback task.
+    drop(previous);
+    if !is_video && !is_audio {
+        return Ok(());
+    }
+
+    return Editor::open_file_preview(editor, project_root, relative_path, is_audio, cx).await;
+}
+
+fn file_entry_metadata(entry: &FileTreeEntry, active_timeline: bool) -> Option<String> {
+    match entry.kind {
+        FileTreeEntryKind::Directory { .. } => None,
+        FileTreeEntryKind::Timeline if active_timeline => Some("ACTIVE".to_string()),
+        FileTreeEntryKind::Video
+        | FileTreeEntryKind::Image
+        | FileTreeEntryKind::Audio
+        | FileTreeEntryKind::Srt
+        | FileTreeEntryKind::Timeline
+        | FileTreeEntryKind::Other => entry.size_bytes.map(format_file_size),
+    }
+}
+
+fn format_file_size(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        format!("{:.1} GB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.1} MB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.0} KB", bytes / KIB)
+    } else {
+        format!("{bytes:.0} B")
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/explorer_file_entry.test.rs"]
+mod tests;

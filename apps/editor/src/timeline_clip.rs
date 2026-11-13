@@ -1,0 +1,109 @@
+use crate::layout::{THIN_CLIP_WIDTH, TIMELINE_PADDING, TRACK_HEIGHT};
+use crate::theme::ACCENT;
+use crate::timeline::{FrameRate, TimelineFrameIndex};
+pub(crate) use ::timeline::{
+    AudioClip, AudioClipProperties, Clip, TextClip, TextClipProperties, VideoClip,
+    VideoClipProperties,
+};
+use gpui::prelude::FluentBuilder as _;
+use gpui::{
+    InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled, div, px,
+    rgb,
+};
+use ulid::Ulid;
+
+pub(crate) trait ClipEditingExt {
+    fn split_at(
+        &self,
+        timeline_position: TimelineFrameIndex,
+        frame_rate: FrameRate,
+    ) -> Option<(Self, Self)>
+    where
+        Self: Sized;
+}
+impl ClipEditingExt for Clip {
+    fn split_at(
+        &self,
+        timeline_position: TimelineFrameIndex,
+        frame_rate: FrameRate,
+    ) -> Option<(Self, Self)> {
+        let local = timeline_position - self.timeline_start();
+        if local < TimelineFrameIndex::ONE_FRAME
+            || local > self.frame_length(frame_rate) - TimelineFrameIndex::ONE_FRAME
+        {
+            return None;
+        }
+
+        let mut left = self.clone();
+        let mut right = self.copy(Ulid::generate());
+        right.set_timeline_start(timeline_position);
+        match (&mut left, &mut right) {
+            (Self::Video(left), Self::Video(right)) => {
+                let source_split = left.source_in + local;
+                left.source_out = source_split;
+                right.source_in = source_split;
+            }
+            (Self::Audio(left), Self::Audio(right)) => {
+                let source_split = left.source_in + local;
+                left.source_out = source_split;
+                right.source_in = source_split;
+            }
+            (Self::Text(left), Self::Text(right)) => {
+                left.duration = frame_rate.duration(local);
+                right.duration = right.duration.saturating_sub(left.duration);
+            }
+            _ => unreachable!("a cloned clip must retain its variant"),
+        }
+        Some((left, right))
+    }
+}
+pub(super) fn text_clip_component(
+    clip: TextClip,
+    frame_rate: FrameRate,
+    pixels_per_second: f32,
+    selected: bool,
+    moving: bool,
+) -> impl StatefulInteractiveElement + IntoElement + ParentElement {
+    let clip_id = clip.id();
+    let left =
+        TIMELINE_PADDING + frame_rate.seconds(clip.timeline_start) as f32 * pixels_per_second;
+    let width =
+        (frame_rate.seconds(clip.frame_length(frame_rate)) as f32 * pixels_per_second).max(1.0);
+    let thin = width < THIN_CLIP_WIDTH;
+
+    div()
+        .id(gpui::SharedString::from(format!("timeline-clip-{clip_id}")))
+        .absolute()
+        .left(px(left))
+        .top(px(5.0))
+        .w(px(width))
+        .h(px(TRACK_HEIGHT - 10.0))
+        .overflow_hidden()
+        .when(!thin, |this| {
+            this.rounded_md().border_1().border_color(rgb(if selected {
+                ACCENT
+            } else {
+                0x8261b3
+            }))
+        })
+        .bg(rgb(if thin && selected {
+            ACCENT
+        } else {
+            0x7251a3
+        }))
+        .opacity(if moving {
+            0.3
+        } else {
+            1.0
+        })
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .p_2()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_ellipsis()
+                .child(clip.properties.text),
+        )
+}

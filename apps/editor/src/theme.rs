@@ -1,0 +1,12 @@
+pub(crate) const BACKGROUND: u32 = 0x080809;
+pub(crate) const PANEL: u32 = 0x0d0d0f;
+pub(crate) const SURFACE: u32 = 0x17171a;
+pub(crate) const SURFACE_HOVER: u32 = 0x202024;
+pub(crate) const BORDER: u32 = 0x2b2b31;
+pub(crate) const TEXT: u32 = 0xf2f2f4;
+pub(crate) const MUTED: u32 = 0x777780;
+pub(crate) const ACCENT: u32 = 0xf0b75e;
+pub(crate) const ERROR: u32 = 0xff8b8b;
+pub(crate) const LINK: u32 = 0x00f0ff;
+pub(crate) const CLIP_BLUE: u32 = 0x294d75;
+pub(crate) const CLIP_OFFLINE: u32 = 0x2a1a1c;

@@ -1,0 +1,115 @@
+use crate::Seeker;
+use crate::playback_row::{PlaybackIcon, playback_button_view, playback_row_view};
+use crate::progress_bar::{ProgressBarDrag, progress, progress_bar, seek_position};
+use crate::video_player::{PlaybackState, VideoPlayer};
+use engine::video_surface::video_surface_view;
+use gpui::{
+    Bounds, ClickEvent, Context, DragMoveEvent, MouseButton, MouseUpEvent, ObjectFit, Render,
+    Window, div, prelude::*, rgb,
+};
+use std::{cell::Cell, rc::Rc, time::Duration};
+
+impl Render for VideoPlayer {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let seek_bounds = Rc::new(Cell::new(Bounds::default()));
+        let duration = self.duration();
+        let ended = match self.is_ended() {
+            Ok(ended) => ended,
+            Err(error) => {
+                eprintln!("Reading player completion failed: {error:?}");
+                std::process::exit(1);
+            }
+        };
+        let position = match (ended, &self.displayed) {
+            (true, _) => duration,
+            (_, Some((_, pts, _))) => (*pts).min(duration), // 播放中和暂停时，UI 进度使用当前展示帧的 PTS。
+            (_, None) => Duration::ZERO,
+        };
+        let playback_icon = match (ended, &self.playback_state) {
+            (true, _) => PlaybackIcon::Replay,
+            (_, PlaybackState::Playing) => PlaybackIcon::Pause,
+            (_, PlaybackState::Paused) => PlaybackIcon::Play,
+        };
+        let drag_seek_bounds = seek_bounds.clone();
+
+        div()
+            .id("player")
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(0x080808))
+            .text_color(rgb(0xeeeeee))
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .when_some(self.displayed.as_ref(), |this, (frame, _, _)| {
+                        this.child(video_surface_view(frame, ObjectFit::Contain))
+                    }),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .border_t_1()
+                    .border_color(rgb(0x1f1f24))
+                    .bg(rgb(0x0d0d0f))
+                    .child(
+                        progress_bar(
+                            "progress_bar",
+                            progress(position, duration),
+                            seek_bounds.clone(),
+                        )
+                        .on_click(cx.listener(move |player, event: &ClickEvent, _, cx| {
+                            let target =
+                                seek_position(event.position().x, seek_bounds.get(), duration);
+                            match player.seek(target) {
+                                Ok(()) => cx.notify(),
+                                Err(error) => {
+                                    eprintln!("Player seek failed: {error:?}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }))
+                        .on_drag_move(cx.listener(
+                            move |player, event: &DragMoveEvent<ProgressBarDrag>, window, cx| {
+                                let target = seek_position(
+                                    event.event.position.x,
+                                    drag_seek_bounds.get(),
+                                    duration,
+                                );
+                                player.request_seek(target, window, cx);
+                            },
+                        ))
+                        // A drag can end over the bar or anywhere else in the window.
+                        .on_mouse_up(MouseButton::Left, cx.listener(release_scrub))
+                        .on_mouse_up_out(MouseButton::Left, cx.listener(release_scrub)),
+                    )
+                    .child(playback_row_view(
+                        playback_button_view("play-pause", playback_icon).on_click(cx.listener(
+                            |player, _, _, cx| {
+                                player.toggle_playback(cx);
+                            },
+                        )),
+                        position,
+                        duration,
+                        self.title.clone(),
+                    )),
+            )
+    }
+}
+
+/// Mouse-up handler shared by releases over the bar and elsewhere in the window.
+fn release_scrub(
+    player: &mut VideoPlayer,
+    _: &MouseUpEvent,
+    _: &mut Window,
+    cx: &mut Context<VideoPlayer>,
+) {
+    if let Err(error) = player.finish_scrub(cx) {
+        eprintln!("Player seek failed: {error:?}");
+        std::process::exit(1);
+    }
+}

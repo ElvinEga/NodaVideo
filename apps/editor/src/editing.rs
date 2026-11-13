@@ -1,0 +1,594 @@
+use crate::clip_placement::{
+    ClipPlacementRejection, validate_clip_placement, validate_text_clip_placement,
+};
+use crate::edit_action::{EditAction, edit_timeline};
+use crate::editor::Editor;
+use crate::event_bus::AppEvent;
+use crate::timeline::{
+    FrameRate, TimelineEditorExt, TimelineFrameIndex, TimelineRuntimeState, timeline_ranges_overlap,
+};
+use crate::timeline_clip::{Clip, ClipEditingExt};
+use crate::timeline_document::{relative_asset_path, resolve_asset_path};
+use crate::track::{Track, TrackKind};
+use ::timeline::Asset;
+use ::timeline::TimelineEditingState;
+use anyhow::Result;
+use gpui::prelude::*;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use ulid::Ulid;
+
+#[derive(Clone)]
+pub(super) struct ClipClipboard {
+    source_timeline: PathBuf,
+    source_frame_rate: FrameRate,
+    clips: Vec<Clip>,
+    assets: Vec<Asset>,
+    tracks: Vec<(Ulid, TrackKind, usize)>,
+    selection_start: TimelineFrameIndex,
+    primary_index: Option<usize>,
+}
+
+impl ClipClipboard {
+    pub(crate) fn from_selection(
+        source_timeline: PathBuf,
+        timeline: &TimelineEditingState,
+        selected_clip_ids: &HashSet<Ulid>,
+        primary_clip_id: Option<Ulid>,
+    ) -> Option<Self> {
+        let clips = timeline
+            .clips
+            .iter()
+            .filter(|clip| selected_clip_ids.contains(&clip.id()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if clips.is_empty() || clips.len() != selected_clip_ids.len() {
+            return None;
+        }
+        let asset_ids = clips
+            .iter()
+            .filter_map(|clip| clip.asset_id())
+            .collect::<HashSet<_>>();
+        let assets = timeline
+            .assets
+            .iter()
+            .filter(|asset| asset_ids.contains(&asset.id()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if assets.len() != asset_ids.len() {
+            return None;
+        }
+        let track_ids = clips.iter().map(Clip::track_id).collect::<HashSet<_>>();
+        let tracks = timeline
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, track)| track_ids.contains(&track.id))
+            .map(|(index, track)| {
+                let ordinal = timeline.tracks[..index]
+                    .iter()
+                    .filter(|candidate| candidate.kind == track.kind)
+                    .count();
+                (track.id, track.kind, ordinal)
+            })
+            .collect::<Vec<_>>();
+        if tracks.len() != track_ids.len() {
+            return None;
+        }
+        let selection_start = clips
+            .iter()
+            .map(Clip::timeline_start)
+            .min()
+            .unwrap_or(TimelineFrameIndex::ZERO);
+        let primary_index =
+            primary_clip_id.and_then(|clip_id| clips.iter().position(|clip| clip.id() == clip_id));
+        Some(Self {
+            source_timeline,
+            source_frame_rate: timeline.settings.frame_rate,
+            clips,
+            assets,
+            tracks,
+            selection_start,
+            primary_index,
+        })
+    }
+
+    fn clips_at(&self, position: TimelineFrameIndex, frame_rate: FrameRate) -> Vec<Clip> {
+        self.clips
+            .iter()
+            .cloned()
+            .map(|mut clip| {
+                let relative_start = clip.timeline_start() - self.selection_start;
+                clip.set_timeline_start(
+                    position
+                        + self
+                            .source_frame_rate
+                            .rescale_nearest(relative_start, frame_rate),
+                );
+                match &mut clip {
+                    Clip::Video(clip) => {
+                        clip.source_in = self
+                            .source_frame_rate
+                            .rescale_nearest(clip.source_in, frame_rate);
+                        clip.source_out = self
+                            .source_frame_rate
+                            .rescale_nearest(clip.source_out, frame_rate)
+                            .max(clip.source_in + TimelineFrameIndex::ONE_FRAME);
+                    }
+                    Clip::Audio(clip) => {
+                        clip.source_in = self
+                            .source_frame_rate
+                            .rescale_nearest(clip.source_in, frame_rate);
+                        clip.source_out = self
+                            .source_frame_rate
+                            .rescale_nearest(clip.source_out, frame_rate)
+                            .max(clip.source_in + TimelineFrameIndex::ONE_FRAME);
+                    }
+                    Clip::Text(_) => {}
+                }
+                clip
+            })
+            .collect()
+    }
+
+    fn prepare_paste(
+        &self,
+        destination_path: &std::path::Path,
+        destination: &TimelineEditingState,
+        position: TimelineFrameIndex,
+    ) -> Result<(Vec<Clip>, Vec<Asset>)> {
+        let mut clips = self.clips_at(position, destination.settings.frame_rate);
+        let same_timeline = self.source_timeline == destination_path;
+
+        if same_timeline {
+            if self
+                .tracks
+                .iter()
+                .any(|(track_id, _, _)| destination.track(*track_id).is_none())
+            {
+                return Err(ClipPlacementRejection::MissingTrack.into());
+            }
+        } else {
+            let mut track_ids = HashMap::new();
+            for (source_track_id, kind, ordinal) in &self.tracks {
+                let Some(destination_track) = destination
+                    .tracks
+                    .iter()
+                    .filter(|track| track.kind == *kind)
+                    .nth(*ordinal)
+                else {
+                    return Err(ClipPlacementRejection::MissingTrack.into());
+                };
+                track_ids.insert(*source_track_id, destination_track.id);
+            }
+            for clip in &mut clips {
+                let track_id = *track_ids
+                    .get(&clip.track_id())
+                    .ok_or(ClipPlacementRejection::MissingTrack)?;
+                clip.set_track_id(track_id);
+            }
+        }
+
+        let mut new_assets: Vec<Asset> = Vec::new();
+        if same_timeline {
+            if self
+                .assets
+                .iter()
+                .any(|asset| destination.asset(asset.id()).is_none())
+            {
+                return Err(ClipPlacementRejection::MissingAsset.into());
+            }
+        } else {
+            // 素材路径相对于各自时间线文件所在目录；两条时间线不在同一目录时需要重新换算。
+            let source_directory = self.source_timeline.parent().unwrap_or(Path::new(""));
+            let destination_directory = destination_path.parent().unwrap_or(Path::new(""));
+            let mut asset_ids = HashMap::new();
+            for source_asset in &self.assets {
+                let destination_asset_path = if source_asset.path().is_absolute() {
+                    source_asset.path().clone()
+                } else {
+                    let media_path = resolve_asset_path(source_directory, source_asset.path());
+                    relative_asset_path(destination_directory, &media_path)
+                };
+                let destination_asset_id = destination
+                    .assets
+                    .iter()
+                    .find(|asset| asset.path() == &destination_asset_path)
+                    .or_else(|| {
+                        new_assets
+                            .iter()
+                            .find(|asset| asset.path() == &destination_asset_path)
+                    })
+                    .map(|asset| asset.id())
+                    .unwrap_or_else(|| {
+                        let mut asset = source_asset.clone();
+                        asset.set_id(Ulid::generate());
+                        asset.set_path(destination_asset_path.clone());
+                        let id = asset.id();
+                        new_assets.push(asset);
+                        id
+                    });
+                asset_ids.insert(source_asset.id(), destination_asset_id);
+            }
+            for clip in &mut clips {
+                let asset_id = match clip {
+                    Clip::Video(clip) => &mut clip.asset_id,
+                    Clip::Audio(clip) => &mut clip.asset_id,
+                    Clip::Text(_) => continue,
+                };
+                *asset_id = *asset_ids
+                    .get(asset_id)
+                    .ok_or(ClipPlacementRejection::MissingAsset)?;
+            }
+        }
+
+        let mut validation_timeline = destination.clone();
+        validation_timeline
+            .assets
+            .extend(new_assets.iter().cloned());
+        validate_clips_placements(&validation_timeline, &clips)?;
+        Ok((clips, new_assets))
+    }
+}
+
+impl TimelineRuntimeState {
+    /// Splits every clip crossing `position` on unlocked tracks.
+    pub(super) fn blade_at(&mut self, position: TimelineFrameIndex) -> Result<()> {
+        let clips_to_split = self
+            .editing_state
+            .clips
+            .iter()
+            .filter(|clip| {
+                let local = position - clip.timeline_start();
+                let crosses_position = local >= TimelineFrameIndex::ONE_FRAME
+                    && local
+                        <= clip.frame_length(self.editing_state.settings.frame_rate)
+                            - TimelineFrameIndex::ONE_FRAME;
+                let track_is_editable = self
+                    .editing_state
+                    .track(clip.track_id())
+                    .is_some_and(|track| !track.locked);
+                crosses_position && track_is_editable
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if clips_to_split.is_empty() {
+            return Ok(());
+        }
+        let removed_clip_ids = clips_to_split.iter().map(Clip::id).collect();
+        let split_clips = clips_to_split
+            .into_iter()
+            .flat_map(|clip| {
+                let (left, right) = clip
+                    .split_at(position, self.editing_state.settings.frame_rate)
+                    .expect("clips crossing the split position must be splittable");
+                [left, right]
+            })
+            .collect();
+
+        edit_timeline(
+            self,
+            EditAction::SplitClips {
+                removed_clips: removed_clip_ids,
+                added_clips: split_clips,
+            },
+        )?;
+        self.save()
+    }
+}
+
+impl Editor {
+    pub(super) fn copy_selected_clips(&mut self) {
+        let Some(timeline) = self.timeline.as_ref() else {
+            return;
+        };
+        let Some(clipboard) = ClipClipboard::from_selection(
+            timeline.path.clone(),
+            &timeline.editing_state,
+            &timeline.interaction.selected_clip_ids,
+            timeline.interaction.selected_clip_id,
+        ) else {
+            return;
+        };
+        self.clipboard = Some(clipboard);
+    }
+
+    pub(super) fn paste_clips(&mut self, cx: &mut Context<Self>) -> Result<()> {
+        let Some(clipboard) = self.clipboard.clone() else {
+            return Ok(());
+        };
+        let Some(timeline) = self.timeline.as_ref() else {
+            return Ok(());
+        };
+        let position = match timeline.interaction.pointer_guide {
+            Some(pointer_position) => pointer_position,
+            None => timeline.playhead(),
+        };
+        let (clips, assets) =
+            match clipboard.prepare_paste(&timeline.path, &timeline.editing_state, position) {
+                Ok(paste) => paste,
+                Err(rejection) => {
+                    eprintln!("Cannot paste clips: {rejection}.");
+                    return Ok(());
+                }
+            };
+
+        let Some(timeline) = self.timeline.as_mut() else {
+            return Ok(());
+        };
+        let clips: Vec<Clip> = clips
+            .iter()
+            .map(|clip| clip.copy(Ulid::generate()))
+            .collect();
+
+        timeline.interaction.selected_clip_ids = clips.iter().map(Clip::id).collect();
+        timeline.interaction.selected_clip_id = clipboard
+            .primary_index
+            .and_then(|index| clips.get(index))
+            .or_else(|| clips.first())
+            .map(Clip::id);
+
+        self.emit_event(cx, AppEvent::Edit(EditAction::AddClips { clips, assets }));
+        Ok(())
+    }
+
+    pub(super) fn duplicate_selected(&mut self) -> Result<()> {
+        let Some(timeline) = self.timeline.as_ref() else {
+            return Ok(());
+        };
+        let clip_ids = timeline.selected_clip_ids_in_timeline_order();
+        if clip_ids.is_empty() || !timeline.selected_clips_editable() {
+            return Ok(());
+        }
+        let clips = clip_ids
+            .iter()
+            .filter_map(|clip_id| timeline.editing_state.clip(*clip_id).cloned())
+            .collect::<Vec<_>>();
+        if clips.len() != clip_ids.len() {
+            return Ok(());
+        }
+        let selection_start = clips
+            .iter()
+            .map(Clip::timeline_start)
+            .min()
+            .unwrap_or(TimelineFrameIndex::ZERO);
+        let selection_end = clips
+            .iter()
+            .map(|clip| clip.timeline_end(timeline.editing_state.settings.frame_rate))
+            .max()
+            .unwrap_or(selection_start);
+        let mut delta = selection_end - selection_start;
+        let placements = loop {
+            let candidate = clips
+                .iter()
+                .map(|clip| (clip.id(), clip.track_id(), clip.timeline_start() + delta))
+                .collect::<Vec<_>>();
+            if timeline
+                .editing_state
+                .validate_clip_move_placements(&candidate, &HashSet::new())
+                .is_ok()
+            {
+                break candidate;
+            }
+            let mut next_delta = delta + TimelineFrameIndex::ONE_FRAME;
+            for (clip, (_, track_id, start)) in clips.iter().zip(&candidate) {
+                for other in timeline
+                    .editing_state
+                    .clips
+                    .iter()
+                    .filter(|other| other.track_id() == *track_id)
+                {
+                    if timeline_ranges_overlap(
+                        *start,
+                        *start + clip.frame_length(timeline.editing_state.settings.frame_rate),
+                        other.timeline_start(),
+                        other.timeline_end(timeline.editing_state.settings.frame_rate),
+                    ) {
+                        next_delta = next_delta.max(
+                            other.timeline_end(timeline.editing_state.settings.frame_rate)
+                                - clip.timeline_start(),
+                        );
+                    }
+                }
+            }
+            delta = next_delta;
+        };
+
+        let primary_index = timeline
+            .interaction
+            .selected_clip_id
+            .and_then(|id| clips.iter().position(|clip| clip.id() == id));
+        let mut duplicates = Vec::with_capacity(clips.len());
+        for (clip, (_, _, start)) in clips.into_iter().zip(placements) {
+            let mut clip = clip.copy(Ulid::generate());
+            clip.set_timeline_start(start);
+            duplicates.push(clip);
+        }
+        let Some(timeline) = self.timeline.as_mut() else {
+            return Ok(());
+        };
+        timeline.interaction.selected_clip_ids = duplicates.iter().map(Clip::id).collect();
+        timeline.interaction.selected_clip_id = primary_index
+            .and_then(|index| duplicates.get(index))
+            .or_else(|| duplicates.first())
+            .map(Clip::id);
+        edit_timeline(
+            timeline,
+            EditAction::AddClips {
+                clips: duplicates,
+                assets: Vec::new(),
+            },
+        )?;
+        timeline.save()
+    }
+
+    pub(super) fn add_track(&mut self, kind: TrackKind) -> Result<()> {
+        let Some(timeline) = self.timeline.as_ref() else {
+            eprintln!("Create or select a timeline before adding tracks.");
+            return Ok(());
+        };
+        let number = timeline
+            .editing_state
+            .tracks
+            .iter()
+            .filter(|track| track.kind == kind)
+            .count()
+            + 1;
+        let prefix = match kind {
+            TrackKind::Video => "Video",
+            TrackKind::Audio => "Audio",
+            TrackKind::Text => "Text",
+        };
+        let id = Ulid::generate();
+        let Some(timeline) = self.timeline.as_mut() else {
+            return Ok(());
+        };
+        edit_timeline(
+            timeline,
+            EditAction::AddTrack {
+                track: Track {
+                    id,
+                    name: format!("{prefix} {number}"),
+                    kind,
+                    locked: false,
+                    muted: false,
+                    visible: true,
+                },
+            },
+        )?;
+        timeline.save()
+    }
+
+    pub(super) fn select_only_clip(&mut self, clip_id: Option<Ulid>) {
+        let Some(timeline) = self.timeline.as_mut() else {
+            return;
+        };
+        timeline.interaction.selected_clip_ids.clear();
+        if let Some(clip_id) = clip_id {
+            timeline.interaction.selected_clip_ids.insert(clip_id);
+        }
+        timeline.interaction.selected_clip_id = clip_id;
+        self.property_panel_state.transform_input_clip_id = None;
+        self.property_panel_state.text_input_clip_id = None;
+    }
+
+    pub(super) fn select_all_unlocked_clips(&mut self) {
+        let Some(timeline) = self.timeline.as_mut() else {
+            return;
+        };
+        timeline.interaction.selected_clip_ids = unlocked_clip_ids(&timeline.editing_state);
+        timeline.interaction.selected_clip_id = timeline
+            .editing_state
+            .clips
+            .iter()
+            .find(|clip| timeline.interaction.selected_clip_ids.contains(&clip.id()))
+            .map(Clip::id);
+        self.property_panel_state.transform_input_clip_id = None;
+        self.property_panel_state.text_input_clip_id = None;
+    }
+
+    pub(super) fn toggle_clip_selection(&mut self, clip_id: Ulid) {
+        let Some(timeline) = self.timeline.as_mut() else {
+            return;
+        };
+        if timeline.interaction.selected_clip_ids.remove(&clip_id) {
+            if timeline.interaction.selected_clip_id == Some(clip_id) {
+                timeline.interaction.selected_clip_id = timeline
+                    .editing_state
+                    .clips
+                    .iter()
+                    .find(|clip| timeline.interaction.selected_clip_ids.contains(&clip.id()))
+                    .map(Clip::id);
+            }
+        } else if timeline.editing_state.clip(clip_id).is_some() {
+            timeline.interaction.selected_clip_ids.insert(clip_id);
+            timeline.interaction.selected_clip_id = Some(clip_id);
+        }
+        self.property_panel_state.transform_input_clip_id = None;
+        self.property_panel_state.text_input_clip_id = None;
+    }
+
+    pub(super) fn toggle_track_magnet(&mut self) {
+        let Some(timeline) = self.timeline.as_mut() else {
+            return;
+        };
+        timeline.track_magnet_enabled = !timeline.track_magnet_enabled;
+    }
+}
+
+pub(super) fn validate_clips_placements(
+    timeline: &TimelineEditingState,
+    clips: &[Clip],
+) -> Result<()> {
+    if clips.is_empty() {
+        return Err(ClipPlacementRejection::NoPlacements.into());
+    }
+    for clip in clips {
+        match clip {
+            Clip::Video(clip) => {
+                let Some(asset) = timeline.asset(clip.asset_id) else {
+                    return Err(ClipPlacementRejection::MissingAsset.into());
+                };
+                validate_clip_placement(
+                    timeline,
+                    clip.track_id,
+                    asset.kind(),
+                    clip.source_out - clip.source_in,
+                    clip.timeline_start,
+                    &HashSet::new(),
+                )?;
+            }
+            Clip::Audio(clip) => {
+                let Some(asset) = timeline.asset(clip.asset_id) else {
+                    return Err(ClipPlacementRejection::MissingAsset.into());
+                };
+                validate_clip_placement(
+                    timeline,
+                    clip.track_id,
+                    asset.kind(),
+                    clip.source_out - clip.source_in,
+                    clip.timeline_start,
+                    &HashSet::new(),
+                )?;
+            }
+            Clip::Text(clip) => validate_text_clip_placement(
+                timeline,
+                clip.track_id,
+                clip.frame_length(timeline.settings.frame_rate),
+                clip.timeline_start,
+                &HashSet::new(),
+            )?,
+        }
+    }
+    for (index, clip) in clips.iter().enumerate() {
+        if clips[index + 1..].iter().any(|other| {
+            clip.track_id() == other.track_id()
+                && timeline_ranges_overlap(
+                    clip.timeline_start(),
+                    clip.timeline_end(timeline.settings.frame_rate),
+                    other.timeline_start(),
+                    other.timeline_end(timeline.settings.frame_rate),
+                )
+        }) {
+            return Err(ClipPlacementRejection::ProposedClipsOverlap.into());
+        }
+    }
+    Ok(())
+}
+
+fn unlocked_clip_ids(timeline: &TimelineEditingState) -> HashSet<Ulid> {
+    timeline
+        .clips
+        .iter()
+        .filter(|clip| {
+            timeline
+                .track(clip.track_id())
+                .is_some_and(|track| !track.locked)
+        })
+        .map(Clip::id)
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "tests/editing.test.rs"]
+mod tests;

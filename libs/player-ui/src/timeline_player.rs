@@ -1,0 +1,237 @@
+//! Standalone timeline player entity: a [`TimelineBackend`] plus its own loop, controls, and
+//! audio output. Mixed audio is queued by timeline position against the backend's clock.
+
+use crate::{Seeker, audio_output::AudioOutput};
+use anyhow::{Context as _, Result};
+use engine::{
+    export::{AudioReader, AudioReaderKey, mix_timeline_audio},
+    timeline_backend::{MAX_CONTROL_WAIT, TimelineBackend},
+};
+use gpui::{Context, Task, Window};
+use media_backend::{AudioSamples, MediaTime};
+use std::{collections::HashMap, path::Path, time::Duration};
+use timeline::TimelineEditingState;
+use ulid::Ulid;
+
+const AUDIO_LEAD: Duration = Duration::from_millis(500); // 混音领先播放时钟的时长；低于输出队列的 1 秒上限。
+
+#[rustfmt::skip]
+pub struct TimelinePlayer {
+    pub title: String,
+    backend: TimelineBackend,                            // 直接修改后需自行 notify 并释放旧图像。
+    audio_output: AudioOutput,
+    audio_readers: HashMap<AudioReaderKey, AudioReader>, // 按轨道和素材缓存的解码器；不释放，读取时自行接续或 seek。
+    audio_cursor: i64,                                   // 下一块待混音的起始采样位置（设备采样率），不是播放位置。
+    pending_seek: Option<Duration>,                      // 拖动请求的最新目标位置，下一帧执行；Some 表示已安排执行，新请求只覆盖目标。
+}
+
+// Public APIs only
+impl TimelinePlayer {
+    /// Validates the timeline, opens the audio device, and prepares frame zero, paused.
+    /// Media paths resolve against `timeline_directory`, the directory containing the timeline file. Call [`Self::start`] once the player is in an entity.
+    pub fn from_editing_state(
+        timeline: TimelineEditingState,
+        timeline_directory: &Path,
+    ) -> Result<Self> {
+        Ok(Self {
+            backend: TimelineBackend::new(timeline, timeline_directory)
+                .context("creating timeline backend")?,
+            title: String::new(),
+            audio_output: AudioOutput::open().context("opening audio output")?,
+            audio_readers: HashMap::new(),
+            audio_cursor: 0,
+            pending_seek: None,
+        })
+    }
+
+    pub fn backend(&self) -> &TimelineBackend {
+        &self.backend
+    }
+
+    pub fn backend_mut(&mut self) -> &mut TimelineBackend {
+        &mut self.backend
+    }
+
+    /// Applies mute changes without reopening the player. The next playback step remixes audio.
+    pub fn set_clip_muted(&mut self, clip_id: Ulid, muted: bool) -> Result<()> {
+        self.backend.set_clip_muted(clip_id, muted)?;
+        self.audio_output.set_playing(false)?;
+        Ok(())
+    }
+
+    /// Seeks to `position` on the next frame. Requests arriving before then only replace the
+    /// target, so a seek slower than the pointer never queues stale positions.
+    pub(crate) fn request_seek(
+        &mut self,
+        position: Duration,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let scheduled = self.pending_seek.is_some();
+        self.pending_seek = Some(position);
+        if scheduled {
+            return;
+        }
+        cx.on_next_frame(window, |player, _, cx| {
+            let Some(position) = player.pending_seek.take() else {
+                return;
+            };
+            match player.seek(position) {
+                Ok(()) => cx.notify(),
+                Err(error) => player.fail(error, cx),
+            }
+        });
+    }
+
+    /// Starts the playback loop once. The owner must retain the task and drop it before the player.
+    pub fn start(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |player, cx| {
+            loop {
+                let Ok(wait) = player.update(cx, |player, cx| {
+                    let result: Result<_> = (|| {
+                        let advance = player.backend.advance()?; // 先推进：到达结尾时本拍即更新播放状态。
+                        player.sync_audio()?; // 先于设备检查：设备查询出错时，暂停后的输出仍已停止。
+                        if player.backend.is_playing() {
+                            match player.audio_output.default_device_changed()? {
+                                Some((id, name)) => {
+                                    eprintln!("Audio output device changed to {name} [{id}]");
+                                    // 旧流可能已被 cpal 随断开的设备停止且不再消费 PCM；重建后流即在新设备上。
+                                    player.restart_audio_output()?;
+                                }
+                                None => {
+                                    // do nothing: 流已在默认输出设备上。
+                                }
+                            }
+                        } else {
+                            // do nothing: 暂停时下次 play 会在当前默认设备上重建流；
+                            // 自然结束时保留旧流，让尾音播完。
+                        }
+                        Ok(advance)
+                    })();
+                    match result {
+                        Ok(advance) => {
+                            if advance.changed {
+                                cx.notify();
+                            }
+                            advance.wait
+                        }
+                        Err(error) => {
+                            player.fail(error, cx);
+                            MAX_CONTROL_WAIT
+                        }
+                    }
+                }) else {
+                    return; // 播放器已释放。
+                };
+                cx.background_executor().timer(wait).await;
+            }
+        })
+    }
+
+    pub fn play(&mut self, cx: &mut Context<Self>) -> Result<()> {
+        if self.backend.is_ended() {
+            self.audio_output.clear_at(Duration::ZERO)?; // 重播时丢弃上一轮尚在排空的尾音。
+        }
+        let result = match self.backend.play() {
+            Ok(()) => self.sync_audio(),
+            Err(error) => Err(error),
+        };
+        cx.notify();
+        result
+    }
+
+    pub fn toggle_playback(&mut self, cx: &mut Context<Self>) -> Result<()> {
+        if self.backend.is_playing() {
+            self.backend.pause();
+            let result = self.sync_audio();
+            cx.notify();
+            result
+        } else {
+            self.play(cx)
+        }
+    }
+
+    /// Logs the error and pauses on the last good frame.
+    /// The playback loop stops audio output on its next step.
+    pub(crate) fn fail(&mut self, error: anyhow::Error, cx: &mut Context<Self>) {
+        eprintln!("Timeline player failed: {error:?}");
+        self.backend.pause();
+        cx.notify();
+    }
+}
+
+// Private APIs only
+impl TimelinePlayer {
+    /// Starts, refills, or stops the audio output to match the backend's playback state.
+    fn sync_audio(&mut self) -> Result<()> {
+        if !self.backend.is_playing() {
+            if self.audio_output.is_playing() {
+                if self.backend.is_ended() && !self.audio_output.remaining_duration()?.is_zero() {
+                    return Ok(()); // 自然结束时等待软件队列及设备尾音播完；暂停仍立即清空。
+                }
+                self.audio_output.clear_at(self.backend.clock_position())?; // 丢弃已排队的 PCM 并保持停止。
+            }
+            return Ok(());
+        }
+        let rate = self.audio_output.format.sample_rate;
+        if !self.audio_output.is_playing() {
+            // 开始播放或 seek 后：输出队列从时钟位置重新开始；读取器保留，由其按新位置接续或 seek。
+            let position = self.backend.clock_position();
+            self.audio_output.clear_at(position)?;
+            self.audio_cursor = sample_index(position, rate);
+        }
+        let duration_end = sample_index(self.backend.duration(), rate);
+        let target =
+            sample_index(self.backend.clock_position() + AUDIO_LEAD, rate).min(duration_end);
+        if self.audio_cursor < target {
+            let count = (target - self.audio_cursor) as usize;
+            let mixed = mix_timeline_audio(
+                self.backend.timeline(),
+                self.backend.timeline_directory(),
+                &mut self.audio_readers,
+                self.audio_cursor,
+                count,
+                rate,
+            )?;
+            let channels = self.audio_output.format.channel_layout.len();
+            let mut samples = Vec::with_capacity(count * channels);
+            for [left, right] in mixed {
+                if channels == 1 {
+                    samples.push((left + right) * 0.5);
+                } else {
+                    samples.push(left);
+                    samples.push(right);
+                    samples.extend(std::iter::repeat_n(0.0, channels - 2)); // 多声道设备只输出前两个声道。
+                }
+            }
+            let timestamp_microseconds = self.audio_cursor * 1_000_000 / i64::from(rate);
+            self.audio_output.enqueue_samples(AudioSamples {
+                samples,
+                timestamp: MediaTime(timestamp_microseconds),
+                format: self.audio_output.format.clone(),
+                frame_count: count,
+            })?;
+            self.audio_cursor = target;
+        }
+        self.audio_output.set_playing(true)
+    }
+
+    /// Stops the output. When playing, also rebuilds the stream on the current default device,
+    /// discarding queued audio, and re-mixes from the clock position.
+    fn restart_audio_output(&mut self) -> Result<()> {
+        self.audio_output.set_playing(false)?; // 输出停止后，播放中的 sync_audio 会经 clear_at 重建流并重置混音位置。
+        self.sync_audio()
+    }
+}
+
+impl Seeker for TimelinePlayer {
+    fn seek(&mut self, position: Duration) -> Result<()> {
+        self.backend.seek(position)?;
+        self.restart_audio_output() // 播放中时从新位置清空队列并重新混音。
+    }
+}
+
+/// The sample containing `position` at `rate`.
+fn sample_index(position: Duration, rate: u32) -> i64 {
+    (position.as_nanos() * u128::from(rate) / 1_000_000_000) as i64
+}

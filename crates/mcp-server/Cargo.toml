@@ -7,9 +7,6 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-nodavideo-project.workspace = true
-nodavideo-timeline.workspace = true
-nodavideo-command-system.workspace = true
 nodavideo-hyperframes-bridge.workspace = true
 serde.workspace = true
 serde_json.workspace = true
