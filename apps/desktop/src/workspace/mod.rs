@@ -4,6 +4,7 @@ pub mod layout;
 pub mod menus;
 pub mod navigation;
 pub mod panels;
+mod preview_scheduler;
 pub mod toolbar;
 
 use std::rc::Rc;
@@ -30,6 +31,7 @@ use crate::workspace::layout::WorkspaceLayoutState;
 use crate::workspace::menus::*;
 use crate::workspace::navigation::WorkspaceTab;
 use crate::workspace::panels::*;
+use crate::workspace::preview_scheduler::{PreviewScheduler, Schedule};
 use crate::workspace::toolbar::{PanelId, ToolbarActions, render_top_toolbar};
 
 /// Root workspace view managing panels, docking/resizing, and active workspace tab.
@@ -53,6 +55,9 @@ pub struct WorkspaceView {
     _assistant_sub: Subscription,
     playback_task: Option<Task<()>>,
     preview_frame_task: Option<Task<()>>,
+    /// Coalesces preview frame requests so scrubbing/playback never cancels or
+    /// overwrites an in-flight FFmpeg extraction with a stale result.
+    preview_scheduler: PreviewScheduler<i64>,
 }
 
 impl std::fmt::Debug for WorkspaceView {
@@ -162,8 +167,8 @@ impl WorkspaceView {
             }));
             mon.on_forward_end = Some(std::rc::Rc::new(move |_, cx| {
                 tl_forward.update(cx, |tl, cx| {
-                    let dur = tl.effective_duration_frames();
-                    tl.set_playhead(dur, cx);
+                    let last = tl.last_playable_frame();
+                    tl.set_playhead_exact(last, cx);
                 });
             }));
         });
@@ -339,6 +344,7 @@ impl WorkspaceView {
             _assistant_sub: assistant_sub,
             playback_task: None,
             preview_frame_task: None,
+            preview_scheduler: PreviewScheduler::new(),
         };
 
         view.refresh_preview_frame(cx);
@@ -346,59 +352,120 @@ impl WorkspaceView {
     }
 
     /// Refresh current frame and timecodes on Preview Monitor based on current timeline state.
+    ///
+    /// Timecodes and sequence labels update immediately (they are cheap). Frame
+    /// decoding goes through the single-flight scheduler: rapid playhead changes
+    /// coalesce into one pending request instead of spawning and cancelling one
+    /// FFmpeg process per change.
     pub fn refresh_preview_frame(&mut self, cx: &mut Context<Self>) {
-        let sequence = self.timeline.read(cx).sequence.clone();
-        let playhead = self.timeline.read(cx).playhead();
-        let project = self.media_browser.read(cx).project.clone();
-        let processor = self.processor.clone();
+        let (timecode, duration, seq_name, seq_info, playhead) = {
+            let tl = self.timeline.read(cx);
+            let timecode = tl.sequence.frame_to_timecode(tl.playhead());
+            let duration = tl
+                .sequence
+                .frame_to_timecode(tl.effective_duration_frames());
+            let seq_name: SharedString = tl.sequence.name.clone().into();
+            let seq_info: SharedString = format!(
+                "{}×{} {}fps",
+                tl.sequence.width,
+                tl.sequence.height,
+                tl.sequence.fps.to_f64().round() as u64
+            )
+            .into();
+            (
+                timecode.into(),
+                duration.into(),
+                seq_name,
+                seq_info,
+                tl.playhead(),
+            )
+        };
 
-        let timecode = sequence.frame_to_timecode(playhead);
-        let effective_duration = self.timeline.read(cx).effective_duration_frames();
-        let duration = sequence.frame_to_timecode(effective_duration);
-        let seq_name = sequence.name.clone();
-        let seq_info = format!(
-            "{}×{} {}fps",
-            sequence.width,
-            sequence.height,
-            sequence.fps.to_f64().round() as u64
-        );
+        self.preview_monitor.update(cx, |mon, cx| {
+            mon.sequence_name = seq_name;
+            mon.sequence_info = seq_info;
+            mon.update_timecode(timecode, duration, cx);
+        });
 
+        if let Schedule::Start(id, frame) = self.preview_scheduler.request(playhead) {
+            self.spawn_preview_task(id, frame, cx);
+        }
+    }
+
+    /// Drive the single-flight preview render loop.
+    ///
+    /// The task owns at most one in-flight extraction. When requests arrived while
+    /// it was decoding, it immediately renders the newest one from a fresh project
+    /// snapshot, so the preview always converges on the current playhead.
+    fn spawn_preview_task(&mut self, id: u64, frame: i64, cx: &Context<Self>) {
         self.preview_frame_task = Some(cx.spawn(async move |this, cx| {
-            let frame_result = cx
-                .background_spawn(
-                    async move { processor.render_preview(&sequence, &project, playhead) },
-                )
-                .await;
+            let mut current = (id, frame);
 
-            this.update(cx, |this, cx| {
-                let frame_path = frame_result.ok().flatten();
-                this.preview_monitor.update(cx, |mon, cx| {
-                    mon.sequence_name = seq_name.into();
-                    mon.sequence_info = seq_info.into();
-                    mon.update_frame(frame_path, timecode, duration, cx);
+            loop {
+                // Snapshot the current project on the UI thread. Rebuilt for every
+                // iteration so a coalesced request never renders stale edits.
+                let render_input = this.update(cx, |this, cx| {
+                    let sequence = this.timeline.read(cx).sequence.clone();
+                    let project = this.media_browser.read(cx).project.clone();
+                    (sequence, project, this.processor.clone())
                 });
-            })
-            .ok();
+
+                let Ok((sequence, project, processor)) = render_input else {
+                    break;
+                };
+
+                let render_frame = current.1;
+                let frame_result = cx
+                    .background_spawn(async move {
+                        processor.render_preview(&sequence, &project, render_frame)
+                    })
+                    .await;
+
+                let next = this
+                    .update(cx, |this, cx| {
+                        let completion = this.preview_scheduler.complete(current.0);
+                        if completion.apply {
+                            this.preview_monitor.update(cx, |mon, cx| {
+                                mon.set_frame(frame_result.ok().flatten(), cx);
+                            });
+                        }
+                        completion.next
+                    })
+                    .unwrap_or(None);
+
+                match next {
+                    Some(next_request) => current = next_request,
+                    None => break,
+                }
+            }
         }));
     }
 
-    /// Start the real-time playback timer advancing the playhead.
+    /// Start the real-time playback clock.
+    ///
+    /// The playhead is derived from elapsed wall-clock time and the sequence fps,
+    /// not from counting timer ticks. A slow or coalesced tick skips frames instead
+    /// of permanently slowing playback; snapping never shifts the playhead during
+    /// playback; and the last *valid* frame is the stopping point.
     pub fn start_playback_loop(&mut self, cx: &mut Context<Self>) {
-        let seq_duration = self.timeline.read(cx).effective_duration_frames();
-        let current_playhead = self.timeline.read(cx).playhead();
-        if current_playhead >= seq_duration && seq_duration > 0 {
-            self.timeline.update(cx, |tl, cx| tl.set_playhead(0, cx));
+        let fps_f64 = self.timeline.read(cx).sequence.fps.to_f64().max(1.0);
+        let last_frame = self.timeline.read(cx).last_playable_frame();
+        let playhead = self.timeline.read(cx).playhead();
+
+        let mut anchor_frame = if playhead > last_frame { 0 } else { playhead };
+        if anchor_frame != playhead {
+            self.timeline
+                .update(cx, |tl, cx| tl.set_playhead_exact(anchor_frame, cx));
         }
 
-        let fps = self.timeline.read(cx).sequence.fps;
-        let fps_f64 = fps.to_f64().max(1.0);
-        let interval_ms = (1000.0 / fps_f64).round() as u64;
+        let frame_duration = std::time::Duration::from_secs_f64(1.0 / fps_f64);
+        let poll_interval = (frame_duration / 2).max(std::time::Duration::from_millis(4));
+        let mut anchor_instant = std::time::Instant::now();
+        let mut expected_playhead = anchor_frame;
 
         self.playback_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(interval_ms))
-                    .await;
+                cx.background_executor().timer(poll_interval).await;
 
                 let keep_running = this
                     .update(cx, |this, cx| {
@@ -406,21 +473,44 @@ impl WorkspaceView {
                             return false;
                         }
 
-                        let seq_duration = this.timeline.read(cx).effective_duration_frames();
-                        let current_playhead = this.timeline.read(cx).playhead();
-                        let is_looping = this.preview_monitor.read(cx).is_looping;
+                        let last = this.timeline.read(cx).last_playable_frame();
+                        let actual = this.timeline.read(cx).playhead();
 
-                        if current_playhead >= seq_duration {
-                            if is_looping && seq_duration > 0 {
-                                this.timeline.update(cx, |tl, cx| tl.set_playhead(0, cx));
+                        // A scrub or transport button moved the playhead behind our
+                        // back: re-anchor the clock instead of fighting the user.
+                        if actual != expected_playhead {
+                            anchor_frame = actual;
+                            anchor_instant = std::time::Instant::now();
+                            expected_playhead = actual;
+                        }
+
+                        let elapsed_frames =
+                            (anchor_instant.elapsed().as_secs_f64() * fps_f64).floor() as i64;
+                        let target = anchor_frame + elapsed_frames;
+
+                        if target > last {
+                            if this.preview_monitor.read(cx).is_looping && last >= 0 {
+                                anchor_frame = 0;
+                                anchor_instant = std::time::Instant::now();
+                                expected_playhead = 0;
+                                this.timeline
+                                    .update(cx, |tl, cx| tl.set_playhead_exact(0, cx));
                                 true
                             } else {
+                                // Stop ON the last frame that actually contains media,
+                                // never one frame past the end (a black frame).
+                                this.timeline
+                                    .update(cx, |tl, cx| tl.set_playhead_exact(last, cx));
                                 this.preview_monitor
                                     .update(cx, |mon, cx| mon.set_playing(false, cx));
                                 false
                             }
                         } else {
-                            this.timeline.update(cx, |tl, cx| tl.step_forward(1, cx));
+                            if target != expected_playhead {
+                                this.timeline
+                                    .update(cx, |tl, cx| tl.set_playhead_exact(target, cx));
+                                expected_playhead = target;
+                            }
                             true
                         }
                     })
@@ -735,8 +825,8 @@ impl Render for WorkspaceView {
             }))
             .on_action(cx.listener(|this, _: &ForwardToEndAction, _, cx| {
                 this.timeline.update(cx, |tl, cx| {
-                    let dur = tl.effective_duration_frames();
-                    tl.set_playhead(dur, cx);
+                    let last = tl.last_playable_frame();
+                    tl.set_playhead_exact(last, cx);
                 });
             }))
             .child({
