@@ -24,4 +24,8 @@ pub enum McpError {
     /// Tool is recognized but cannot run in this process.
     #[error("Tool '{tool}' is unavailable: {reason}")]
     Unsupported { tool: String, reason: String },
+
+    /// A motion graphics composition operation failed.
+    #[error("Composition operation failed: {0}")]
+    Composition(#[from] nodavideo_hyperframes_bridge::HyperframesError),
 }

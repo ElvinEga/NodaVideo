@@ -4,15 +4,16 @@
 //! Mutations are applied to a copy and committed only after the whole editing
 //! state validates, so a failed call never leaves a partial edit behind.
 
+use crate::composition;
 use crate::error::McpError;
 use crate::schema::McpToolDefinition;
-use nodavideo_hyperframes_bridge::TemplateRegistry;
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use std::path::PathBuf;
 use timeline::{
-    Asset, AudioClip, AudioClipProperties, Clip, MediaKind, TextBackground, TextClip,
-    TextClipProperties, TimelineEditingState, TimelineFrameIndex, TrackKind, VideoClip,
-    VideoClipProperties,
+    Asset, AudioClip, AudioClipProperties, Clip, CompositionClip, MediaKind, TextBackground,
+    TextClip, TextClipProperties, TimelineEditingState, TimelineFrameIndex, Track, TrackKind,
+    VideoClip, VideoClipProperties,
 };
 use ulid::Ulid;
 
@@ -21,6 +22,7 @@ use ulid::Ulid;
 pub struct McpExecutor {
     timeline: TimelineEditingState,
     selected_clips: HashSet<Ulid>,
+    project_root: Option<PathBuf>,
 }
 
 // Public APIs only
@@ -29,12 +31,20 @@ impl McpExecutor {
         Self {
             timeline,
             selected_clips: HashSet::new(),
+            project_root: None,
         }
     }
 
     #[must_use]
     pub fn with_selection(mut self, selected_clips: HashSet<Ulid>) -> Self {
         self.selected_clips = selected_clips;
+        self
+    }
+
+    /// Set the project directory used by composition tools for on-disk persistence.
+    #[must_use]
+    pub fn with_project_root(mut self, project_root: PathBuf) -> Self {
+        self.project_root = Some(project_root);
         self
     }
 
@@ -85,7 +95,14 @@ impl McpExecutor {
             "set_clip_audio" => self.set_clip_audio(args),
             "preview_changeset" => self.preview_changeset(args),
             "propose_changeset" => self.propose_changeset(args),
-            "list_composition_templates" => Ok(composition_templates()),
+            "add_composition_to_timeline" => self.add_composition_to_timeline(args),
+            "list_composition_templates" => Ok(composition::list_templates()),
+            "list_compositions"
+            | "create_composition"
+            | "inspect_composition"
+            | "edit_composition"
+            | "render_composition"
+            | "validate_composition" => self.execute_composition_tool(tool_name, args),
             "export_video" => Err(McpError::Unsupported {
                 tool: tool_name.to_string(),
                 reason:
@@ -289,6 +306,10 @@ impl McpExecutor {
                 text.timeline_start = start;
                 text.duration = frame_rate.duration(source_out - source_in);
             }
+            Clip::Composition(composition) => {
+                composition.timeline_start = start;
+                composition.duration = frame_rate.duration(source_out - source_in);
+            }
         }
         self.commit("trim_clip", new_timeline)?;
         Ok(json!({ "status": "trimmed", "clip_id": clip_id.to_string() }))
@@ -332,6 +353,10 @@ impl McpExecutor {
                 right.source_in = source_split;
             }
             (Clip::Text(left), Clip::Text(right)) => {
+                left.duration = frame_rate.duration(local);
+                right.duration = right.duration.saturating_sub(left.duration);
+            }
+            (Clip::Composition(left), Clip::Composition(right)) => {
                 left.duration = frame_rate.duration(local);
                 right.duration = right.duration.saturating_sub(left.duration);
             }
@@ -399,6 +424,92 @@ impl McpExecutor {
         new_timeline.clips.push(clip);
         self.commit("add_text_overlay", new_timeline)?;
         Ok(json!({ "status": "added", "clip_id": clip_id.to_string() }))
+    }
+
+    fn add_composition_to_timeline(&mut self, args: &Value) -> Result<Value, McpError> {
+        let composition_id = required_ulid("add_composition_to_timeline", args, "composition_id")?;
+        let start = required_frame("add_composition_to_timeline", args, "start_frame")?;
+        let requested_track_id = optional_ulid("add_composition_to_timeline", args, "track_id")?;
+        let duration_frames = optional_i64("add_composition_to_timeline", args, "duration_frames")?;
+        if let Some(frames) = duration_frames {
+            if frames <= 0 {
+                return Err(invalid(
+                    "add_composition_to_timeline",
+                    "duration_frames must be positive",
+                ));
+            }
+        }
+        let Some(project_root) = &self.project_root else {
+            return Err(McpError::Unsupported {
+                tool: "add_composition_to_timeline".to_string(),
+                reason: "placing a composition requires an open project directory".to_string(),
+            });
+        };
+        let asset = composition::find_composition(
+            "add_composition_to_timeline",
+            project_root,
+            composition_id,
+        )?;
+        let frame_rate = self.timeline.settings.frame_rate;
+        // 默认沿用合成自身时长（按墙钟换算）；显式 duration_frames 以时间线帧率计。
+        let duration = match duration_frames {
+            Some(frames) => frame_rate.duration(frames.into()),
+            None => asset.fps.duration(asset.duration_frames.into()),
+        };
+        let mut new_timeline = self.timeline.clone();
+        let track_id = if let Some(requested_id) = requested_track_id {
+            let track = new_timeline.track(requested_id).ok_or_else(|| {
+                invalid(
+                    "add_composition_to_timeline",
+                    format!("track {requested_id} does not exist"),
+                )
+            })?;
+            if track.kind != TrackKind::Video {
+                return Err(invalid(
+                    "add_composition_to_timeline",
+                    format!(
+                        "track {requested_id} is not a video track; compositions require a video track"
+                    ),
+                ));
+            }
+            requested_id
+        } else {
+            let number = new_timeline
+                .tracks
+                .iter()
+                .filter(|track| track.kind == TrackKind::Video)
+                .count()
+                + 1;
+            let new_track_id = Ulid::generate();
+            // 合成是覆盖层，新轨道置于最上方（设计页 24：Video 2 在 Video 1 之上）。
+            new_timeline.tracks.insert(
+                0,
+                Track {
+                    id: new_track_id,
+                    name: format!("Video {number}"),
+                    kind: TrackKind::Video,
+                    locked: false,
+                    muted: false,
+                    visible: true,
+                },
+            );
+            new_track_id
+        };
+        let clip = Clip::Composition(CompositionClip::new(
+            Ulid::generate(),
+            track_id,
+            composition_id,
+            start,
+            duration,
+        ));
+        let clip_id = clip.id();
+        new_timeline.clips.push(clip);
+        self.commit("add_composition_to_timeline", new_timeline)?;
+        Ok(json!({
+            "status": "added",
+            "clip_id": clip_id.to_string(),
+            "track_id": track_id.to_string(),
+        }))
     }
 
     fn generate_captions(&mut self, args: &Value) -> Result<Value, McpError> {
@@ -497,6 +608,12 @@ impl McpExecutor {
                     format!("clip {clip_id} is an audio clip"),
                 ));
             }
+            Clip::Composition(_) => {
+                return Err(invalid(
+                    "set_clip_transform",
+                    "composition clips are positioned through edit_composition parameters",
+                ));
+            }
         }
         self.commit("set_clip_transform", new_timeline)?;
         Ok(json!({ "status": "updated", "clip_id": clip_id.to_string() }))
@@ -534,6 +651,12 @@ impl McpExecutor {
                 return Err(invalid(
                     "set_clip_audio",
                     format!("clip {clip_id} is a text clip"),
+                ));
+            }
+            Clip::Composition(_) => {
+                return Err(invalid(
+                    "set_clip_audio",
+                    format!("clip {clip_id} is a composition clip"),
                 ));
             }
         }
@@ -583,6 +706,24 @@ impl McpExecutor {
         self.selected_clips
             .retain(|clip_id| self.timeline.clip(*clip_id).is_some());
         Ok(())
+    }
+
+    fn execute_composition_tool(&self, tool_name: &str, args: &Value) -> Result<Value, McpError> {
+        let Some(project_root) = &self.project_root else {
+            return Err(McpError::Unsupported {
+                tool: tool_name.to_string(),
+                reason: "composition tools require an open project directory".to_string(),
+            });
+        };
+        match tool_name {
+            "list_compositions" => composition::list_compositions(project_root),
+            "create_composition" => composition::create_composition(project_root, args),
+            "inspect_composition" => composition::inspect_composition(project_root, args),
+            "edit_composition" => composition::edit_composition(project_root, args),
+            "render_composition" => composition::render_composition(project_root, args),
+            "validate_composition" => composition::validate_composition(project_root, args),
+            other => Err(McpError::ToolNotFound(other.to_string())),
+        }
     }
 }
 
@@ -700,6 +841,7 @@ fn clip_kind_name(clip: &Clip) -> &'static str {
         Clip::Video(_) => "video",
         Clip::Audio(_) => "audio",
         Clip::Text(_) => "text",
+        Clip::Composition(_) => "composition",
     }
 }
 
@@ -717,36 +859,6 @@ fn track_kind_name(kind: TrackKind) -> &'static str {
         TrackKind::Audio => "audio",
         TrackKind::Text => "text",
     }
-}
-
-fn composition_templates() -> Value {
-    let registry = TemplateRegistry::builtin();
-    json!({
-        "templates": registry
-            .list()
-            .into_iter()
-            .map(|template| {
-                json!({
-                    "id": template.id,
-                    "name": template.name,
-                    "category": template.category,
-                    "default_duration_frames": template.default_duration_frames,
-                    "parameters": template
-                        .parameters
-                        .iter()
-                        .map(|parameter| {
-                            json!({
-                                "name": parameter.name,
-                                "label": parameter.label,
-                                "type": parameter.param_type,
-                                "default": parameter.default_value,
-                            })
-                        })
-                        .collect::<Vec<_>>(),
-                })
-            })
-            .collect::<Vec<_>>(),
-    })
 }
 
 fn text_properties(
@@ -833,14 +945,14 @@ fn parse_background_color(tool: &str, value: &str) -> Result<TextBackground, Mcp
     })
 }
 
-fn invalid(tool: &str, details: impl Into<String>) -> McpError {
+pub(crate) fn invalid(tool: &str, details: impl Into<String>) -> McpError {
     McpError::InvalidArguments {
         tool: tool.to_string(),
         details: details.into(),
     }
 }
 
-fn required_ulid(tool: &str, args: &Value, field: &str) -> Result<Ulid, McpError> {
+pub(crate) fn required_ulid(tool: &str, args: &Value, field: &str) -> Result<Ulid, McpError> {
     let Some(value) = args.get(field).and_then(Value::as_str) else {
         return Err(invalid(tool, format!("{field} must be a string")));
     };
@@ -865,14 +977,18 @@ fn required_frame(tool: &str, args: &Value, field: &str) -> Result<TimelineFrame
     Ok(TimelineFrameIndex::from(value))
 }
 
-fn required_str<'a>(tool: &str, args: &'a Value, field: &str) -> Result<&'a str, McpError> {
+pub(crate) fn required_str<'a>(
+    tool: &str,
+    args: &'a Value,
+    field: &str,
+) -> Result<&'a str, McpError> {
     match args.get(field).and_then(Value::as_str) {
         Some(value) => Ok(value),
         None => Err(invalid(tool, format!("{field} must be a string"))),
     }
 }
 
-fn optional_str<'a>(args: &'a Value, field: &str) -> Option<&'a str> {
+pub(crate) fn optional_str<'a>(args: &'a Value, field: &str) -> Option<&'a str> {
     args.get(field).and_then(Value::as_str)
 }
 

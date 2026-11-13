@@ -222,6 +222,110 @@ impl McpToolDefinition {
                 requires_approval: false,
             },
             Self {
+                name: "list_compositions".into(),
+                description: "List the motion graphics compositions saved in the current project, with their template and parameter values.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+                is_mutation: false,
+                requires_approval: false,
+            },
+            Self {
+                name: "create_composition".into(),
+                description: "Create a reusable motion graphics composition from a template and save it to the project. Returns its id for editing, rendering and placement. The composition stays editable; it is not flattened to video.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "template_id": { "type": "string", "description": "Template id from list_composition_templates" },
+                        "name": { "type": "string", "description": "Display name (defaults to the template name)" }
+                    },
+                    "required": ["template_id"],
+                    "additionalProperties": false
+                }),
+                is_mutation: true,
+                requires_approval: false,
+            },
+            Self {
+                name: "inspect_composition".into(),
+                description: "Inspect a project composition: its template, current parameter values, dimensions and duration.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "composition_id": { "type": "string", "description": "ULID of the composition" }
+                    },
+                    "required": ["composition_id"],
+                    "additionalProperties": false
+                }),
+                is_mutation: false,
+                requires_approval: false,
+            },
+            Self {
+                name: "edit_composition".into(),
+                description: "Update a composition's template parameters (text, colors, numbers). Values are validated against the template before saving, so the source stays editable and consistent.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "composition_id": { "type": "string", "description": "ULID of the composition" },
+                        "parameters": {
+                            "type": "object",
+                            "description": "Parameter name/value pairs to merge (e.g. {\"title\": \"Jane Doe\", \"accent_color\": \"#10b981\"})",
+                            "additionalProperties": true
+                        }
+                    },
+                    "required": ["composition_id", "parameters"],
+                    "additionalProperties": false
+                }),
+                is_mutation: true,
+                requires_approval: false,
+            },
+            Self {
+                name: "render_composition".into(),
+                description: "Render a composition to a transparent PNG cache asset and return its path. Rendering is a cache step; the editable composition source is preserved.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "composition_id": { "type": "string", "description": "ULID of the composition" }
+                    },
+                    "required": ["composition_id"],
+                    "additionalProperties": false
+                }),
+                is_mutation: false,
+                requires_approval: false,
+            },
+            Self {
+                name: "validate_composition".into(),
+                description: "Validate a composition's parameters against its template schema without rendering or modifying it.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "composition_id": { "type": "string", "description": "ULID of the composition" }
+                    },
+                    "required": ["composition_id"],
+                    "additionalProperties": false
+                }),
+                is_mutation: false,
+                requires_approval: false,
+            },
+            Self {
+                name: "add_composition_to_timeline".into(),
+                description: "Place an editable motion graphics composition on the timeline as a clip. Requires user approval. Omit track_id to create a dedicated upper video track; the composition stays editable and is not flattened to video.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "composition_id": { "type": "string", "description": "ULID of the project composition to place" },
+                        "start_frame": { "type": "integer", "minimum": 0, "description": "Timeline position in frames where the composition starts" },
+                        "track_id": { "type": "string", "description": "Optional ULID of an existing video track; omit to create a dedicated upper video track" },
+                        "duration_frames": { "type": "integer", "minimum": 1, "description": "Optional duration in timeline frames; defaults to the composition's native length" }
+                    },
+                    "required": ["composition_id", "start_frame"],
+                    "additionalProperties": false
+                }),
+                is_mutation: true,
+                requires_approval: true,
+            },
+            Self {
                 name: "set_clip_transform".into(),
                 description: "Update the transform of a video clip or the position of a text clip.".into(),
                 input_schema: serde_json::json!({
