@@ -2,7 +2,15 @@
 
 **Strategy:** Replace NodaVideo's `crates/` and `apps/` with OpenCut's `rust/libs/` and `rust/apps/`, then re-add NodaVideo-specific features (AI agents, skills, MCP) on top.
 
-**Status:** PROPOSED — awaiting user review. No code changes made yet.
+**Status:** IMPLEMENTED — Phases 1 and 2 are complete and the editor runs on the
+OpenCut core. Phase 3 AI-panel integration is in progress (assistant dock panel
+shipped; approval gating of MCP tools still pending).
+
+**Verified 2026-11-13:** `cargo check --all-targets`, `cargo clippy --workspace
+--all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `cargo test
+--workspace` all pass. The editor binary launches and stays running. Tests that
+need local media expect `.testdata/super-long.mp4` (repo root, gitignored);
+generate a stand-in with FFmpeg if it is absent.
 
 ---
 
