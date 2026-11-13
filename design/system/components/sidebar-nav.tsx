@@ -9,6 +9,12 @@ export const DESIGN_PAGES: DesignPage[] = [
   { file: "20-top-bar", label: "Desktop shell", group: "Workspace" },
   { file: "21-file-explorer", label: "Media browser", group: "Workspace" },
   { file: "23-text-clips", label: "Text clips", group: "Workspace" },
+  { file: "24-motion-graphics", label: "Motion graphics", group: "Motion graphics" },
+  {
+    file: "25-motion-graphics-editor",
+    label: "Motion Graphics Editor",
+    group: "Motion graphics",
+  },
   { file: "01-project-picker", label: "Project picker", group: "Workspace" },
   { file: "16-preview-panel", label: "Preview panel", group: "Panels" },
   { file: "15-property-panel", label: "Property panel", group: "Panels" },
