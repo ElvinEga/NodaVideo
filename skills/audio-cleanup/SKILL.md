@@ -4,7 +4,7 @@ id: audio-cleanup
 version: 1.0.0
 description: Automatically detect audio noise, normalize loudness to broadcast standards (-14 LUFS / -23 LUFS), and balance multitrack gain and stereo panning.
 tags: [audio, loudness, normalization, lufs, noise-reduction, ducking, mixing]
-recommended_tools: [get_timeline, set_clip_audio, preview_changeset, propose_changeset]
+tools: [get_timeline, set_clip_audio, preview_changeset, propose_changeset]
 ---
 
 # Audio Cleanup Skill
