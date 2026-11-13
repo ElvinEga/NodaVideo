@@ -131,11 +131,17 @@ The OpenCut core replacement was performed on 2026-11-13. See
 **Phase 1 (complete):** Editor core replaced. OpenCut libs, apps, .cargo, scripts
 copied in. NodaVideo AI crates preserved. Cargo.toml merged. MCP server stubbed.
 
-**Phase 2 (pending):** Wire AI crates into the editor as a dockable panel.
-Rewrite MCP server executor to target OpenCut's `EditingState`.
+**Phase 2 (complete):** MCP server executor rewritten against OpenCut's
+`TimelineEditingState` mutation API with transactional rollback. The AI crates
+are wired into the editor as a right-dock AI Assistant tab (`cmd-alt-a`),
+supporting provider cycling (Mock, Antigravity/Gemini ACP, Codex, Claude),
+streamed messages and thoughts, tool-call display, and approval cards. The
+panel displays agent tool activity; tool execution still belongs to the MCP
+server.
 
 **Phase 3 (pending):** HyperFrames bridge integration, production skills
-activation, undo/redo history, approval gating, transitions, snapping.
+activation, executing MCP tools from panel tool calls, approval gating of
+timeline mutations, transitions, snapping refinements.
 
 ## 7. Agent guidelines
 
