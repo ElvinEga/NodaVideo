@@ -15,6 +15,8 @@ struct SessionState {
     _config: AgentConfig,
     tx: broadcast::Sender<AgentEvent>,
     pending_approvals: HashMap<String, tokio::sync::oneshot::Sender<bool>>,
+    /// Editor-executed tool results awaited by the scripted composition loop, keyed by call id.
+    pending_tool_results: HashMap<String, tokio::sync::oneshot::Sender<(serde_json::Value, bool)>>,
 }
 
 /// Simulated agent provider capable of scripted responses and approval workflows without external CLIs.
@@ -67,6 +69,7 @@ impl AgentProvider for MockAgentProvider {
             _config: config,
             tx,
             pending_approvals: HashMap::new(),
+            pending_tool_results: HashMap::new(),
         };
 
         let mut lock = self.sessions.lock().unwrap();
@@ -211,6 +214,143 @@ impl AgentProvider for MockAgentProvider {
                         });
                     }
                 }
+            } else if msg_lower.contains("motion")
+                || msg_lower.contains("composition")
+                || msg_lower.contains("hyperframe")
+                || msg_lower.contains("lower third")
+                || msg_lower.contains("title")
+            {
+                let _ = tx.send(AgentEvent::MessageChunk(
+                    "I'll create an editable motion graphics lower third, render it natively, \
+                     and place it on the timeline."
+                        .into(),
+                ));
+
+                // 1. Create the composition from a built-in template (stays editable on disk).
+                let create_arguments = serde_json::json!({
+                    "template_id": "lower-third-modern",
+                    "name": "AI Lower Third",
+                });
+                let (create_result, create_error) = request_tool(
+                    &tx,
+                    &sessions_clone,
+                    session,
+                    "create_composition",
+                    create_arguments,
+                )
+                .await;
+                if create_error {
+                    let _ = tx.send(AgentEvent::MessageChunk(format!(
+                        "Could not create the composition: {create_result}"
+                    )));
+                    let _ = tx.send(AgentEvent::SessionCompleted {
+                        summary: Some("Motion graphics creation failed.".into()),
+                    });
+                    return;
+                }
+                let Some(composition_id_str) = create_result
+                    .get("composition")
+                    .and_then(|composition| composition.get("id"))
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    let _ = tx.send(AgentEvent::SessionError {
+                        code: "BAD_RESULT".into(),
+                        message: "create_composition returned no composition id".into(),
+                    });
+                    return;
+                };
+                let composition_id = composition_id_str.to_string();
+
+                // 2. Render it to a native transparent RGBA asset (resvg, off the UI thread).
+                let render_arguments =
+                    serde_json::json!({ "composition_id": composition_id.as_str() });
+                let (_, render_error) = request_tool(
+                    &tx,
+                    &sessions_clone,
+                    session,
+                    "render_composition",
+                    render_arguments,
+                )
+                .await;
+                if render_error {
+                    let _ = tx.send(AgentEvent::MessageChunk(
+                        "Could not render the composition; it remains in the Media Pool.".into(),
+                    ));
+                    let _ = tx.send(AgentEvent::SessionCompleted {
+                        summary: Some("Motion graphics rendering failed.".into()),
+                    });
+                    return;
+                }
+
+                // 3. Place it on the timeline. This mutates the edit, so it needs approval.
+                let request_id = format!("req_{}", uuid::Uuid::new_v4());
+                let (appr_tx, appr_rx) = tokio::sync::oneshot::channel();
+                {
+                    let mut lock = sessions_clone.lock().unwrap();
+                    if let Some(state) = lock.get_mut(&session) {
+                        state.pending_approvals.insert(request_id.clone(), appr_tx);
+                    }
+                }
+                let _ = tx.send(AgentEvent::ApprovalRequested {
+                    request_id: request_id.clone(),
+                    title: "Place Motion Graphic".into(),
+                    description: "Add the rendered lower third to a new upper video track. \
+                                  It stays editable and is not flattened to video."
+                        .into(),
+                    tool_name: "add_composition_to_timeline".into(),
+                    command_summary: "AddComposition { template: lower-third-modern }".into(),
+                    parameters: serde_json::json!({
+                        "composition_id": composition_id.as_str(),
+                        "start_frame": 0
+                    }),
+                });
+
+                let Ok(approved) = appr_rx.await else {
+                    return;
+                };
+                let _ = tx.send(AgentEvent::ApprovalDecision {
+                    request_id,
+                    approved,
+                });
+                if !approved {
+                    let _ = tx.send(AgentEvent::MessageChunk(
+                        "Placement was rejected; the composition stays in the Media Pool.".into(),
+                    ));
+                    let _ = tx.send(AgentEvent::SessionCompleted {
+                        summary: Some("Motion graphics placement cancelled.".into()),
+                    });
+                    return;
+                }
+
+                let place_arguments = serde_json::json!({
+                    "composition_id": composition_id.as_str(),
+                    "start_frame": 0
+                });
+                let (place_result, place_error) = request_tool(
+                    &tx,
+                    &sessions_clone,
+                    session,
+                    "add_composition_to_timeline",
+                    place_arguments,
+                )
+                .await;
+                if place_error {
+                    let _ = tx.send(AgentEvent::MessageChunk(format!(
+                        "Could not place the composition: {place_result}"
+                    )));
+                    let _ = tx.send(AgentEvent::SessionCompleted {
+                        summary: Some("Motion graphics placement failed.".into()),
+                    });
+                    return;
+                }
+                let _ = tx.send(AgentEvent::MessageChunk(
+                    "Done — the lower third is on the timeline and remains editable.".into(),
+                ));
+                let _ = tx.send(AgentEvent::SessionCompleted {
+                    summary: Some(
+                        "Created, rendered and placed an editable motion graphic.".into(),
+                    ),
+                });
             } else {
                 // Default friendly response
                 let _ = tx.send(AgentEvent::MessageChunk(format!(
@@ -247,6 +387,32 @@ impl AgentProvider for MockAgentProvider {
         }
     }
 
+    async fn submit_tool_result(
+        &self,
+        session: SessionId,
+        call_id: String,
+        result: serde_json::Value,
+        is_error: bool,
+    ) -> Result<(), AgentRuntimeError> {
+        let sender = {
+            let mut lock = self.sessions.lock().unwrap();
+            let state = lock
+                .get_mut(&session)
+                .ok_or(AgentRuntimeError::SessionNotFound(session))?;
+            state.pending_tool_results.remove(&call_id)
+        };
+
+        match sender {
+            Some(tx) => {
+                let _ = tx.send((result, is_error));
+                Ok(())
+            }
+            None => Err(AgentRuntimeError::Other(format!(
+                "No pending tool result found for call '{call_id}'"
+            ))),
+        }
+    }
+
     async fn cancel(&self, session: SessionId) -> Result<(), AgentRuntimeError> {
         let tx = {
             let lock = self.sessions.lock().unwrap();
@@ -273,5 +439,47 @@ impl AgentProvider for MockAgentProvider {
             .get(&session)
             .ok_or(AgentRuntimeError::SessionNotFound(session))?;
         Ok(state.tx.subscribe())
+    }
+}
+
+/// Emits a tool call for the editor to execute in-process and awaits its real result.
+/// The editor delivers the result through `submit_tool_result`, keyed by the call id.
+/// Registering the reply channel before emitting avoids a race with a fast editor.
+async fn request_tool(
+    tx: &broadcast::Sender<AgentEvent>,
+    sessions: &Arc<Mutex<HashMap<SessionId, SessionState>>>,
+    session: SessionId,
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> (serde_json::Value, bool) {
+    let call_id = format!("call_{}", uuid::Uuid::new_v4());
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    {
+        let mut lock = sessions.lock().unwrap();
+        match lock.get_mut(&session) {
+            Some(state) => {
+                state
+                    .pending_tool_results
+                    .insert(call_id.clone(), result_tx);
+            }
+            None => {
+                return (
+                    serde_json::json!({ "error": "session no longer exists" }),
+                    true,
+                );
+            }
+        }
+    }
+    let _ = tx.send(AgentEvent::ToolCallRequested {
+        call_id,
+        tool_name: tool_name.to_string(),
+        arguments,
+    });
+    match result_rx.await {
+        Ok((result, is_error)) => (result, is_error),
+        Err(_) => (
+            serde_json::json!({ "error": "tool result channel closed" }),
+            true,
+        ),
     }
 }

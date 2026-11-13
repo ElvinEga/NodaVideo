@@ -80,6 +80,22 @@ pub trait AgentProvider: Send + Sync {
         approved: bool,
     ) -> Result<(), AgentRuntimeError>;
 
+    /// Feed the result of an editor-executed tool call back into the session.
+    ///
+    /// Providers that delegate tool execution to the editor (the offline mock)
+    /// use this to continue their turn. Providers that run their own MCP client
+    /// execute tools themselves and ignore it; the default implementation is a
+    /// no-op so they need not opt in.
+    async fn submit_tool_result(
+        &self,
+        _session: SessionId,
+        _call_id: String,
+        _result: serde_json::Value,
+        _is_error: bool,
+    ) -> Result<(), AgentRuntimeError> {
+        Ok(())
+    }
+
     /// Cancel an in-progress session execution.
     async fn cancel(&self, session: SessionId) -> Result<(), AgentRuntimeError>;
 
