@@ -336,6 +336,22 @@ impl Editor {
         }
     }
 
+    pub(crate) fn ordered_timelines(&self) -> Vec<PathBuf> {
+        let mut list = Vec::new();
+        for entry in &self.explorer.file_tree {
+            if entry.kind == FileTreeEntryKind::Timeline {
+                let rel = crate::timeline_document::relative_asset_path(
+                    &self.project_root,
+                    &entry.absolute_path,
+                );
+                if !list.contains(&rel) {
+                    list.push(rel);
+                }
+            }
+        }
+        list
+    }
+
     pub(crate) fn ordered_media_videos(&self) -> Vec<PathBuf> {
         let mut list = Vec::new();
         for entry in &self.explorer.imported_media {
@@ -418,19 +434,88 @@ impl Editor {
                 }
             }
             PreviewTarget::Timeline { .. } => {
+                let Some(timeline) = self.timeline.as_ref() else {
+                    return;
+                };
+                let playhead = timeline.playhead();
+                let timeline_path = timeline.path.clone();
+                let threshold = TimelineFrameIndex::from(10); // ~0.4s threshold
+
+                // Collect all clip start points on the timeline
+                let mut cut_points: Vec<TimelineFrameIndex> = timeline
+                    .editing_state
+                    .clips
+                    .iter()
+                    .map(|c| c.timeline_start())
+                    .collect();
+                cut_points.push(TimelineFrameIndex::ZERO);
+                cut_points.sort();
+                cut_points.dedup();
+
+                let current_cut = cut_points
+                    .iter()
+                    .rev()
+                    .find(|&&pt| pt <= playhead)
+                    .copied()
+                    .unwrap_or(TimelineFrameIndex::ZERO);
+
+                let target = if playhead > current_cut + threshold {
+                    // Inside a video/clip: first go to beginning of current video
+                    current_cut
+                } else {
+                    // Already at or near start: go to previous video on timeline
+                    cut_points
+                        .iter()
+                        .rev()
+                        .find(|&&pt| pt < current_cut)
+                        .copied()
+                        .unwrap_or(TimelineFrameIndex::ZERO)
+                };
+
+                // If already at beginning of timeline and clicking previous again, switch to previous timeline
+                if target == TimelineFrameIndex::ZERO && playhead == TimelineFrameIndex::ZERO {
+                    let all_timelines = self.ordered_timelines();
+                    let current_rel = crate::timeline_document::relative_asset_path(
+                        &self.project_root,
+                        &timeline_path,
+                    );
+                    if let Some(pos) = all_timelines
+                        .iter()
+                        .position(|p| p == &current_rel)
+                        .filter(|&pos| pos > 0)
+                    {
+                        let prev_tl = all_timelines[pos - 1].clone();
+                        self.emit_event(cx, AppEvent::OpenTimeline { path: prev_tl });
+                        self.emit_event(cx, AppEvent::RefreshPropertyPanel);
+                        return;
+                    }
+                }
+
                 if let Some(timeline) = self.timeline.as_mut() {
-                    timeline.set_playhead(TimelineFrameIndex::ZERO);
+                    timeline.set_playhead(target);
                     let _ = timeline.save();
                 }
                 self.emit_event(
                     cx,
                     AppEvent::TimelineSeek {
-                        frame_index: TimelineFrameIndex::ZERO,
+                        frame_index: target,
                     },
                 );
                 cx.notify();
             }
-            _ => {}
+            _ => {
+                if let Some(timeline) = self.timeline.as_mut() {
+                    timeline.set_playhead(TimelineFrameIndex::ZERO);
+                    let _ = timeline.save();
+                    self.emit_event(
+                        cx,
+                        AppEvent::TimelineSeek {
+                            frame_index: TimelineFrameIndex::ZERO,
+                        },
+                    );
+                    cx.notify();
+                }
+            }
         }
     }
 
@@ -471,10 +556,92 @@ impl Editor {
                 }
             }
             PreviewTarget::Timeline { .. } => {
-                let _ = self.step_playhead(24);
-                cx.notify();
+                let Some(timeline) = self.timeline.as_ref() else {
+                    return;
+                };
+                let playhead = timeline.playhead();
+                let timeline_path = timeline.path.clone();
+
+                let mut cut_points: Vec<TimelineFrameIndex> = timeline
+                    .editing_state
+                    .clips
+                    .iter()
+                    .map(|c| c.timeline_start())
+                    .collect();
+                cut_points.push(TimelineFrameIndex::ZERO);
+                cut_points.sort();
+                cut_points.dedup();
+
+                if let Some(&next_cut) = cut_points.iter().find(|&&pt| pt > playhead) {
+                    // Next video on timeline
+                    if let Some(timeline) = self.timeline.as_mut() {
+                        timeline.set_playhead(next_cut);
+                        let _ = timeline.save();
+                    }
+                    self.emit_event(
+                        cx,
+                        AppEvent::TimelineSeek {
+                            frame_index: next_cut,
+                        },
+                    );
+                    cx.notify();
+                } else {
+                    // Past last clip: advance to next timeline if available, or loop to start
+                    let all_timelines = self.ordered_timelines();
+                    let current_rel = crate::timeline_document::relative_asset_path(
+                        &self.project_root,
+                        &timeline_path,
+                    );
+                    let total_tls = all_timelines.len();
+                    if let Some(pos) = all_timelines
+                        .iter()
+                        .position(|p| p == &current_rel)
+                        .filter(|&pos| pos + 1 < total_tls)
+                    {
+                        let next_tl = all_timelines[pos + 1].clone();
+                        self.emit_event(cx, AppEvent::OpenTimeline { path: next_tl });
+                        self.emit_event(cx, AppEvent::RefreshPropertyPanel);
+                        return;
+                    }
+                    if let Some(timeline) = self.timeline.as_mut() {
+                        timeline.set_playhead(TimelineFrameIndex::ZERO);
+                        let _ = timeline.save();
+                    }
+                    self.emit_event(
+                        cx,
+                        AppEvent::TimelineSeek {
+                            frame_index: TimelineFrameIndex::ZERO,
+                        },
+                    );
+                    cx.notify();
+                }
             }
             PreviewTarget::None => {
+                if let Some(timeline) = self.timeline.as_mut() {
+                    let playhead = timeline.playhead();
+                    let mut cut_points: Vec<TimelineFrameIndex> = timeline
+                        .editing_state
+                        .clips
+                        .iter()
+                        .map(|c| c.timeline_start())
+                        .collect();
+                    cut_points.push(TimelineFrameIndex::ZERO);
+                    cut_points.sort();
+                    cut_points.dedup();
+
+                    if let Some(&next_cut) = cut_points.iter().find(|&&pt| pt > playhead) {
+                        timeline.set_playhead(next_cut);
+                        let _ = timeline.save();
+                        self.emit_event(
+                            cx,
+                            AppEvent::TimelineSeek {
+                                frame_index: next_cut,
+                            },
+                        );
+                        cx.notify();
+                        return;
+                    }
+                }
                 let videos = self.ordered_media_videos();
                 if let Some(first) = videos.first() {
                     self.emit_event(

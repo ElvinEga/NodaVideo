@@ -1,7 +1,4 @@
 use crate::Seeker;
-use crate::playback_row::{
-    PLAYBACK_ROW_HEIGHT, PlaybackIcon, playback_button_view, playback_row_view,
-};
 use crate::progress_bar::{
     PROGRESS_BAR_HEIGHT, ProgressBarDrag, progress, progress_bar, seek_position,
 };
@@ -12,7 +9,7 @@ use gpui::{
 };
 use std::{cell::Cell, rc::Rc};
 
-pub const TIMELINE_CONTROLS_HEIGHT: f32 = 1.0 + PROGRESS_BAR_HEIGHT + PLAYBACK_ROW_HEIGHT; // 1：控制栏顶部分隔线。
+pub const TIMELINE_CONTROLS_HEIGHT: f32 = 1.0 + PROGRESS_BAR_HEIGHT; // 1：控制栏顶部分隔线。
 
 /// Standalone view: picture, progress bar, and playback controls.
 impl Render for TimelinePlayer {
@@ -36,11 +33,6 @@ impl TimelinePlayer {
             duration
         } else {
             self.backend().clock_position() // 帧起点会把进度条拉到点击位置左侧，最多一帧。
-        };
-        let playback_icon = match (ended, self.backend().is_playing()) {
-            (true, _) => PlaybackIcon::Replay,
-            (_, true) => PlaybackIcon::Pause,
-            (_, false) => PlaybackIcon::Play,
         };
         let drag_seek_bounds = seek_bounds.clone();
 
@@ -89,19 +81,7 @@ impl TimelinePlayer {
                                 player.request_seek(target, window, cx);
                             },
                         )),
-                    )
-                    .child(playback_row_view(
-                        playback_button_view("play-pause", playback_icon).on_click(cx.listener(
-                            |player, _, _, cx| {
-                                if let Err(error) = player.toggle_playback(cx) {
-                                    player.fail(error, cx);
-                                }
-                            },
-                        )),
-                        position,
-                        duration,
-                        self.title.clone(),
-                    )),
+                    ),
             )
             .into_any_element()
     }

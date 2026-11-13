@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! The playback row shared by the video and timeline players: playback button, time, and title.
 
 use crate::format_time;
