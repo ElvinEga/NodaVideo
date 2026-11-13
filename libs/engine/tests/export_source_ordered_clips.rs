@@ -29,7 +29,9 @@ fn export_source_ordered_clips() -> Result<()> {
         video_bitrate: 8_000_000,
         overwrite: false,
     };
-    let test_video = options.project_root.join("../../../.testdata/super-long.mp4");
+    let test_video = options
+        .project_root
+        .join("../../../.testdata/super-long.mp4");
     if !test_video.exists() {
         println!("Skipping benchmark test: fixture not present at {test_video:?}");
         return Ok(());
