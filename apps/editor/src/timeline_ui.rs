@@ -539,6 +539,14 @@ impl Editor {
             .expect("timeline view requires timeline state");
         let selection_active = timeline.interaction.active_tool == TimelineTool::Selection;
         let blade_active = timeline.interaction.active_tool == TimelineTool::Blade;
+        let snap_active = timeline.snapping_enabled;
+        let magnet_active = timeline.track_magnet_enabled;
+
+        let selection_icon_color = if selection_active { rgb(0x818cf8) } else { rgb(MUTED) };
+        let blade_icon_color = if blade_active { rgb(0x818cf8) } else { rgb(MUTED) };
+        let snap_icon_color = if snap_active { rgb(0x818cf8) } else { rgb(MUTED) };
+        let magnet_icon_color = if magnet_active { rgb(0x818cf8) } else { rgb(MUTED) };
+
         let timeline_title = timeline
             .path
             .file_stem()
@@ -605,11 +613,10 @@ impl Editor {
                                     .justify_center()
                                     .cursor_pointer()
                                     .when(selection_active, |this| {
-                                        this.bg(rgb(0x312e81)).text_color(rgb(0x818cf8))
+                                        this.bg(rgb(0x312e81))
                                     })
                                     .when(!selection_active, |this| {
-                                        this.text_color(rgb(MUTED))
-                                            .hover(|s| s.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                                        this.hover(|s| s.bg(rgb(SURFACE_HOVER)))
                                     })
                                     .tooltip(|_, cx| {
                                         crate::tooltip::tooltip_view("Selection Tool", Some("V"), cx)
@@ -619,7 +626,15 @@ impl Editor {
                                         timeline.activate_timeline_tool(TimelineTool::Selection);
                                         cx.notify();
                                     }))
-                                    .child(svg().path(IconName::Pointer.path()).size(px(13.0))),
+                                    .child(
+                                        svg()
+                                            .path(IconName::Pointer.path())
+                                            .size(px(13.0))
+                                            .text_color(selection_icon_color)
+                                            .when(!selection_active, |this| {
+                                                this.hover(|s| s.text_color(rgb(TEXT)))
+                                            }),
+                                    ),
                             )
                             // Blade Tool
                             .child(
@@ -633,11 +648,10 @@ impl Editor {
                                     .justify_center()
                                     .cursor_pointer()
                                     .when(blade_active, |this| {
-                                        this.bg(rgb(0x312e81)).text_color(rgb(0x818cf8))
+                                        this.bg(rgb(0x312e81))
                                     })
                                     .when(!blade_active, |this| {
-                                        this.text_color(rgb(MUTED))
-                                            .hover(|s| s.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                                        this.hover(|s| s.bg(rgb(SURFACE_HOVER)))
                                     })
                                     .tooltip(|_, cx| {
                                         crate::tooltip::tooltip_view("Blade Tool", Some("B"), cx)
@@ -647,7 +661,15 @@ impl Editor {
                                         timeline.activate_timeline_tool(TimelineTool::Blade);
                                         cx.notify();
                                     }))
-                                    .child(svg().path(IconName::Scissors.path()).size(px(13.0))),
+                                    .child(
+                                        svg()
+                                            .path(IconName::Scissors.path())
+                                            .size(px(13.0))
+                                            .text_color(blade_icon_color)
+                                            .when(!blade_active, |this| {
+                                                this.hover(|s| s.text_color(rgb(TEXT)))
+                                            }),
+                                    ),
                             )
                             // Snap Toggle
                             .child(
@@ -660,12 +682,11 @@ impl Editor {
                                     .items_center()
                                     .justify_center()
                                     .cursor_pointer()
-                                    .when(timeline.snapping_enabled, |this| {
-                                        this.bg(rgb(0x312e81)).text_color(rgb(0x818cf8))
+                                    .when(snap_active, |this| {
+                                        this.bg(rgb(0x312e81))
                                     })
-                                    .when(!timeline.snapping_enabled, |this| {
-                                        this.text_color(rgb(MUTED))
-                                            .hover(|s| s.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                                    .when(!snap_active, |this| {
+                                        this.hover(|s| s.bg(rgb(SURFACE_HOVER)))
                                     })
                                     .tooltip(|_, cx| {
                                         crate::tooltip::tooltip_view("Snapping", Some("S"), cx)
@@ -674,7 +695,15 @@ impl Editor {
                                         editor.toggle_snapping();
                                         cx.notify();
                                     }))
-                                    .child(svg().path(IconName::Snap.path()).size(px(13.0))),
+                                    .child(
+                                        svg()
+                                            .path(IconName::Snap.path())
+                                            .size(px(13.0))
+                                            .text_color(snap_icon_color)
+                                            .when(!snap_active, |this| {
+                                                this.hover(|s| s.text_color(rgb(TEXT)))
+                                            }),
+                                    ),
                             )
                             // Magnet Toggle
                             .child(
@@ -687,12 +716,11 @@ impl Editor {
                                     .items_center()
                                     .justify_center()
                                     .cursor_pointer()
-                                    .when(timeline.track_magnet_enabled, |this| {
-                                        this.bg(rgb(0x312e81)).text_color(rgb(0x818cf8))
+                                    .when(magnet_active, |this| {
+                                        this.bg(rgb(0x312e81))
                                     })
-                                    .when(!timeline.track_magnet_enabled, |this| {
-                                        this.text_color(rgb(MUTED))
-                                            .hover(|s| s.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                                    .when(!magnet_active, |this| {
+                                        this.hover(|s| s.bg(rgb(SURFACE_HOVER)))
                                     })
                                     .tooltip(|_, cx| {
                                         crate::tooltip::tooltip_view("Track Magnet", Some("Ripple"), cx)
@@ -701,8 +729,16 @@ impl Editor {
                                         editor.toggle_track_magnet();
                                         cx.notify();
                                     }))
-                                    .child(svg().path(IconName::Magnet.path()).size(px(13.0))),
-                            ),
+                                    .child(
+                                        svg()
+                                            .path(IconName::Magnet.path())
+                                            .size(px(13.0))
+                                            .text_color(magnet_icon_color)
+                                            .when(!magnet_active, |this| {
+                                                this.hover(|s| s.text_color(rgb(TEXT)))
+                                            }),
+                                    ),
+                            )
                     )
                     // Divider
                     .child(div().h(px(14.0)).border_r_1().border_color(rgb(BORDER)))
@@ -723,8 +759,7 @@ impl Editor {
                                     .items_center()
                                     .justify_center()
                                     .cursor_pointer()
-                                    .text_color(rgb(MUTED))
-                                    .hover(|s| s.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                                    .hover(|s| s.bg(rgb(SURFACE_HOVER)))
                                     .tooltip(|_, cx| {
                                         crate::tooltip::tooltip_view("Add Video Track", None, cx)
                                     })
@@ -734,7 +769,13 @@ impl Editor {
                                         }
                                         cx.notify();
                                     }))
-                                    .child(svg().path(IconName::Video.path()).size(px(13.0))),
+                                    .child(
+                                        svg()
+                                            .path(IconName::Video.path())
+                                            .size(px(13.0))
+                                            .text_color(rgb(MUTED))
+                                            .hover(|s| s.text_color(rgb(TEXT))),
+                                    ),
                             )
                             // Add Audio Track
                             .child(
@@ -747,8 +788,7 @@ impl Editor {
                                     .items_center()
                                     .justify_center()
                                     .cursor_pointer()
-                                    .text_color(rgb(MUTED))
-                                    .hover(|s| s.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                                    .hover(|s| s.bg(rgb(SURFACE_HOVER)))
                                     .tooltip(|_, cx| {
                                         crate::tooltip::tooltip_view("Add Audio Track", None, cx)
                                     })
@@ -758,7 +798,13 @@ impl Editor {
                                         }
                                         cx.notify();
                                     }))
-                                    .child(svg().path(IconName::Mic.path()).size(px(13.0))),
+                                    .child(
+                                        svg()
+                                            .path(IconName::Mic.path())
+                                            .size(px(13.0))
+                                            .text_color(rgb(MUTED))
+                                            .hover(|s| s.text_color(rgb(TEXT))),
+                                    ),
                             )
                             // Add Text Track
                             .child(
@@ -771,8 +817,7 @@ impl Editor {
                                     .items_center()
                                     .justify_center()
                                     .cursor_pointer()
-                                    .text_color(rgb(MUTED))
-                                    .hover(|s| s.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                                    .hover(|s| s.bg(rgb(SURFACE_HOVER)))
                                     .tooltip(|_, cx| {
                                         crate::tooltip::tooltip_view("Add Text Track", None, cx)
                                     })
@@ -782,7 +827,13 @@ impl Editor {
                                         }
                                         cx.notify();
                                     }))
-                                    .child(svg().path(IconName::Text.path()).size(px(13.0))),
+                                    .child(
+                                        svg()
+                                            .path(IconName::Text.path())
+                                            .size(px(13.0))
+                                            .text_color(rgb(MUTED))
+                                            .hover(|s| s.text_color(rgb(TEXT))),
+                                    ),
                             ),
                     ),
             )
@@ -837,7 +888,13 @@ impl Editor {
                                         }
                                         cx.notify();
                                     }))
-                                    .child(svg().path(IconName::Minus.path()).size(px(11.0))),
+                                    .child(
+                                        svg()
+                                            .path(IconName::Minus.path())
+                                            .size(px(11.0))
+                                            .text_color(rgb(MUTED))
+                                            .hover(|s| s.text_color(rgb(TEXT))),
+                                    ),
                             )
                             // Sleek Zoom Progress Rail
                             .child({
@@ -942,7 +999,13 @@ impl Editor {
                                         }
                                         cx.notify();
                                     }))
-                                    .child(svg().path(IconName::Plus.path()).size(px(11.0))),
+                                    .child(
+                                        svg()
+                                            .path(IconName::Plus.path())
+                                            .size(px(11.0))
+                                            .text_color(rgb(MUTED))
+                                            .hover(|s| s.text_color(rgb(TEXT))),
+                                    ),
                             ),
                     ),
             )
