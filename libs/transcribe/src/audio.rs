@@ -397,7 +397,8 @@ impl AudioReader {
         if self.queue.is_empty() {
             self.queue_start = start;
         }
-        for pair in frame.data(0).chunks_exact(8).take(frame.samples()) {
+        let (pairs, _) = frame.data(0).as_chunks::<8>();
+        for pair in pairs.iter().take(frame.samples()) {
             self.queue.push_back([
                 f32::from_ne_bytes([pair[0], pair[1], pair[2], pair[3]]),
                 f32::from_ne_bytes([pair[4], pair[5], pair[6], pair[7]]),

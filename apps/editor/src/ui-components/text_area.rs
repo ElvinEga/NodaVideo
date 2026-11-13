@@ -669,14 +669,6 @@ struct TextAreaPrepaintState {
     selection: Vec<PaintQuad>,
 }
 
-impl IntoElement for TextAreaElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for TextAreaElement {
     type RequestLayoutState = ();
     type PrepaintState = TextAreaPrepaintState;

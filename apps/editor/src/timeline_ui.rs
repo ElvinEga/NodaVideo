@@ -85,7 +85,7 @@ impl Editor {
             .bg(rgb(0x0a0a0c))
             .on_mouse_move(cx.listener(Self::update_clip_move))
             .on_mouse_move(cx.listener(Self::update_marquee_selection))
-            .on_scroll_wheel(cx.listener(Self::finish_timeline_scroll))
+            .on_scroll(cx.listener(Self::finish_timeline_scroll))
             .on_pinch(cx.listener(pinch_timeline))
             .on_mouse_up(MouseButton::Left, cx.listener(finish_clip_move))
             .on_mouse_up(

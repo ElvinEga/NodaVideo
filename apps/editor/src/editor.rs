@@ -1,3 +1,4 @@
+use crate::assistant::{AssistantState, register_assistant_providers};
 use crate::context_menu::ContextMenu;
 use crate::dialog_missing_media::MissingMediaDialog;
 use crate::editing::ClipClipboard;
@@ -31,6 +32,8 @@ pub(crate) struct Editor {
     pub(super) property_panel_state: PropertyPanelState,
     pub(super) property_panel: PropertyPanel, // 点击文件或片段后由事件重建，render 只读它。
     pub(super) settings_open: bool,
+    pub(super) right_dock: RightDockTab,
+    pub(super) assistant: AssistantState,
 
     pub(super) focus_handle: FocusHandle,
     pub(super) clipboard: Option<ClipClipboard>,
@@ -83,6 +86,17 @@ impl Editor {
         };
 
         let project_local_settings = load_project_local_settings(&project_root);
+        let assistant = AssistantState::new(cx.new(|cx| {
+            TextInput::new_field(
+                "assistant-input",
+                String::new(),
+                "Ask the assistant to edit the timeline…",
+                focus_handle.clone(),
+                cx,
+            )
+        }));
+        register_assistant_providers(assistant.runtime(), cx);
+
         let mut editor = Self {
             // Entities
             event_bus,
@@ -97,6 +111,8 @@ impl Editor {
             property_panel_state,
             property_panel: PropertyPanel::None,
             settings_open: false,
+            right_dock: RightDockTab::Inspector,
+            assistant,
             global_settings_input: None,
             missing_media_dialog: None,
             timeline,
@@ -116,6 +132,13 @@ impl Editor {
     pub(crate) fn emit_event(&mut self, cx: &mut Context<Self>, event: AppEvent) {
         self.event_bus.update(cx, |_, cx| cx.emit(event));
     }
+}
+
+/// Which panel occupies the right dock of the upper workspace.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RightDockTab {
+    Inspector,
+    Assistant,
 }
 
 /// 读取项目设置中的 active timeline；文件已被移走或删除时返回 None。

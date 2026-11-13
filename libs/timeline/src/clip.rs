@@ -95,7 +95,7 @@ impl Default for TextClipProperties {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "timeline-schema", derive(schemars::JsonSchema))]
 // https://serde.rs/enum-representations.html#adjacently-tagged
 #[serde(tag = "kind", content = "data")]
@@ -106,7 +106,7 @@ pub enum Clip {
     Text(TextClip),
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[cfg_attr(feature = "timeline-schema", derive(schemars::JsonSchema))]
 pub struct VideoClip {
     #[serde(deserialize_with = "deserialize_ulid")]
@@ -127,7 +127,7 @@ pub struct VideoClip {
     pub audio_properties: AudioClipProperties,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[cfg_attr(feature = "timeline-schema", derive(schemars::JsonSchema))]
 pub struct AudioClip {
     #[serde(deserialize_with = "deserialize_ulid")]
@@ -146,7 +146,7 @@ pub struct AudioClip {
     pub audio_properties: AudioClipProperties,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[cfg_attr(feature = "timeline-schema", derive(schemars::JsonSchema))]
 pub struct TextClip {
     #[serde(deserialize_with = "deserialize_ulid")]

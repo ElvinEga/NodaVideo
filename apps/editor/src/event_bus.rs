@@ -124,6 +124,16 @@ pub(crate) enum AppEvent {
     SrtFileSelected {
         path: PathBuf, // 相对于项目根目录
     },
+    /// The user sent a message from the AI assistant dock.
+    AssistantMessageSubmitted {
+        message: String,
+    },
+    /// The user switched the AI assistant provider.
+    AssistantProviderCycled,
+    /// The user approved or rejected the pending assistant action.
+    AssistantApprovalDecided {
+        approved: bool,
+    },
     WaveformsGeneration {
         paths: Vec<PathBuf>, // 素材的绝对路径
     },
@@ -616,6 +626,17 @@ async fn handle_app_event(
         | AppEvent::Transcribe { .. }
         | AppEvent::ExportTimeline { .. } => {
             editor.update(cx, |_, cx| cx.notify());
+        }
+        AppEvent::AssistantMessageSubmitted { message } => {
+            editor.update(cx, |editor, cx| editor.send_assistant_message(message, cx));
+        }
+        AppEvent::AssistantProviderCycled => {
+            editor.update(cx, |editor, cx| editor.cycle_assistant_provider(cx));
+        }
+        AppEvent::AssistantApprovalDecided { approved } => {
+            editor.update(cx, |editor, cx| {
+                editor.submit_assistant_approval(approved, cx)
+            });
         }
         AppEvent::HorizontalSplitResized(state) => {
             editor.update(cx, |editor, cx| -> Result<()> {

@@ -42,7 +42,7 @@ fn preserves_gui_aliases_without_converting_clip_types() {
         serde_json::from_str(include_str!("fixtures/shared.timeline.json")).unwrap();
     let editing = &mut raw["editing_state"];
     editing["tracks"][2]["kind"] = json!("audio");
-    editing["assets"][1]["kind"] = json!("audio");
+    editing["assets"][1]["kind"] = json!("Audio");
     editing["clips"][2]["data"]["id"] = json!(99);
     let tracks = editing.as_object_mut().unwrap().remove("tracks").unwrap();
     editing["layers"] = tracks;

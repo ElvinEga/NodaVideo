@@ -702,14 +702,6 @@ struct TextInputPrepaintState {
     selection: Option<PaintQuad>,
 }
 
-impl IntoElement for TextInputElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for TextInputElement {
     type RequestLayoutState = ();
     type PrepaintState = TextInputPrepaintState;

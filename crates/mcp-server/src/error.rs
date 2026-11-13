@@ -20,4 +20,8 @@ pub enum McpError {
     /// Tool requires user approval before it can execute.
     #[error("User approval required for '{tool}': {reason}")]
     ApprovalRequired { tool: String, reason: String },
+
+    /// Tool is recognized but cannot run in this process.
+    #[error("Tool '{tool}' is unavailable: {reason}")]
+    Unsupported { tool: String, reason: String },
 }

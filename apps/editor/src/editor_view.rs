@@ -1,7 +1,7 @@
 use crate::actions::EDITOR_KEY_CONTEXT;
 use crate::asset::IconName;
 use crate::dialog_missing_media::missing_media_dialog_view;
-use crate::editor::Editor;
+use crate::editor::{Editor, RightDockTab};
 use crate::event_bus::{AppEvent, EventBus};
 use crate::layout::{
     MIN_MEDIA_PANEL_WIDTH, MIN_PREVIEW_WIDTH, MIN_PROPERTY_PANEL_WIDTH, MIN_TIMELINE_HEIGHT,
@@ -10,7 +10,7 @@ use crate::layout::{
 use crate::project_picker;
 use crate::property_panel::property_panel_view;
 use crate::settings::settings_modal_view;
-use crate::theme::{BACKGROUND, BORDER, MUTED, PANEL, TEXT};
+use crate::theme::{ACCENT, BACKGROUND, BORDER, MUTED, PANEL, SURFACE, SURFACE_HOVER, TEXT};
 use crate::ui_components::cyberpunk_button::{
     button_cyberpunk_primary, button_cyberpunk_secondary,
 };
@@ -18,7 +18,9 @@ use crate::ui_components::{
     HorizontalSplit, HorizontalSplitConstraints, VerticalSplit, VerticalSplitConstraints,
 };
 use gpui::prelude::*;
-use gpui::{App, CursorStyle, MouseButton, MouseDownEvent, Window, canvas, div, img, px, rgb};
+use gpui::{
+    App, CursorStyle, FontWeight, MouseButton, MouseDownEvent, Window, canvas, div, img, px, rgb,
+};
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -121,6 +123,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::action_toggle_fullscreen))
             .on_action(cx.listener(Self::action_exit_fullscreen))
             .on_action(cx.listener(Self::action_toggle_inspector))
+            .on_action(cx.listener(Self::action_toggle_assistant))
             .on_action(cx.listener(Self::action_reveal_in_finder))
             .on_action(cx.listener(Self::action_open_in_default_app))
             .capture_any_mouse_down(cx.listener(|editor, event: &MouseDownEvent, window, cx| {
@@ -142,7 +145,7 @@ impl Render for Editor {
                 self.event_bus.clone(),
                 workspace_height,
                 WORKSPACE_SPLIT_CONSTRAINTS,
-                self.upper_workspace(editor_width, workspace_heights.top, cx),
+                self.upper_workspace(editor_width, workspace_heights.top, window, cx),
                 self.timeline_view(editor_width, cx),
             ))
             .when_some(context_menu, |this, menu| this.child(menu))
@@ -189,6 +192,7 @@ impl Editor {
         &self,
         width: f32,
         preview_height: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let constraints = HorizontalSplitConstraints {
@@ -197,7 +201,6 @@ impl Editor {
             min_right: MIN_PROPERTY_PANEL_WIDTH,
         };
         let widths = self.upper_split_state.read(cx).widths(width, constraints);
-        let right_panel_view = property_panel_view(&self.property_panel);
         HorizontalSplit::new(
             "editor-upper-workspace",
             self.upper_split_state.clone(),
@@ -206,9 +209,70 @@ impl Editor {
             constraints,
             self.explorer_panel(cx),
             self.preview_player(widths.center, preview_height, cx),
-            right_panel_view,
+            self.right_dock_view(window, cx),
         )
         .into_any_element()
+    }
+
+    /// The right dock: a tab strip over the inspector or the AI assistant.
+    fn right_dock_view(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let content = match self.right_dock {
+            RightDockTab::Inspector => property_panel_view(&self.property_panel),
+            RightDockTab::Assistant => self.assistant_panel_view(window, cx),
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .bg(rgb(PANEL))
+            .child(
+                div()
+                    .h(px(36.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(PANEL))
+                    .child(self.right_dock_tab_view(RightDockTab::Inspector, cx))
+                    .child(self.right_dock_tab_view(RightDockTab::Assistant, cx)),
+            )
+            .child(div().flex_1().min_h_0().overflow_hidden().child(content))
+            .into_any_element()
+    }
+
+    fn right_dock_tab_view(&self, tab: RightDockTab, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let selected = self.right_dock == tab;
+        let (element_id, label) = match tab {
+            RightDockTab::Inspector => ("right-dock-tab-inspector", "Inspector"),
+            RightDockTab::Assistant => ("right-dock-tab-assistant", "AI"),
+        };
+        div()
+            .id(element_id)
+            .h(px(26.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .rounded(px(4.0))
+            .cursor(CursorStyle::PointingHand)
+            .text_size(px(11.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .when(selected, |this| {
+                this.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT))
+            })
+            .when(!selected, |this| {
+                this.text_color(rgb(MUTED))
+                    .hover(|style| style.bg(rgb(SURFACE)).text_color(rgb(ACCENT)))
+            })
+            .on_click(cx.listener(move |editor, _, _, cx| {
+                editor.right_dock = tab;
+                cx.notify();
+            }))
+            .child(label)
+            .into_any_element()
     }
 
     fn topbar(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {

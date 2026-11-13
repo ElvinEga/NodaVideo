@@ -22,6 +22,8 @@ core-foundation.workspace = true
 core-video.workspace = true
 metal.workspace = true
 objc = "0.2"
+objc2-core-foundation.workspace = true
+objc2-core-video.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6"

@@ -1,6 +1,6 @@
 use crate::edit_action::EditAction;
 use crate::editing::ClipClipboard;
-use crate::editor::Editor;
+use crate::editor::{Editor, RightDockTab};
 use crate::event_bus::AppEvent;
 use crate::preview_events::PreviewEvent;
 use crate::timeline_interactions::TimelineTool;
@@ -33,6 +33,7 @@ actions!(
         ToggleFullscreen,
         ExitFullscreen,
         ToggleInspector,
+        ToggleAssistant,
         RevealInFinder,
         OpenInDefaultApp
     ]
@@ -81,6 +82,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("f", ToggleFullscreen, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("escape", ExitFullscreen, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("cmd-alt-i", ToggleInspector, None),
+        KeyBinding::new("cmd-alt-a", ToggleAssistant, None),
         KeyBinding::new("cmd-alt-r", RevealInFinder, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new(
             "ctrl-shift-enter",
@@ -414,5 +416,18 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         crate::gpui_inspector::toggle(window, cx);
+    }
+
+    pub(crate) fn action_toggle_assistant(
+        &mut self,
+        _: &ToggleAssistant,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.right_dock = match self.right_dock {
+            RightDockTab::Inspector => RightDockTab::Assistant,
+            RightDockTab::Assistant => RightDockTab::Inspector,
+        };
+        cx.notify();
     }
 }

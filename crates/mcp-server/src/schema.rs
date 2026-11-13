@@ -82,7 +82,6 @@ impl McpToolDefinition {
                     "properties": {
                         "track_id": { "type": "string", "description": "Target track UUID" },
                         "asset_id": { "type": "string", "description": "Media asset UUID to place" },
-                        "name": { "type": "string", "description": "Display name of the new clip" },
                         "start_frame": { "type": "integer", "minimum": 0, "description": "Timeline start frame" },
                         "source_in": { "type": "integer", "minimum": 0, "description": "Source asset in-point in frames" },
                         "source_out": { "type": "integer", "minimum": 1, "description": "Source asset out-point in frames" }
@@ -223,36 +222,15 @@ impl McpToolDefinition {
                 requires_approval: false,
             },
             Self {
-                name: "add_composition".into(),
-                description: "Instantiate a motion graphics composition template and place it on a timeline track.".into(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "template_id": { "type": "string", "description": "ID of template (e.g. lower-third-modern, title-minimal, social-caption-card)" },
-                        "track_id": { "type": "string", "description": "UUID of video track (recommended: V2 or upper track)" },
-                        "start_frame": { "type": "integer", "minimum": 0, "description": "Timeline frame placement position" },
-                        "name": { "type": "string", "description": "Optional human-readable title" },
-                        "parameters": { "type": "object", "description": "Customizable template parameters (title, subtitle, colors, etc.)" }
-                    },
-                    "required": ["template_id", "track_id", "start_frame"],
-                    "additionalProperties": false
-                }),
-                is_mutation: true,
-                requires_approval: false,
-            },
-            Self {
                 name: "set_clip_transform".into(),
-                description: "Update the spatial and visual transform attributes (position, scale, rotation, opacity) of a timeline clip.".into(),
+                description: "Update the transform of a video clip or the position of a text clip.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "clip_id": { "type": "string", "description": "UUID of the clip to update" },
-                        "position_x": { "type": "number", "description": "Horizontal position offset in pixels (0.0 = centered)" },
-                        "position_y": { "type": "number", "description": "Vertical position offset in pixels (0.0 = centered)" },
-                        "scale_x": { "type": "number", "minimum": 0.01, "description": "Horizontal scale multiplier (1.0 = 100%)" },
-                        "scale_y": { "type": "number", "minimum": 0.01, "description": "Vertical scale multiplier (1.0 = 100%)" },
-                        "rotation": { "type": "number", "description": "Rotation in degrees clockwise" },
-                        "opacity": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Visual opacity (0.0 to 1.0)" }
+                        "clip_id": { "type": "string", "description": "ULID of the clip to update" },
+                        "position_x": { "type": "number", "description": "Horizontal offset in timeline pixels (0.0 = centered)" },
+                        "position_y": { "type": "number", "description": "Vertical offset in timeline pixels (0.0 = centered)" },
+                        "scale": { "type": "number", "minimum": 0.01, "description": "Uniform scale multiplier for video clips (1.0 = 100%)" }
                     },
                     "required": ["clip_id"],
                     "additionalProperties": false
@@ -262,46 +240,15 @@ impl McpToolDefinition {
             },
             Self {
                 name: "set_clip_audio".into(),
-                description: "Update the audio parameters (volume dB gain, stereo pan) of a timeline clip.".into(),
+                description: "Update the audio gain and mute state of a video or audio clip.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "clip_id": { "type": "string", "description": "UUID of the clip to update" },
-                        "volume_db": { "type": "number", "minimum": -100.0, "maximum": 24.0, "description": "Audio gain in decibels (0.0 = unity gain, negative = attenuate, positive = boost)" },
-                        "pan": { "type": "number", "minimum": -1.0, "maximum": 1.0, "description": "Stereo pan position (-1.0 = full left, 0.0 = center, +1.0 = full right)" }
+                        "clip_id": { "type": "string", "description": "ULID of the clip to update" },
+                        "gain_db": { "type": "number", "minimum": -100.0, "maximum": 24.0, "description": "Audio gain in decibels (0.0 = unity gain)" },
+                        "muted": { "type": "boolean", "description": "Whether the clip audio is muted" }
                     },
                     "required": ["clip_id"],
-                    "additionalProperties": false
-                }),
-                is_mutation: true,
-                requires_approval: false,
-            },
-            Self {
-                name: "add_transition".into(),
-                description: "Add a visual or audio transition (crossfade, dissolve, fade to black, wipe) across an edit cut between two adjacent clips on a track.".into(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "track_id": { "type": "string", "description": "UUID of track containing the edit cut" },
-                        "from_clip_id": { "type": "string", "description": "UUID of the outgoing clip" },
-                        "to_clip_id": { "type": "string", "description": "UUID of the incoming clip" },
-                        "transition_type": {
-                            "type": "string",
-                            "enum": ["crossfade", "dissolve", "fade_to_black", "dip_to_white", "wipe_left", "wipe_right"],
-                            "description": "Type of transition effect"
-                        },
-                        "alignment": {
-                            "type": "string",
-                            "enum": ["centered", "start_at_cut", "end_at_cut"],
-                            "description": "Alignment of the transition duration relative to cut frame (default: centered)"
-                        },
-                        "duration_frames": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "description": "Duration of the transition in frames (default: 24)"
-                        }
-                    },
-                    "required": ["track_id", "from_clip_id", "to_clip_id"],
                     "additionalProperties": false
                 }),
                 is_mutation: true,

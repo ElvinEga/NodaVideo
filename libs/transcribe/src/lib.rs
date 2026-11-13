@@ -72,7 +72,34 @@ pub async fn transcribe(path: &Path, api_key: &str, options: &Options) -> Result
     if api_key.trim().is_empty() {
         bail!("missing_api_key: an API key is required for transcription");
     }
+    if let Some(duration) = audio::audio_duration(path)?
+        && duration > MAX_TRANSCRIPTION_DURATION
+    {
+        let duration = duration.as_secs_f64();
+        return Err(anyhow!(
+            "audio_too_long: {} at {}:{}",
+            format_args!(
+                "audio duration is {duration:.6} seconds; transcription accepts at most {} seconds",
+                MAX_TRANSCRIPTION_DURATION.as_secs()
+            ),
+            file!(),
+            line!()
+        ));
+    }
     let wav = extract_audio_as_wav(path)?;
+    let audio_bytes = wav.len().saturating_sub(44);
+    if audio_bytes as u128 > MAX_TRANSCRIPTION_DURATION.as_nanos() * 16_000 * 2 / 1_000_000_000 {
+        let duration = audio_bytes as f64 / (16_000.0 * 2.0);
+        return Err(anyhow!(
+            "audio_too_long: {} at {}:{}",
+            format_args!(
+                "audio duration is {duration:.6} seconds; transcription accepts at most {} seconds",
+                MAX_TRANSCRIPTION_DURATION.as_secs()
+            ),
+            file!(),
+            line!()
+        ));
+    }
     transcribe_wav(wav, api_key, options).await
 }
 

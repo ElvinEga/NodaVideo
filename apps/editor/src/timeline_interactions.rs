@@ -10,7 +10,7 @@ use crate::timeline::{TimelineEditorExt, TimelineFrameIndex, TimelineRuntimeStat
 use crate::timeline_clip::Clip;
 use anyhow::Result;
 use gpui::{
-    Context, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent, TouchPhase, Window, px,
+    Context, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent, TouchPhase, Window, px,
 };
 use std::collections::HashSet;
 use ulid::Ulid;
@@ -288,10 +288,10 @@ impl Editor {
         let tool = timeline.interaction.active_tool;
         // 修饰键点击是切换多选、Blade 是切割，这两种情况按选中状态整体重建面板。
         let property_panel_event = match (tool, timeline.editing_state.clip(clip_id)) {
-            (TimelineTool::Selection, Some(Clip::Text(_))) if !event.modifiers.secondary() => {
+            (TimelineTool::Selection, Some(Clip::Text(_))) if !event.modifiers.secondary(cx) => {
                 AppEvent::TextClipSelected { clip_id }
             }
-            (TimelineTool::Selection, Some(Clip::Video(_))) if !event.modifiers.secondary() => {
+            (TimelineTool::Selection, Some(Clip::Video(_))) if !event.modifiers.secondary(cx) => {
                 AppEvent::VideoClipSelected { clip_id }
             }
             _ => AppEvent::RefreshPropertyPanel,
@@ -336,7 +336,7 @@ impl Editor {
             self.timeline_height(window, cx),
             window,
         );
-        let initial_selection = if event.modifiers.secondary() {
+        let initial_selection = if event.modifiers.secondary(cx) {
             timeline.interaction.selected_clip_ids.clone()
         } else {
             HashSet::new()
@@ -352,7 +352,7 @@ impl Editor {
             current_y: y,
             initial_selection,
         });
-        if !event.modifiers.secondary() {
+        if !event.modifiers.secondary(cx) {
             self.select_only_clip(None);
         }
         cx.stop_propagation();
@@ -434,7 +434,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> Result<()> {
         cx.stop_propagation();
-        if event.modifiers.secondary() {
+        if event.modifiers.secondary(cx) {
             self.toggle_clip_selection(clip_id);
             return Ok(());
         }
@@ -662,7 +662,7 @@ impl Editor {
 
     pub(super) fn finish_timeline_scroll(
         &mut self,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {

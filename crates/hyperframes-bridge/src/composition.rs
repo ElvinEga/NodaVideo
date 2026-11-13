@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use timeline::FrameRate;
 use serde::{Deserialize, Serialize};
+use timeline::FrameRate;
 
 use crate::id::CompositionId;
 use crate::template::TemplateDefinition;

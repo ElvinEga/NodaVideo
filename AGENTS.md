@@ -58,9 +58,14 @@ Located in `crates/`:
 - **`crates/agent-acp/`** — ACP JSON-RPC 2.0 stdio adapter (Antigravity, Gemini CLI).
 - **`crates/agent-codex/`** — Codex app-server JSON-RPC 2.0 adapter.
 - **`crates/agent-claude/`** — Claude Code CLI streaming adapter.
-- **`crates/mcp-server/`** — MCP editor tool schemas and executor. **Phase 1 stub:**
-  tool schemas are fully defined; executor returns placeholder responses. Phase 2
-  will rewire the executor to OpenCut's `EditingState` mutation API.
+- **`crates/mcp-server/`** — MCP editor tool schemas and executor.
+  Rewired directly to OpenCut's `TimelineEditingState` mutation API (`add_clip`, `move_clip`,
+  `trim_clip`, `split_clip`, `delete_clip`, `add_text_overlay`, `generate_captions`, etc.)
+  with atomic transaction rollback and approval gating.
+- **`apps/editor/`** — Multi-track NLE editor with integrated dockable AI Assistant panel
+  (right dock tab next to Inspector with `cmd-shift-a` shortcut), supporting multi-provider
+  cycling (Antigravity ACP, Gemini ACP, Codex, Claude Code, Mock), streamed conversation,
+  real-time thought inspection, and interactive approval cards.
 - **`crates/skill-registry/`** — `SKILL.md` parser, recursive directory scanner,
   dynamic prompt instruction composer.
 - **`crates/hyperframes-bridge/`** — Motion graphics template registry, HTML/SVG

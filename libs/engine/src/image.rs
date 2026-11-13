@@ -27,7 +27,7 @@ pub(crate) fn load_image(path: &Path) -> Result<RgbaImage> {
             &mut pixmap.as_mut(),
         );
         let mut bytes = pixmap.take();
-        for pixel in bytes.chunks_exact_mut(4) {
+        for pixel in bytes.as_chunks_mut::<4>().0 {
             let alpha = pixel[3] as u32;
             for channel in &mut pixel[..3] {
                 *channel = (*channel as u32 * 255 + alpha / 2)

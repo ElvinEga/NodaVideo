@@ -32,10 +32,17 @@ pub fn video_surface_size(surface: &VideoSurface) -> (f32, f32) {
 /// Fills its parent with the picture.
 pub fn video_surface_view(surface: &VideoSurface, object_fit: ObjectFit) -> AnyElement {
     #[cfg(target_os = "macos")]
-    return gpui::surface(surface.clone())
-        .object_fit(object_fit)
-        .size_full()
-        .into_any_element();
+    {
+        use core_foundation::base::TCFType;
+        use objc2_core_foundation::CFRetained;
+        use objc2_core_video::CVPixelBuffer;
+        let ptr = surface.as_concrete_TypeRef() as *mut CVPixelBuffer;
+        let retained = unsafe { CFRetained::retain(std::ptr::NonNull::new(ptr).unwrap()) };
+        gpui::surface(retained)
+            .object_fit(object_fit)
+            .size_full()
+            .into_any_element()
+    }
     #[cfg(not(target_os = "macos"))]
     {
         let painted = surface.clone();

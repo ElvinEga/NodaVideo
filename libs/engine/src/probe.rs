@@ -140,7 +140,8 @@ pub fn probe(path: &Path) -> Result<Probe> {
                         && side.data().len() >= 36
                     {
                         let mut matrix = [0_i32; 9];
-                        for (i, chunk) in side.data()[..36].chunks_exact(4).enumerate() {
+                        let (chunks, _) = side.data()[..36].as_chunks::<4>();
+                        for (i, chunk) in chunks.iter().enumerate() {
                             matrix[i] =
                                 i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                         }
