@@ -1,6 +1,7 @@
 use crate::clip_placement::ClipPlacementRejection;
 use crate::editor::Editor;
 use crate::event_bus::AppEvent;
+use crate::frame_preview::{HoverPreview, hover_preview_at};
 use crate::layout::{
     MAX_TIMELINE_PIXELS_PER_SECOND, MIN_TIMELINE_PIXELS_PER_SECOND, RULER_HEIGHT, SNAP_DISTANCE_PX,
     TIMELINE_HEADER_HEIGHT, TIMELINE_PADDING, TRACK_HEADER_WIDTH, TRACK_HEIGHT, track_index_at_y,
@@ -253,10 +254,16 @@ impl Editor {
             return;
         };
         let position = timeline.timeline_position_from_x(event.position.x.into());
+        if timeline.interaction.pointer_guide == Some(position) {
+            return;
+        }
+        let preview = hover_preview_at(timeline, position);
         let timeline = self.timeline.as_mut().expect("timeline was checked above");
-        if timeline.interaction.pointer_guide != Some(position) {
-            timeline.interaction.pointer_guide = Some(position);
-            cx.notify();
+        timeline.interaction.pointer_guide = Some(position);
+        cx.notify();
+        // 悬停帧请求：视频片段解码源帧；图片与空轨道无需解码。
+        if let HoverPreview::Video { key, .. } = preview {
+            self.request_frame(key, true, cx);
         }
     }
 

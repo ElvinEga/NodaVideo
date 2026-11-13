@@ -1,5 +1,6 @@
 import { COLOR } from "../theme.ts";
 import { Icon, type IconName } from "./icon.tsx";
+import { FrameThumb } from "./timeline-clip.tsx";
 import { type ToggleState, TrackHeader, type TrackKind } from "./track-header.tsx";
 import { raw } from "@design/jsx/jsx-runtime";
 import type { Child, Markup } from "@design/jsx/jsx-runtime";
@@ -464,6 +465,57 @@ export function GhostClip(props: {
       >
         {props.caption}
       </span>
+    </div>
+  );
+}
+
+// Hover seek preview ----------------------------------------------------------------------
+
+export const SEEK_POPUP_WIDTH = 80;
+export const SEEK_POPUP_HEIGHT = 166; // 158px card + 8px caret
+
+/// The trick-play popup that floats above the ruler at the hover position: a source
+/// frame (or the still, or black over empty lane), the hover timecode, and a caret
+/// pointing down at the exact hover x. `caretX` shifts the caret when the card is
+/// clamped at a timeline edge. `loading` shows the skeleton while the frame decodes.
+export function SeekPreview(props: {
+  timecode: string;
+  kind: "video" | "image" | "empty" | "loading";
+  variant?: number;
+  caretX?: number;
+}): Markup {
+  const caretX = props.caretX ?? SEEK_POPUP_WIDTH / 2;
+  return (
+    <div class="relative" style={`width:${SEEK_POPUP_WIDTH}px;height:${SEEK_POPUP_HEIGHT}px`}>
+      <div
+        class="absolute top-0 left-0 rounded-[6px] border border-border bg-surface p-1"
+        style="box-shadow:0 8px 24px rgba(0,0,0,.5)"
+      >
+        <div class="overflow-hidden rounded-[4px] bg-black" style="width:72px;height:128px">
+          {props.kind === "video" && <FrameThumb width={72} height={128} variant={props.variant ?? 0} />}
+          {props.kind === "image" && <FrameThumb width={72} height={128} variant={3} />}
+          {props.kind === "loading" && (
+            <div
+              class="h-full w-full bg-hover"
+              style="background-image:linear-gradient(115deg,transparent 42%,rgba(255,255,255,.07) 50%,transparent 58%)"
+            />
+          )}
+        </div>
+        <div class="mt-1 flex h-[18px] items-center justify-center font-mono text-[11px] leading-none text-text">
+          {props.timecode}
+        </div>
+      </div>
+      <svg
+        aria-hidden="true"
+        class="absolute"
+        style={`left:${caretX - 5}px;top:158px`}
+        width="10"
+        height="8"
+        viewBox="0 0 10 8"
+      >
+        <path d="M0 0L5 8L10 0Z" fill={COLOR.surface} />
+        <path d="M0 0L5 8L10 0" fill="none" stroke={COLOR.border} stroke-width="1" />
+      </svg>
     </div>
   );
 }

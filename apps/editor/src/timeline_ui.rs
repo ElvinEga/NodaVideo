@@ -6,19 +6,21 @@ use crate::editor::Editor;
 use crate::event_bus::{AppEvent, AssetDragMoveEvent};
 use crate::explorer_drag::AssetBeingDragged;
 use crate::explorer_file_entry::{FileTreeEntry, FileTreeEntryKind};
+use crate::frame_preview::{HoverPreview, hover_preview_at};
 use crate::layout::{
     RULER_HEIGHT, TIMELINE_HEADER_HEIGHT, TIMELINE_PADDING, TRACK_HEADER_WIDTH, TRACK_HEIGHT,
 };
 use crate::preview::PreviewTarget;
-use crate::theme::{ACCENT, BORDER, ERROR, MUTED, SURFACE_HOVER, TEXT};
+use crate::theme::{ACCENT, BORDER, ERROR, MUTED, SURFACE, SURFACE_HOVER, TEXT};
 use crate::timeline::TimelineFrameIndex;
 use crate::timeline_document;
 use crate::timeline_interactions::{MarqueeSelection, TimelineTool};
 use crate::track::TrackKind;
 use gpui::prelude::*;
 use gpui::{
-    Bounds, ClickEvent, CursorStyle, DragMoveEvent, ElementId, Empty, ExternalPaths, FontWeight,
-    MouseButton, MouseDownEvent, MouseUpEvent, Window, canvas, div, px, relative, rgb, rgba, svg,
+    Anchor, AnchoredPositionMode, Bounds, ClickEvent, CursorStyle, DragMoveEvent, ElementId, Empty,
+    ExternalPaths, FontWeight, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit, PathBuilder,
+    Window, anchored, canvas, deferred, div, img, point, px, relative, rgb, rgba, svg,
 };
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -35,6 +37,11 @@ const MAX_RULER_TICKS: usize = 240;
 const MIN_RULER_LABEL_SPACING: f32 = 72.0;
 const MIN_FRAME_TICK_SPACING: f32 = 4.0;
 const FRAME_TICK_OVERSCAN: f32 = 120.0;
+
+const SEEK_POPUP_WIDTH: f32 = 80.0;
+const SEEK_THUMB_WIDTH: f32 = 72.0;
+const SEEK_THUMB_MAX_HEIGHT: f32 = 128.0;
+const SEEK_THUMB_MIN_HEIGHT: f32 = 40.0;
 const TICK_STEPS: [f64; 12] = [
     1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0,
 ];
@@ -150,6 +157,27 @@ impl Editor {
             .enumerate()
             .map(|(index, track)| self.track_row(index, track, timeline_width, cx))
             .collect::<Vec<_>>();
+        // 悬停预览：拖动、框选与素材拖放期间不弹出，避免与正在进行的编辑重叠。
+        let hover_popup = timeline.interaction.pointer_guide.and_then(|position| {
+            if timeline.interaction.clip_move_drag.is_some()
+                || timeline.interaction.marquee_selection.is_some()
+                || cx.has_active_drag()
+            {
+                return None;
+            }
+            let seconds = timeline.editing_state.seconds(position);
+            let guide_x =
+                TIMELINE_PADDING + seconds as f32 * timeline.pixels_per_second + scroll_offset_x;
+            let left = (guide_x - SEEK_POPUP_WIDTH / 2.0)
+                .clamp(0.0, (viewport_width - SEEK_POPUP_WIDTH).max(0.0));
+            let caret_x = (guide_x - left).clamp(10.0, SEEK_POPUP_WIDTH - 10.0);
+            Some((
+                hover_preview_at(timeline, position),
+                format_time_precise(seconds),
+                left,
+                caret_x,
+            ))
+        });
         let tracks = div()
             .id("timeline-tracks-vertical-scroll")
             .flex_1()
@@ -372,7 +400,22 @@ impl Editor {
                                         cx,
                                     ))
                                     .child(self.timeline_playhead(cx)),
-                            ),
+                            )
+                            .when_some(hover_popup, |this, (preview, timecode, left, caret_x)| {
+                                this.child(
+                                    deferred(
+                                        anchored()
+                                            .position_mode(AnchoredPositionMode::Local)
+                                            .position(point(px(left), px(0.0)))
+                                            .anchor(Anchor::BottomLeft)
+                                            .offset(point(px(0.0), px(-6.0)))
+                                            .child(self.seek_preview_popup(
+                                                &preview, timecode, caret_x,
+                                            )),
+                                    )
+                                    .with_priority(1),
+                                )
+                            }),
                     ),
             )
             .into_any_element()
@@ -433,6 +476,81 @@ impl Editor {
                     .h(px(13.0))
                     .text_color(rgb(ACCENT)),
             )
+            .into_any_element()
+    }
+
+    fn seek_preview_popup(
+        &self,
+        preview: &HoverPreview,
+        timecode: String,
+        caret_x: f32,
+    ) -> gpui::AnyElement {
+        let (thumb, thumb_height) = match preview {
+            HoverPreview::Video { key, aspect } => {
+                let height = seek_thumb_height(*aspect);
+                let content = match self.frame_image(key) {
+                    Some(image) => img(image)
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                        .into_any_element(),
+                    None => div()
+                        .size_full()
+                        .bg(rgb(if self.frame_failed(key) {
+                            0x000000
+                        } else {
+                            SURFACE_HOVER
+                        }))
+                        .into_any_element(),
+                };
+                (content, height)
+            }
+            HoverPreview::Image { path, aspect } => (
+                img(path.clone())
+                    .size_full()
+                    .object_fit(ObjectFit::Cover)
+                    .into_any_element(),
+                seek_thumb_height(*aspect),
+            ),
+            HoverPreview::Empty => (
+                div().size_full().bg(rgb(0x000000)).into_any_element(),
+                SEEK_THUMB_MAX_HEIGHT,
+            ),
+        };
+        let card_height = thumb_height + 30.0; // 4 内边距 + 缩略图 + 4 间距 + 18 时间码 + 4 内边距
+        div()
+            .relative()
+            .w(px(SEEK_POPUP_WIDTH))
+            .child(
+                div()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(SURFACE))
+                    .p(px(4.0))
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .w(px(SEEK_THUMB_WIDTH))
+                            .h(px(thumb_height))
+                            .rounded(px(4.0))
+                            .overflow_hidden()
+                            .bg(rgb(0x000000))
+                            .child(thumb),
+                    )
+                    .child(
+                        div()
+                            .mt(px(4.0))
+                            .h(px(18.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .font_family("monospace")
+                            .text_size(px(11.0))
+                            .text_color(rgb(TEXT))
+                            .child(timecode),
+                    ),
+            )
+            .child(seek_preview_caret(caret_x, card_height))
             .into_any_element()
     }
 
@@ -1052,6 +1170,42 @@ fn format_time_precise(seconds: f64) -> String {
     let minutes = (seconds / 60.0).floor() as u64;
     let seconds = seconds % 60.0;
     format!("{minutes:02}:{seconds:04.1}")
+}
+
+/// 缩略图高度随源宽高比变化：竖屏 9:16 取上限 128，横屏 16:9 约 40。
+fn seek_thumb_height(aspect: f32) -> f32 {
+    (SEEK_THUMB_WIDTH / aspect).clamp(SEEK_THUMB_MIN_HEIGHT, SEEK_THUMB_MAX_HEIGHT)
+}
+
+fn seek_preview_caret(caret_x: f32, card_height: f32) -> gpui::AnyElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, (), window, _| {
+            let left = bounds.origin;
+            let tip = bounds.origin + point(px(5.0), px(8.0));
+            let right = bounds.origin + point(px(10.0), px(0.0));
+            let mut fill = PathBuilder::fill();
+            fill.move_to(left);
+            fill.line_to(tip);
+            fill.line_to(right);
+            fill.close();
+            window.paint_path(fill.build().expect("valid seek preview caret"), rgb(SURFACE));
+            let mut outline = PathBuilder::stroke(px(1.0));
+            outline.move_to(left);
+            outline.line_to(tip);
+            outline.line_to(right);
+            window.paint_path(
+                outline.build().expect("valid seek preview caret outline"),
+                rgb(BORDER),
+            );
+        },
+    )
+    .absolute()
+    .top(px(card_height))
+    .left(px(caret_x - 5.0))
+    .w(px(10.0))
+    .h(px(8.0))
+    .into_any_element()
 }
 
 fn finish_clip_move(

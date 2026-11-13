@@ -16,6 +16,7 @@ mod explorer_file_entry;
 mod explorer_file_menu;
 mod explorer_view;
 mod export_window;
+mod frame_preview;
 mod global_settings;
 mod global_settings_dialog;
 mod gpui_inspector;

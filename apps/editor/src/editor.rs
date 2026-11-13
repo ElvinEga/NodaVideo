@@ -5,6 +5,7 @@ use crate::editing::ClipClipboard;
 use crate::event_bus::{AppEvent, EventBus};
 use crate::explorer::{ExplorerState, save_imported_media};
 use crate::explorer_drag::AssetBeingDragged;
+use crate::frame_preview::FramePreviewCache;
 use crate::preview::{PreviewState, PreviewTarget};
 use crate::project_settings::load_project_local_settings;
 use crate::property_panel::{PropertyPanel, PropertyPanelState, current_property_panel};
@@ -29,6 +30,7 @@ pub(crate) struct Editor {
     pub(crate) project_root: PathBuf,
     pub(super) waveform_jobs: HashSet<PathBuf>, // 正在生成波形的素材绝对路径。
     pub(super) waveform_cache: HashMap<PathBuf, Arc<::waveform::WaveformData>>, // 键为素材的绝对路径；不同目录的时间线可能用不同相对路径指向同一文件。
+    pub(super) frame_previews: FramePreviewCache,
     pub(super) property_panel_state: PropertyPanelState,
     pub(super) property_panel: PropertyPanel, // 点击文件或片段后由事件重建，render 只读它。
     pub(super) settings_open: bool,
@@ -113,6 +115,7 @@ impl Editor {
             preview,
             waveform_jobs: HashSet::new(),
             waveform_cache: HashMap::new(),
+            frame_previews: FramePreviewCache::new(),
             property_panel_state,
             property_panel: PropertyPanel::None,
             settings_open: false,

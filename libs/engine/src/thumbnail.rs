@@ -12,6 +12,29 @@ use std::path::Path;
 /// Writes a PNG of a frame about a tenth into `source`, at most `max_width`
 /// pixels wide, rotated to display orientation.
 pub fn video_thumbnail(source: &Path, destination: &Path, max_width: u32) -> Result<()> {
+    write_video_thumbnail(source, destination, max_width, None)
+}
+
+/// Writes a PNG of the frame at `at_micros` microseconds from the stream origin,
+/// at most `max_width` pixels wide, rotated to display orientation. Past the end
+/// of the video, the last decoded frame is used.
+pub fn video_thumbnail_at(
+    source: &Path,
+    destination: &Path,
+    max_width: u32,
+    at_micros: i64,
+) -> Result<()> {
+    write_video_thumbnail(source, destination, max_width, Some(at_micros))
+}
+
+// Private APIs only
+
+fn write_video_thumbnail(
+    source: &Path,
+    destination: &Path,
+    max_width: u32,
+    at_micros: Option<i64>,
+) -> Result<()> {
     ffmpeg::init().context("initializing FFmpeg")?;
     let mut input = ffmpeg::format::input(source).context("opening video for thumbnail")?;
     let (stream_index, time_base, mut decoder, rotation) = {
@@ -31,7 +54,6 @@ pub fn video_thumbnail(source: &Path, destination: &Path, max_width: u32) -> Res
         (stream.index(), time_base, decoder, stream_rotation(&stream))
     };
 
-    // A tenth in avoids black fade-in frames; without a duration, take the first frame.
     let origin = unsafe { (*input.as_ptr()).start_time };
     let origin = if origin == ffmpeg::ffi::AV_NOPTS_VALUE {
         0
@@ -39,7 +61,12 @@ pub fn video_thumbnail(source: &Path, destination: &Path, max_width: u32) -> Res
         origin
     };
     let duration = input.duration();
-    let target = origin + duration.max(0) / 10;
+    let offset = match at_micros {
+        Some(at_micros) => at_micros.max(0),
+        // 默认取十分处，避开黑场淡入帧；无时长时取首帧。
+        None => duration.max(0) / 10,
+    };
+    let target = origin + offset;
     if duration > 0 {
         input.seek(target, ..target).context("seeking video")?;
         decoder.flush();
@@ -107,8 +134,6 @@ pub fn video_thumbnail(source: &Path, destination: &Path, max_width: u32) -> Res
         .context("writing thumbnail PNG")?;
     Ok(())
 }
-
-// Private APIs only
 
 /// First frame at or after `target` (microseconds, AV_TIME_BASE), or the last
 /// decoded frame when the video ends earlier. None means the stream decoded nothing.

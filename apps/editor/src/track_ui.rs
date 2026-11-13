@@ -4,6 +4,7 @@ use crate::edit_action::EditAction;
 use crate::editor::Editor;
 use crate::event_bus::AppEvent;
 use crate::explorer_drag::AssetBeingDragged;
+use crate::frame_preview::FrameKey;
 use crate::layout::{THIN_CLIP_WIDTH, TIMELINE_PADDING, TRACK_HEIGHT};
 use crate::srt::srt_text_clips;
 use crate::theme::{
@@ -19,14 +20,19 @@ use ::timeline::MediaKind;
 use ::timeline::TimelineEditingState;
 use gpui::prelude::*;
 use gpui::{
-    Bounds, CursorStyle, ElementId, MouseButton, MouseDownEvent, PathBuilder, SharedString, canvas,
-    div, fill, point, px, rgb, rgba, size,
+    Bounds, Corners, CursorStyle, ElementId, MouseButton, MouseDownEvent, ObjectFit, PathBuilder,
+    SharedString, WeakEntity, canvas, div, fill, img, linear_color_stop, linear_gradient, point, px,
+    rgb, rgba, size,
 };
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 const CLIP_WAVEFORM_HEIGHT: f32 = 80.0;
 const CLIP_WAVEFORM_VISUAL_GAIN: f32 = 2.0;
+const CLIP_AUDIO_BAND_HEIGHT: f32 = 16.0; // 视频片段底部的细波形带。
+const CLIP_SCRIM_HEIGHT: f32 = 28.0; // 顶部渐变遮罩，保证名称在画面上可读。
+const FILMSTRIP_MIN_CELL_WIDTH: f32 = 24.0; // 单元格下限，避免极端竖屏产生过多单元格。
 const LOCKED_ROW_STRIPES: u32 = 0xffffff0f; // 锁定轨道的轨道行和轨道头：中性白色斜纹，约 6% 不透明度。
 const LOCKED_CLIP_STRIPES: u32 = 0xffffff29; // 锁定轨道上的片段：约 16% 不透明度，比轨道行更明显。
 
@@ -456,23 +462,87 @@ impl Editor {
         let name = asset
             .map(|asset| asset.name().clone())
             .unwrap_or_else(|| "Missing media".to_string());
-
-        let waveform = (|| {
-            let asset = asset?;
-            let timeline_directory = timeline.path.parent()?;
-            let media_path = resolve_asset_path(timeline_directory, asset.path()); // 波形缓存以素材的绝对路径为键。
-            self.waveform_cache.get(&media_path).cloned()
-        })();
         let source_start = timeline.editing_state.seconds(media.source_in);
         let source_end = timeline.editing_state.seconds(media.source_out);
-        let content = div()
-            .absolute()
-            .inset_0()
-            .child(div().absolute().inset_0())
-            .when_some(waveform, |this, path| {
-                this.child(timeline_clip_waveform(path, source_start, source_end))
-            })
-            .child(video_timeline_clip_label(name));
+
+        let content = div().absolute().inset_0();
+        let content = match asset {
+            None => content.child(video_timeline_clip_label(name)),
+            Some(asset) => {
+                let media_path = timeline
+                    .path
+                    .parent()
+                    .map(|directory| resolve_asset_path(directory, asset.path()));
+                let aspect = asset.width() as f32 / asset.height().max(1) as f32;
+                match asset.kind() {
+                    MediaKind::Image => {
+                        let still = match media_path {
+                            Some(path) => img(path)
+                                .size_full()
+                                .object_fit(ObjectFit::Cover)
+                                .into_any_element(),
+                            None => div().size_full().into_any_element(),
+                        };
+                        content
+                            .child(still)
+                            .child(clip_top_scrim())
+                            .child(video_timeline_clip_label(name))
+                    }
+                    MediaKind::Video => {
+                        let waveform = media_path
+                            .as_ref()
+                            .and_then(|path| self.waveform_cache.get(path).cloned());
+                        let filmstrip = match media_path {
+                            Some(path) => timeline_clip_filmstrip(
+                                cx.entity().downgrade(),
+                                path,
+                                aspect,
+                                source_start,
+                                source_end,
+                            ),
+                            None => div().size_full().into_any_element(),
+                        };
+                        content
+                            .child(filmstrip)
+                            .child(clip_top_scrim())
+                            .when_some(waveform, |this, path| {
+                                this.child(
+                                    div()
+                                        .absolute()
+                                        .bottom_0()
+                                        .left_0()
+                                        .right_0()
+                                        .h(px(CLIP_AUDIO_BAND_HEIGHT))
+                                        .overflow_hidden()
+                                        .bg(rgba(0x00000073))
+                                        .child(timeline_clip_waveform(
+                                            path,
+                                            source_start,
+                                            source_end,
+                                            CLIP_AUDIO_BAND_HEIGHT,
+                                        )),
+                                )
+                            })
+                            .child(video_timeline_clip_label(name))
+                    }
+                    MediaKind::Audio => {
+                        let waveform = media_path
+                            .as_ref()
+                            .and_then(|path| self.waveform_cache.get(path).cloned());
+                        content
+                            .when_some(waveform, |this, path| {
+                                this.child(timeline_clip_waveform(
+                                    path,
+                                    source_start,
+                                    source_end,
+                                    CLIP_WAVEFORM_HEIGHT,
+                                ))
+                            })
+                            .child(video_timeline_clip_label(name))
+                    }
+                }
+            }
+        };
 
         self.timeline_clip_frame(clip, CLIP_BLUE, content.into_any_element(), cx)
     }
@@ -510,7 +580,12 @@ impl Editor {
             .absolute()
             .inset_0()
             .when_some(waveform, |this, path| {
-                this.child(timeline_clip_waveform(path, source_start, source_end))
+                this.child(timeline_clip_waveform(
+                    path,
+                    source_start,
+                    source_end,
+                    CLIP_WAVEFORM_HEIGHT,
+                ))
             })
             .child(timeline_clip_label(name, detail));
 
@@ -654,6 +729,7 @@ fn timeline_clip_waveform(
     waveform: Arc<::waveform::WaveformData>,
     source_start: f64,
     source_end: f64,
+    height: f32,
 ) -> gpui::AnyElement {
     canvas(
         move |bounds, window, _| {
@@ -709,7 +785,7 @@ fn timeline_clip_waveform(
     .left_0()
     .right_0()
     .bottom_0()
-    .h(px(CLIP_WAVEFORM_HEIGHT))
+    .h(px(height))
     .into_any_element()
 }
 
@@ -740,14 +816,137 @@ fn timeline_clip_label(name: String, detail: String) -> gpui::Div {
 fn video_timeline_clip_label(name: String) -> gpui::Div {
     div()
         .absolute()
+        .top_0()
         .left_0()
         .right_0()
-        .bottom_0()
-        .p_2()
+        .px(px(7.0))
+        .pt(px(8.0))
         .text_xs()
         .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(rgb(TEXT))
+        .whitespace_nowrap()
         .text_ellipsis()
         .child(name)
+}
+
+/// 顶部渐变遮罩：上深下透，让片段名称在缩略图画面上保持可读。
+fn clip_top_scrim() -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .h(px(CLIP_SCRIM_HEIGHT))
+        .bg(linear_gradient(
+            180.0,
+            linear_color_stop(rgba(0x05080ac7), 0.0),
+            linear_color_stop(rgba(0x05080a00), 1.0),
+        ))
+}
+
+/// 视频片段胶片条：按素材宽高比平铺源帧单元格，只解码可见区域，
+/// 帧请求在后台执行器上逐帧生成，绝不阻塞 UI 线程。
+fn timeline_clip_filmstrip(
+    editor: WeakEntity<Editor>,
+    media_path: PathBuf,
+    aspect: f32,
+    source_start: f64,
+    source_end: f64,
+) -> gpui::AnyElement {
+    canvas(
+        move |bounds, window, cx| {
+            let visible_bounds = bounds.intersect(&window.content_mask().bounds);
+            if visible_bounds.is_empty() {
+                return Vec::new();
+            }
+            let clip_width = f32::from(bounds.size.width).max(1.0);
+            let clip_height = f32::from(bounds.size.height).max(1.0);
+            let cell_width = (clip_height * aspect).max(FILMSTRIP_MIN_CELL_WIDTH);
+            let time_per_pixel = (source_end - source_start) / f64::from(clip_width);
+            let first_cell =
+                (f32::from(visible_bounds.left() - bounds.left()) / cell_width).floor() as usize;
+            let last_cell =
+                (f32::from(visible_bounds.right() - bounds.left()) / cell_width).ceil() as usize;
+
+            let mut cells = Vec::new();
+            for index in first_cell..last_cell {
+                let cell_left = bounds.left() + px(index as f32 * cell_width);
+                let cell_bounds = Bounds::new(
+                    point(cell_left, bounds.top()),
+                    size(px(cell_width), bounds.size.height),
+                );
+                // 单元格左缘对应的源时间；末格可能超出源出点，钳制到出点。
+                let source_time = (source_start
+                    + f64::from(index as f32 * cell_width) * time_per_pixel)
+                    .min(source_end);
+                let key = FrameKey {
+                    path: media_path.clone(),
+                    at_micros: (source_time * 1_000_000.0) as i64,
+                };
+                let image = editor
+                    .update(cx, |editor, cx| {
+                        editor.request_frame(key.clone(), false, cx);
+                        editor.frame_image(&key)
+                    })
+                    .ok()
+                    .flatten();
+                cells.push((cell_bounds, image, index > 0));
+            }
+            cells
+        },
+        move |_bounds, cells, window, _| {
+            for (cell_bounds, image, has_divider) in cells {
+                let visible = cell_bounds.intersect(&window.content_mask().bounds);
+                if visible.is_empty() {
+                    continue;
+                }
+                if let Some(image) = image {
+                    let image_size = image.size(0);
+                    let image_width = image_size.width.0 as f32;
+                    let image_height = image_size.height.0 as f32;
+                    if image_width > 0.0 && image_height > 0.0 {
+                        let cell_width = f32::from(cell_bounds.size.width);
+                        let cell_height = f32::from(cell_bounds.size.height);
+                        // cover 适配：按较大缩放比铺满单元格，居中裁剪。
+                        let scale = (cell_width / image_width).max(cell_height / image_height);
+                        let scaled_width = image_width * scale;
+                        let scaled_height = image_height * scale;
+                        let center_x = f32::from(cell_bounds.left()) + cell_width / 2.0;
+                        let center_y = f32::from(cell_bounds.top()) + cell_height / 2.0;
+                        let image_bounds = Bounds::new(
+                            point(
+                                px(center_x - scaled_width / 2.0),
+                                px(center_y - scaled_height / 2.0),
+                            ),
+                            size(px(scaled_width), px(scaled_height)),
+                        );
+                        if let Err(error) = window.paint_image(
+                            visible,
+                            image_bounds,
+                            Corners::default(),
+                            image,
+                            0,
+                            false,
+                        ) {
+                            log::error!("Could not paint filmstrip frame: {error:?}");
+                        }
+                    }
+                }
+                if has_divider {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(cell_bounds.left(), cell_bounds.top()),
+                            size(px(1.0), cell_bounds.size.height),
+                        ),
+                        rgba(0x00000066),
+                    ));
+                }
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .into_any_element()
 }
 
 fn track_action_view(
