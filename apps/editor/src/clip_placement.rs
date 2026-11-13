@@ -90,6 +90,23 @@ pub(super) fn validate_text_clip_placement(
     )
 }
 
+pub(super) fn validate_composition_clip_placement(
+    timeline: &TimelineEditingState,
+    target_track_id: Ulid,
+    clip_length: TimelineFrameIndex,
+    target_timeline_start: TimelineFrameIndex,
+    ignored_clip_ids: &HashSet<Ulid>,
+) -> Result<()> {
+    validate_clip_placement_on_track(
+        timeline,
+        target_track_id,
+        TrackKind::Video,
+        clip_length,
+        target_timeline_start,
+        ignored_clip_ids,
+    )
+}
+
 fn validate_clip_placement_on_track(
     timeline: &TimelineEditingState,
     target_track_id: Ulid,

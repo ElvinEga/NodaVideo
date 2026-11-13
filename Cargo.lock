@@ -1478,6 +1478,8 @@ dependencies = [
  "nodavideo-agent-claude",
  "nodavideo-agent-codex",
  "nodavideo-agent-runtime",
+ "nodavideo-hyperframes-bridge",
+ "nodavideo-mcp-server",
  "notify",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -1491,6 +1493,7 @@ dependencies = [
  "transcribe",
  "ulid",
  "unicode-segmentation",
+ "uuid",
  "waveform",
 ]
 
@@ -3678,11 +3681,15 @@ dependencies = [
 name = "nodavideo-hyperframes-bridge"
 version = "0.1.0"
 dependencies = [
+ "image",
+ "log",
+ "resvg 0.45.1",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "timeline",
+ "ulid",
  "uuid",
 ]
 

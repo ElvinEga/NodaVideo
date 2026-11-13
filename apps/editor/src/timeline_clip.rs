@@ -52,6 +52,10 @@ impl ClipEditingExt for Clip {
                 left.duration = frame_rate.duration(local);
                 right.duration = right.duration.saturating_sub(left.duration);
             }
+            (Self::Composition(left), Self::Composition(right)) => {
+                left.duration = frame_rate.duration(local);
+                right.duration = right.duration.saturating_sub(left.duration);
+            }
             _ => unreachable!("a cloned clip must retain its variant"),
         }
         Some((left, right))

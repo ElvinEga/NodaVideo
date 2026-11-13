@@ -16,6 +16,7 @@ use gpui::{
     MouseButton, MouseDownEvent, ParentElement, StatefulInteractiveElement, Styled, StyledImage,
     div, px, rgb,
 };
+use nodavideo_hyperframes_bridge::{CompositionAsset, TemplateDefinition};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -60,6 +61,22 @@ impl Editor {
             Vec::new()
         };
 
+        // 合成是项目内模板实例，不是文件；All 与 Motion 分类展示，可按名称搜索。
+        let show_compositions = matches!(
+            self.explorer.category,
+            MediaCategoryFilter::All | MediaCategoryFilter::Motion
+        );
+        let visible_compositions: Vec<CompositionAsset> = if show_compositions {
+            self.explorer
+                .compositions
+                .iter()
+                .filter(|asset| filter.is_empty() || asset.name.to_lowercase().contains(&filter))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         // Compute counts per category
         let mut counts = CategoryCounts {
             all: 0,
@@ -68,6 +85,7 @@ impl Editor {
             image: 0,
             captions: 0,
             text: 0,
+            motion: 0,
         };
         for entry in &visible_entries {
             match entry.kind {
@@ -79,7 +97,8 @@ impl Editor {
             }
         }
         counts.text = visible_titles.len();
-        counts.all = visible_entries.len() + counts.text;
+        counts.motion = visible_compositions.len();
+        counts.all = visible_entries.len() + counts.text + counts.motion;
 
         let filtered_entries: Vec<(usize, &FileTreeEntry)> = visible_entries
             .iter()
@@ -91,6 +110,7 @@ impl Editor {
                 MediaCategoryFilter::Image => matches!(entry.kind, FileTreeEntryKind::Image),
                 MediaCategoryFilter::Captions => matches!(entry.kind, FileTreeEntryKind::Srt),
                 MediaCategoryFilter::Text => false, // 标题单独渲染，不是文件条目。
+                MediaCategoryFilter::Motion => false, // 合成单独渲染，不是文件条目。
             })
             .collect();
 
@@ -109,12 +129,31 @@ impl Editor {
             && filter.is_empty()
         {
             self.text_empty_state(cx)
-        } else if filtered_entries.is_empty() && visible_titles.is_empty() {
+        } else if self.explorer.category == MediaCategoryFilter::Motion
+            && visible_compositions.is_empty()
+            && filter.is_empty()
+        {
+            self.motion_empty_state(cx)
+        } else if filtered_entries.is_empty()
+            && visible_titles.is_empty()
+            && visible_compositions.is_empty()
+        {
             self.media_empty_state(&filter_query, cx)
         } else if self.explorer.view_mode == MediaViewMode::Grid {
-            self.media_grid_view(&filtered_entries, &visible_titles, cx)
+            self.media_grid_view(
+                &filtered_entries,
+                &visible_titles,
+                &visible_compositions,
+                cx,
+            )
         } else {
-            self.media_list_view(&filtered_entries, show_root_contents, &visible_titles, cx)
+            self.media_list_view(
+                &filtered_entries,
+                show_root_contents,
+                &visible_titles,
+                &visible_compositions,
+                cx,
+            )
         };
 
         div()
@@ -309,6 +348,32 @@ impl Editor {
                                 cx.notify();
                             }))
                             .child("+ Text"),
+                    )
+                    // + Motion Button: open the template gallery to create a composition
+                    .child(
+                        div()
+                            .id("new-motion-button")
+                            .h(px(26.0))
+                            .px_2p5()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap_1()
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .bg(rgb(SURFACE))
+                            .hover(|s| s.bg(rgb(SURFACE_HOVER)).border_color(rgb(WARNING)))
+                            .active(|s| s.bg(rgb(WARNING)).text_color(rgb(0x131417)))
+                            .cursor_pointer()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(TEXT))
+                            .on_click(cx.listener(|editor, _, _, cx| {
+                                editor.emit_event(cx, AppEvent::OpenTemplateGallery);
+                                cx.notify();
+                            }))
+                            .child("+ Motion"),
                     ),
             )
             .into_any_element()
@@ -355,8 +420,24 @@ impl Editor {
                 cx,
             ))
             .child(self.category_chip(
+                "cat-text",
+                "Text",
+                counts.text,
+                current == MediaCategoryFilter::Text,
+                MediaCategoryFilter::Text,
+                cx,
+            ))
+            .child(self.category_chip(
+                "cat-motion",
+                "Motion",
+                counts.motion,
+                current == MediaCategoryFilter::Motion,
+                MediaCategoryFilter::Motion,
+                cx,
+            ))
+            .child(self.category_chip(
                 "cat-image",
-                "Graphics",
+                "Image",
                 counts.image,
                 current == MediaCategoryFilter::Image,
                 MediaCategoryFilter::Image,
@@ -368,14 +449,6 @@ impl Editor {
                 counts.captions,
                 current == MediaCategoryFilter::Captions,
                 MediaCategoryFilter::Captions,
-                cx,
-            ))
-            .child(self.category_chip(
-                "cat-text",
-                "Text",
-                counts.text,
-                current == MediaCategoryFilter::Text,
-                MediaCategoryFilter::Text,
                 cx,
             ))
             .into_any_element()
@@ -417,6 +490,7 @@ impl Editor {
             })
             .on_click(cx.listener(move |editor, _, _, cx| {
                 editor.explorer.category = category;
+                editor.schedule_composition_thumbnails(cx);
                 cx.notify();
             }))
             .child(label)
@@ -517,6 +591,7 @@ impl Editor {
         filtered_entries: &[(usize, &FileTreeEntry)],
         show_root_contents: bool,
         titles: &[TextTitle],
+        compositions: &[CompositionAsset],
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let project_name = self
@@ -588,6 +663,11 @@ impl Editor {
             .map(|title| self.media_list_title_row(title, cx))
             .collect::<Vec<_>>();
 
+        let composition_rows = compositions
+            .iter()
+            .map(|asset| self.media_list_composition_row(asset, cx))
+            .collect::<Vec<_>>();
+
         div()
             .id("editor-media-scroll")
             .size_full()
@@ -602,13 +682,17 @@ impl Editor {
                     editor.show_file_context_menu(PathBuf::new(), true, event, cx);
                 }),
             )
-            // Text 分类只列标题，不展示项目文件夹树。
+            // Text 与 Motion 分类只列项目内资产，不展示项目文件夹树。
             .when(
-                self.explorer.category != MediaCategoryFilter::Text,
+                !matches!(
+                    self.explorer.category,
+                    MediaCategoryFilter::Text | MediaCategoryFilter::Motion
+                ),
                 |this| this.child(root_row),
             )
             .children(entry_elements)
             .children(title_rows)
+            .children(composition_rows)
             .into_any_element()
     }
 
@@ -616,6 +700,7 @@ impl Editor {
         &self,
         filtered_entries: &[(usize, &FileTreeEntry)],
         titles: &[TextTitle],
+        compositions: &[CompositionAsset],
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let mut cards = filtered_entries
@@ -626,6 +711,11 @@ impl Editor {
             titles
                 .iter()
                 .map(|title| self.media_grid_title_card(title, cx)),
+        );
+        cards.extend(
+            compositions
+                .iter()
+                .map(|asset| self.media_grid_composition_card(asset, cx)),
         );
 
         div()
@@ -1118,6 +1208,507 @@ impl Editor {
             .into_any_element()
     }
 
+    fn media_grid_composition_card(
+        &self,
+        asset: &CompositionAsset,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let composition_id = asset.id;
+        let selected = self.explorer.selected_composition == Some(composition_id);
+        let duration = format_title_duration(asset.fps.duration(asset.duration_frames.into()));
+        let thumbnail = self
+            .explorer
+            .composition_thumbs
+            .get(&composition_id)
+            .cloned();
+        let rendering = thumbnail.is_none();
+        div()
+            .id(gpui::SharedString::from(format!(
+                "composition-card-{composition_id}"
+            )))
+            .w(px(136.0))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_1p5()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(if selected {
+                WARNING
+            } else {
+                BORDER
+            }))
+            .bg(rgb(if selected {
+                SURFACE_HOVER
+            } else {
+                SURFACE
+            }))
+            .hover(|s| s.bg(rgb(SURFACE_HOVER)).border_color(rgb(WARNING)))
+            .cursor_pointer()
+            .on_click(cx.listener(move |editor, _, _, cx| {
+                editor.emit_event(cx, AppEvent::SelectComposition { composition_id });
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .w_full()
+                    .h(px(76.0))
+                    .rounded(px(4.0))
+                    .bg(rgb(0x0e0f12))
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .overflow_hidden()
+                    .when_some(thumbnail, |this, path| {
+                        this.child(
+                            gpui::img(path)
+                                .size_full()
+                                .object_fit(gpui::ObjectFit::Cover),
+                        )
+                    })
+                    .when(rendering, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(MUTED))
+                                .child("Rendering…"),
+                        )
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(4.0))
+                            .left(px(4.0))
+                            .size(px(16.0))
+                            .rounded(px(2.0))
+                            .bg(rgb(WARNING))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(8.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0x131417))
+                            .child("MG"),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom(px(4.0))
+                            .right(px(4.0))
+                            .px(px(4.0))
+                            .py(px(1.0))
+                            .rounded(px(3.0))
+                            .bg(gpui::rgba(0x000000cc))
+                            .font_family("monospace")
+                            .text_size(px(9.0))
+                            .text_color(rgb(0xd4d4d8))
+                            .child(duration),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_ellipsis()
+                    .text_color(rgb(TEXT))
+                    .child(asset.name.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(rgb(MUTED))
+                    .text_ellipsis()
+                    .child(format!("Motion · {}×{}", asset.width, asset.height)),
+            )
+            .into_any_element()
+    }
+
+    fn media_list_composition_row(
+        &self,
+        asset: &CompositionAsset,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let composition_id = asset.id;
+        let selected = self.explorer.selected_composition == Some(composition_id);
+        let duration = format_title_duration(asset.fps.duration(asset.duration_frames.into()));
+        let thumbnail = self
+            .explorer
+            .composition_thumbs
+            .get(&composition_id)
+            .cloned();
+        let rendering = thumbnail.is_none();
+        div()
+            .id(gpui::SharedString::from(format!(
+                "composition-row-{composition_id}"
+            )))
+            .h(px(38.0))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .rounded(px(4.0))
+            .when(selected, |this| this.bg(rgb(SURFACE_HOVER)))
+            .hover(|s| s.bg(rgb(SURFACE_HOVER)))
+            .cursor_pointer()
+            .on_click(cx.listener(move |editor, _, _, cx| {
+                editor.emit_event(cx, AppEvent::SelectComposition { composition_id });
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .w(px(56.0))
+                    .h(px(32.0))
+                    .flex_shrink_0()
+                    .rounded(px(3.0))
+                    .bg(rgb(0x0e0f12))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .overflow_hidden()
+                    .when_some(thumbnail, |this, path| {
+                        this.child(
+                            gpui::img(path)
+                                .size_full()
+                                .object_fit(gpui::ObjectFit::Cover),
+                        )
+                    })
+                    .when(rendering, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(8.0))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(WARNING))
+                                .child("MG"),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_ellipsis()
+                            .text_color(rgb(TEXT))
+                            .child(asset.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(rgb(MUTED))
+                            .text_ellipsis()
+                            .child(format!("Motion · {}×{}", asset.width, asset.height)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .font_family("monospace")
+                    .text_size(px(10.0))
+                    .text_color(rgb(MUTED))
+                    .child(duration),
+            )
+            .into_any_element()
+    }
+
+    fn motion_empty_state(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .p_6()
+            .gap_3()
+            .text_center()
+            .child(
+                div()
+                    .size(px(56.0))
+                    .rounded(px(10.0))
+                    .bg(rgb(WARNING))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(20.0))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0x131417))
+                    .child("MG"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(TEXT))
+                    .child("Create your first motion graphic"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .max_w(px(240.0))
+                    .child(
+                        "Motion graphics are made from templates in your project. Pick one, then drag it to a video track.",
+                    ),
+            )
+            .child(
+                div()
+                    .id("empty-new-motion-button")
+                    .h(px(32.0))
+                    .px_4()
+                    .mt_2()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1p5()
+                    .rounded(px(6.0))
+                    .bg(rgb(WARNING))
+                    .hover(|s| s.bg(rgb(0xfbbf24)))
+                    .cursor_pointer()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0x131417))
+                    .on_click(cx.listener(|editor, _, _, cx| {
+                        editor.emit_event(cx, AppEvent::OpenTemplateGallery);
+                        cx.notify();
+                    }))
+                    .child("+ New Motion Graphic"),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn template_gallery_dialog(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let gallery = self
+            .explorer
+            .template_gallery
+            .as_ref()
+            .expect("template gallery rendered without state");
+        let cards = gallery
+            .templates
+            .iter()
+            .enumerate()
+            .map(|(index, template)| {
+                self.template_gallery_card(template, index, index == gallery.selected, cx)
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .id("template-gallery-overlay")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::rgba(0x00000088))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|editor, _, _, cx| {
+                    editor.emit_event(cx, AppEvent::CloseTemplateGallery);
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .id("template-gallery-dialog")
+                    .w(px(720.0))
+                    .p_5()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(PANEL))
+                    .shadow_lg()
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(TEXT))
+                                    .child("New motion graphic"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .child("Pick a template to add to your project."),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("template-gallery-grid")
+                            .max_h(px(440.0))
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_wrap()
+                            .items_start()
+                            .content_start()
+                            .gap_3()
+                            .children(cards),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("gallery-cancel")
+                                    .h(px(32.0))
+                                    .px_4()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(6.0))
+                                    .border_1()
+                                    .border_color(rgb(BORDER))
+                                    .bg(rgb(SURFACE))
+                                    .hover(|s| s.bg(rgb(SURFACE_HOVER)))
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(TEXT))
+                                    .on_click(cx.listener(|editor, _, _, cx| {
+                                        editor.emit_event(cx, AppEvent::CloseTemplateGallery);
+                                        cx.notify();
+                                    }))
+                                    .child("Cancel"),
+                            )
+                            .child(
+                                div()
+                                    .id("gallery-create")
+                                    .h(px(32.0))
+                                    .px_4()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(6.0))
+                                    .bg(rgb(WARNING))
+                                    .hover(|s| s.bg(rgb(0xfbbf24)))
+                                    .cursor_pointer()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0x131417))
+                                    .on_click(cx.listener(|editor, _, _, cx| {
+                                        let Some(gallery) =
+                                            editor.explorer.template_gallery.as_ref()
+                                        else {
+                                            return;
+                                        };
+                                        let Some(template) =
+                                            gallery.templates.get(gallery.selected)
+                                        else {
+                                            return;
+                                        };
+                                        let template_id = template.id.clone();
+                                        editor.emit_event(
+                                            cx,
+                                            AppEvent::CreateComposition { template_id },
+                                        );
+                                        cx.notify();
+                                    }))
+                                    .child("Create"),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn template_gallery_card(
+        &self,
+        template: &TemplateDefinition,
+        index: usize,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let thumbnail = self.explorer.gallery_thumbs.get(&template.id).cloned();
+        let rendering = thumbnail.is_none();
+        div()
+            .id(gpui::SharedString::from(format!("gallery-card-{index}")))
+            .w(px(200.0))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .p_2()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(if selected {
+                WARNING
+            } else {
+                BORDER
+            }))
+            .bg(rgb(if selected {
+                SURFACE_HOVER
+            } else {
+                SURFACE
+            }))
+            .hover(|s| s.bg(rgb(SURFACE_HOVER)).border_color(rgb(WARNING)))
+            .cursor_pointer()
+            .on_click(cx.listener(move |editor, _, _, cx| {
+                editor.emit_event(cx, AppEvent::GalleryTemplateSelected { index });
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .w_full()
+                    .h(px(96.0))
+                    .rounded(px(4.0))
+                    .bg(rgb(0x0e0f12))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .overflow_hidden()
+                    .when_some(thumbnail, |this, path| {
+                        this.child(
+                            gpui::img(path)
+                                .size_full()
+                                .object_fit(gpui::ObjectFit::Cover),
+                        )
+                    })
+                    .when(rendering, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(MUTED))
+                                .child("Rendering…"),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_ellipsis()
+                    .text_color(rgb(TEXT))
+                    .child(template.name.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(rgb(MUTED))
+                    .text_ellipsis()
+                    .child(template.category.clone()),
+            )
+            .into_any_element()
+    }
+
     fn text_empty_state(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         div()
             .size_full()
@@ -1202,6 +1793,7 @@ struct CategoryCounts {
     image: usize,
     captions: usize,
     text: usize,
+    motion: usize,
 }
 
 fn format_card_duration(duration: f64) -> String {

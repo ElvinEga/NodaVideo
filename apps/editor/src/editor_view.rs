@@ -8,6 +8,8 @@ use crate::layout::{
     MIN_MEDIA_PANEL_WIDTH, MIN_PREVIEW_WIDTH, MIN_PROPERTY_PANEL_WIDTH, MIN_TIMELINE_HEIGHT,
     MIN_UPPER_WORKSPACE_HEIGHT, TOPBAR_HEIGHT,
 };
+use crate::preview::PreviewTarget;
+use crate::preview_events::PreviewEvent;
 use crate::project_picker;
 use crate::property_panel::property_panel_view;
 use crate::settings::settings_modal_view;
@@ -17,8 +19,6 @@ use crate::theme::{
 use crate::ui_components::cyberpunk_button::{
     button_cyberpunk_primary, button_cyberpunk_secondary,
 };
-use crate::preview::PreviewTarget;
-use crate::preview_events::PreviewEvent;
 use crate::ui_components::{
     HorizontalSplit, HorizontalSplitConstraints, VerticalSplit, VerticalSplitConstraints,
 };
@@ -99,6 +99,11 @@ impl Render for Editor {
             .new_timeline_dialog
             .as_ref()
             .map(|_| self.new_timeline_dialog(cx));
+        let template_gallery = self
+            .explorer
+            .template_gallery
+            .as_ref()
+            .map(|_| self.template_gallery_dialog(cx));
         let missing_media_dialog = self
             .missing_media_dialog
             .as_ref()
@@ -192,6 +197,7 @@ impl Render for Editor {
             .when_some(context_menu, |this, menu| this.child(menu))
             .when_some(rename_dialog, |this, dialog| this.child(dialog))
             .when_some(new_timeline_dialog, |this, dialog| this.child(dialog))
+            .when_some(template_gallery, |this, dialog| this.child(dialog))
             .when(self.explorer.trash_timeline_dialog_open, |this| {
                 this.child(self.trash_timeline_dialog_view(cx))
             })
@@ -278,7 +284,12 @@ impl Editor {
             div()
                 .size_full()
                 .flex()
-                .child(div().w(px(left_width)).h_full().child(self.explorer_panel(cx)))
+                .child(
+                    div()
+                        .w(px(left_width))
+                        .h_full()
+                        .child(self.explorer_panel(cx)),
+                )
                 .child(self.monitor_panel(center_width, preview_height, cx))
                 .into_any_element()
         } else if self.show_inspector {
@@ -304,12 +315,7 @@ impl Editor {
         }
     }
 
-    fn monitor_panel(
-        &self,
-        width: f32,
-        height: f32,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    fn monitor_panel(&self, width: f32, height: f32, cx: &mut Context<Self>) -> gpui::AnyElement {
         let (title, detail) = match &self.preview.target {
             PreviewTarget::Timeline { .. } => {
                 let name = self
@@ -357,7 +363,12 @@ impl Editor {
         };
         let title_font_label = match title_id {
             Some(title_id) => {
-                match self.explorer.titles.iter().find(|title| title.id == title_id) {
+                match self
+                    .explorer
+                    .titles
+                    .iter()
+                    .find(|title| title.id == title_id)
+                {
                     Some(title) => format!("Text · {}", title.properties.font),
                     None => "Text".to_string(),
                 }
@@ -367,7 +378,11 @@ impl Editor {
 
         let header_height = 36.0f32;
         let control_height = 40.0f32;
-        let footer_height = if title_id.is_some() { 40.0f32 } else { 0.0f32 };
+        let footer_height = if title_id.is_some() {
+            40.0f32
+        } else {
+            0.0f32
+        };
         let screen_height = (height - header_height - control_height - footer_height).max(60.0);
 
         div()
@@ -466,19 +481,14 @@ impl Editor {
                     .bg(rgb(PANEL))
                     // Left: Monospace Timecode
                     .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .justify_start()
-                            .child(
-                                div()
-                                    .font_family("monospace")
-                                    .text_size(px(11.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(0x818cf8))
-                                    .child(current_tc),
-                            ),
+                        div().flex_1().flex().items_center().justify_start().child(
+                            div()
+                                .font_family("monospace")
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(0x818cf8))
+                                .child(current_tc),
+                        ),
                     )
                     // Center: Transport controls (Previous, Play/Pause, Next)
                     .child(
@@ -505,7 +515,11 @@ impl Editor {
                                         svg()
                                             .path(IconName::Previous.path())
                                             .size(px(13.0))
-                                            .text_color(rgb(if is_empty { MUTED } else { TEXT })),
+                                            .text_color(rgb(if is_empty {
+                                                MUTED
+                                            } else {
+                                                TEXT
+                                            })),
                                     ),
                             )
                             // Play / Pause Toggle
@@ -559,24 +573,23 @@ impl Editor {
                                         svg()
                                             .path(IconName::Next.path())
                                             .size(px(13.0))
-                                            .text_color(rgb(if is_empty { MUTED } else { TEXT })),
+                                            .text_color(rgb(if is_empty {
+                                                MUTED
+                                            } else {
+                                                TEXT
+                                            })),
                                     ),
                             ),
                     )
                     // Right: Duration / FPS
                     .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .justify_end()
-                            .child(
-                                div()
-                                    .font_family("monospace")
-                                    .text_size(px(10.5))
-                                    .text_color(rgb(MUTED))
-                                    .child(total_tc),
-                            ),
+                        div().flex_1().flex().items_center().justify_end().child(
+                            div()
+                                .font_family("monospace")
+                                .text_size(px(10.5))
+                                .text_color(rgb(MUTED))
+                                .child(total_tc),
+                        ),
                     ),
             )
             // Title footer: font label + Add to Timeline (only for a pool title preview)
@@ -610,7 +623,8 @@ impl Editor {
                                 .cursor_pointer()
                                 .hover(|s| s.bg(rgb(ACCENT_HOVER)))
                                 .on_click(cx.listener(move |editor, _, _, cx| {
-                                    editor.emit_event(cx, AppEvent::AddTitleToTimeline { title_id });
+                                    editor
+                                        .emit_event(cx, AppEvent::AddTitleToTimeline { title_id });
                                     cx.notify();
                                 }))
                                 .child(
@@ -1178,7 +1192,11 @@ impl Editor {
                     .min_w_0()
                     .items_center()
                     .gap_2p5()
-                    .child(img(IconName::NodaMark.path()).size(px(24.0)).flex_shrink_0())
+                    .child(
+                        img(IconName::NodaMark.path())
+                            .size(px(24.0))
+                            .flex_shrink_0(),
+                    )
                     .child(
                         div()
                             .text_size(px(14.0))
@@ -1186,7 +1204,13 @@ impl Editor {
                             .text_color(rgb(TEXT))
                             .child("NodaVideo"),
                     )
-                    .child(div().mx_1().h(px(16.0)).border_r_1().border_color(rgb(BORDER)))
+                    .child(
+                        div()
+                            .mx_1()
+                            .h(px(16.0))
+                            .border_r_1()
+                            .border_color(rgb(BORDER)),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -1195,12 +1219,7 @@ impl Editor {
                             .child(project_name),
                     )
                     .when(export_enabled, |this| {
-                        this.child(
-                            div()
-                                .size(px(6.0))
-                                .rounded_full()
-                                .bg(rgb(0x818cf8)),
-                        )
+                        this.child(div().size(px(6.0)).rounded_full().bg(rgb(0x818cf8)))
                     }),
             )
             // Center: Workspaces navigation tabs
@@ -1211,9 +1230,24 @@ impl Editor {
                     .items_stretch()
                     .gap_1()
                     .child(self.workspace_nav_tab("workspace-edit", "Edit", WorkspaceTab::Edit, cx))
-                    .child(self.workspace_nav_tab("workspace-color", "Color", WorkspaceTab::Color, cx))
-                    .child(self.workspace_nav_tab("workspace-audio", "Audio", WorkspaceTab::Audio, cx))
-                    .child(self.workspace_nav_tab("workspace-ai", "AI Studio", WorkspaceTab::AiStudio, cx)),
+                    .child(self.workspace_nav_tab(
+                        "workspace-color",
+                        "Color",
+                        WorkspaceTab::Color,
+                        cx,
+                    ))
+                    .child(self.workspace_nav_tab(
+                        "workspace-audio",
+                        "Audio",
+                        WorkspaceTab::Audio,
+                        cx,
+                    ))
+                    .child(self.workspace_nav_tab(
+                        "workspace-ai",
+                        "AI Studio",
+                        WorkspaceTab::AiStudio,
+                        cx,
+                    )),
             )
             // Right: Undo/Redo, Dividers, Panel Toggles, Projects, Export
             .child(
@@ -1281,7 +1315,13 @@ impl Editor {
                             .child("↷"),
                     )
                     // Divider
-                    .child(div().mx_1().h(px(16.0)).border_r_1().border_color(rgb(BORDER)))
+                    .child(
+                        div()
+                            .mx_1()
+                            .h(px(16.0))
+                            .border_r_1()
+                            .border_color(rgb(BORDER)),
+                    )
                     // Media Panel Toggle
                     .child(
                         div()
@@ -1327,19 +1367,27 @@ impl Editor {
                             .cursor_pointer()
                             .text_size(px(11.0))
                             .font_weight(FontWeight::MEDIUM)
-                            .when(self.show_inspector && self.right_dock == RightDockTab::Inspector, |this| {
-                                this.border_color(rgb(ACCENT))
-                                    .bg(rgb(0x23243a))
-                                    .text_color(rgb(TEXT))
-                            })
-                            .when(!self.show_inspector || self.right_dock != RightDockTab::Inspector, |this| {
-                                this.border_color(rgb(BORDER))
-                                    .bg(rgb(SURFACE))
-                                    .text_color(rgb(MUTED))
-                                    .hover(|s| s.text_color(rgb(TEXT)))
-                            })
+                            .when(
+                                self.show_inspector && self.right_dock == RightDockTab::Inspector,
+                                |this| {
+                                    this.border_color(rgb(ACCENT))
+                                        .bg(rgb(0x23243a))
+                                        .text_color(rgb(TEXT))
+                                },
+                            )
+                            .when(
+                                !self.show_inspector || self.right_dock != RightDockTab::Inspector,
+                                |this| {
+                                    this.border_color(rgb(BORDER))
+                                        .bg(rgb(SURFACE))
+                                        .text_color(rgb(MUTED))
+                                        .hover(|s| s.text_color(rgb(TEXT)))
+                                },
+                            )
                             .on_click(cx.listener(|editor, _, _, cx| {
-                                if editor.show_inspector && editor.right_dock == RightDockTab::Inspector {
+                                if editor.show_inspector
+                                    && editor.right_dock == RightDockTab::Inspector
+                                {
                                     editor.show_inspector = false;
                                 } else {
                                     editor.show_inspector = true;
@@ -1363,19 +1411,27 @@ impl Editor {
                             .cursor_pointer()
                             .text_size(px(11.0))
                             .font_weight(FontWeight::MEDIUM)
-                            .when(self.show_inspector && self.right_dock == RightDockTab::Assistant, |this| {
-                                this.border_color(rgb(ACCENT))
-                                    .bg(rgb(0x23243a))
-                                    .text_color(rgb(TEXT))
-                            })
-                            .when(!self.show_inspector || self.right_dock != RightDockTab::Assistant, |this| {
-                                this.border_color(rgb(BORDER))
-                                    .bg(rgb(SURFACE))
-                                    .text_color(rgb(MUTED))
-                                    .hover(|s| s.text_color(rgb(TEXT)))
-                            })
+                            .when(
+                                self.show_inspector && self.right_dock == RightDockTab::Assistant,
+                                |this| {
+                                    this.border_color(rgb(ACCENT))
+                                        .bg(rgb(0x23243a))
+                                        .text_color(rgb(TEXT))
+                                },
+                            )
+                            .when(
+                                !self.show_inspector || self.right_dock != RightDockTab::Assistant,
+                                |this| {
+                                    this.border_color(rgb(BORDER))
+                                        .bg(rgb(SURFACE))
+                                        .text_color(rgb(MUTED))
+                                        .hover(|s| s.text_color(rgb(TEXT)))
+                                },
+                            )
                             .on_click(cx.listener(|editor, _, _, cx| {
-                                if editor.show_inspector && editor.right_dock == RightDockTab::Assistant {
+                                if editor.show_inspector
+                                    && editor.right_dock == RightDockTab::Assistant
+                                {
                                     editor.show_inspector = false;
                                 } else {
                                     editor.show_inspector = true;
@@ -1386,7 +1442,13 @@ impl Editor {
                             .child("AI"),
                     )
                     // Divider
-                    .child(div().mx_1().h(px(16.0)).border_r_1().border_color(rgb(BORDER)))
+                    .child(
+                        div()
+                            .mx_1()
+                            .h(px(16.0))
+                            .border_r_1()
+                            .border_color(rgb(BORDER)),
+                    )
                     // Projects
                     .child(
                         button_cyberpunk_secondary("topbar-projects", "Projects", true, window, cx)
@@ -1497,16 +1559,16 @@ fn color_slider_row(name: &'static str, val: &'static str) -> gpui::AnyElement {
         .justify_between()
         .text_xs()
         .child(div().text_color(rgb(MUTED)).child(name))
-        .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(val))
+        .child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(TEXT))
+                .child(val),
+        )
         .into_any_element()
 }
 
-fn audio_channel_strip(
-    name: &'static str,
-    db: f32,
-    _muted: bool,
-    _solo: bool,
-) -> gpui::AnyElement {
+fn audio_channel_strip(name: &'static str, db: f32, _muted: bool, _solo: bool) -> gpui::AnyElement {
     div()
         .w(px(88.0))
         .h_full()
@@ -1585,13 +1647,7 @@ fn audio_channel_strip(
                         .flex()
                         .flex_col()
                         .justify_end()
-                        .child(
-                            div()
-                                .w_full()
-                                .h(px(65.0))
-                                .rounded_full()
-                                .bg(rgb(SUCCESS)),
-                        ),
+                        .child(div().w_full().h(px(65.0)).rounded_full().bg(rgb(SUCCESS))),
                 )
                 // Fader track & handle
                 .child(
@@ -1673,13 +1729,7 @@ fn audio_master_strip(name: &'static str, db: f32) -> gpui::AnyElement {
                         .flex()
                         .flex_col()
                         .justify_end()
-                        .child(
-                            div()
-                                .w_full()
-                                .h(px(72.0))
-                                .rounded_full()
-                                .bg(rgb(SUCCESS)),
-                        ),
+                        .child(div().w_full().h(px(72.0)).rounded_full().bg(rgb(SUCCESS))),
                 )
                 .child(
                     div()
@@ -1731,8 +1781,19 @@ fn eq_band_node(label: &'static str, gain: &'static str) -> gpui::AnyElement {
                 .font_weight(FontWeight::BOLD)
                 .child("●"),
         )
-        .child(div().text_size(px(10.0)).text_color(rgb(MUTED)).child(label))
-        .child(div().text_size(px(10.0)).font_weight(FontWeight::BOLD).text_color(rgb(TEXT)).child(gain))
+        .child(
+            div()
+                .text_size(px(10.0))
+                .text_color(rgb(MUTED))
+                .child(label),
+        )
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(TEXT))
+                .child(gain),
+        )
         .into_any_element()
 }
 
@@ -1783,7 +1844,11 @@ fn ai_tool_card(title: &'static str, desc: &'static str, btn: &'static str) -> g
         .into_any_element()
 }
 
-fn storyboard_scene_card(title: &'static str, desc: &'static str, duration: &'static str) -> gpui::AnyElement {
+fn storyboard_scene_card(
+    title: &'static str,
+    desc: &'static str,
+    duration: &'static str,
+) -> gpui::AnyElement {
     div()
         .w(px(220.0))
         .p_3()

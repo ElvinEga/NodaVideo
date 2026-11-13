@@ -87,11 +87,7 @@ pub(crate) fn button_cyberpunk_secondary(
         .bg(rgb(SURFACE))
         .border_1()
         .border_color(rgb(BORDER))
-        .hover(|style| {
-            style
-                .bg(rgb(SURFACE_HOVER))
-                .border_color(rgb(ACCENT))
-        })
+        .hover(|style| style.bg(rgb(SURFACE_HOVER)).border_color(rgb(ACCENT)))
         .active(|style| style.bg(rgb(SURFACE_HOVER)).opacity(0.85))
         .text_color(rgb(TEXT))
         .text_size(px(12.0))

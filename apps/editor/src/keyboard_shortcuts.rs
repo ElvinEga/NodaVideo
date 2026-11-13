@@ -130,9 +130,7 @@ pub(crate) fn keyboard_shortcuts_view(cx: &mut Context<Editor>) -> AnyElement {
                                 .rounded_md()
                                 .cursor(CursorStyle::PointingHand)
                                 .text_color(rgb(MUTED))
-                                .hover(|style| {
-                                    style.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT))
-                                })
+                                .hover(|style| style.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
                                 .child("×")
                                 .on_click(cx.listener(|editor, _, _, cx| {
                                     editor.shortcuts_open = false;
@@ -173,10 +171,7 @@ fn shortcut_section(title: &str, rows: &[(&str, &[&str])]) -> impl IntoElement {
                 .text_color(rgb(MUTED))
                 .child(title.to_string()),
         )
-        .children(
-            rows.iter()
-                .map(|(label, keys)| shortcut_row(label, keys)),
-        )
+        .children(rows.iter().map(|(label, keys)| shortcut_row(label, keys)))
 }
 
 fn shortcut_row(label: &str, keys: &[&str]) -> impl IntoElement {

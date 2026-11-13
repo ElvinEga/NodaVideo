@@ -197,13 +197,11 @@ impl Editor {
     ) -> Result<PathBuf> {
         let relative_dir = PathBuf::new();
         let name = match stem {
-            Some(s) if !s.trim().is_empty() => {
-                timeline_document::unique_timeline_name_from_stem(
-                    &self.project_root,
-                    &relative_dir,
-                    s,
-                )
-            }
+            Some(s) if !s.trim().is_empty() => timeline_document::unique_timeline_name_from_stem(
+                &self.project_root,
+                &relative_dir,
+                s,
+            ),
             _ => timeline_document::default_timeline_name(&self.project_root, &relative_dir),
         };
         let (relative_path, timeline) =

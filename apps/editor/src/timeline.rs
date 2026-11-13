@@ -220,6 +220,7 @@ impl TimelineEditorExt for TimelineEditingState {
                     TrackKind::Audio
                 }
                 Clip::Text(_) => TrackKind::Text,
+                Clip::Composition(_) => TrackKind::Video,
             };
             if track.kind != expected_kind {
                 return Err(ClipPlacementRejection::IncompatibleTrack.into());
@@ -287,6 +288,7 @@ impl TimelineEditorExt for TimelineEditingState {
                     clip.source_out = clip.source_in + new_duration;
                 }
                 Clip::Text(_) => {}
+                Clip::Composition(_) => {}
             }
         }
         self.settings.frame_rate = frame_rate;
@@ -311,6 +313,7 @@ impl TimelineEditorExt for TimelineEditingState {
                     (Some(TrackKind::Video), Clip::Video(clip)) => {
                         !self.assets.iter().any(|asset| asset.id() == clip.asset_id)
                     }
+                    (Some(TrackKind::Video), Clip::Composition(_)) => false, // 合成引用项目库，不依赖时间线媒体资产。
                     (Some(TrackKind::Audio), Clip::Audio(clip)) => {
                         !self.assets.iter().any(|asset| asset.id() == clip.asset_id)
                     }
@@ -330,6 +333,9 @@ impl TimelineEditorExt for TimelineEditingState {
                     Clip::Text(clip) => {
                         clip.frame_length(frame_rate) < TimelineFrameIndex::ONE_FRAME
                     }
+                    Clip::Composition(clip) => {
+                        clip.frame_length(frame_rate) < TimelineFrameIndex::ONE_FRAME
+                    }
                 };
             !is_invalid
         });
@@ -338,6 +344,7 @@ impl TimelineEditorExt for TimelineEditingState {
                 Clip::Video(clip) => (clip.asset_id, &mut clip.source_in, &mut clip.source_out),
                 Clip::Audio(clip) => (clip.asset_id, &mut clip.source_in, &mut clip.source_out),
                 Clip::Text(_) => continue,
+                Clip::Composition(_) => continue,
             };
             if let Some(asset) = self.assets.iter().find(|asset| asset.id() == asset_id) {
                 if matches!(asset, timeline::Asset::Image(_)) {

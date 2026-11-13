@@ -269,6 +269,7 @@ impl Editor {
                     .w(px(width))
                     .h(px(height))
                     .child(player_view)
+                    .child(self.preview_composition_overlay(player, cx))
                     .child(self.preview_text_overlay(player, cx))
                     .into_any_element()
             }
@@ -288,7 +289,12 @@ impl Editor {
                 preview_image_file(self.project_root.join(path), width, height)
             }
             PreviewTarget::TextTitle(title_id) => {
-                match self.explorer.titles.iter().find(|title| title.id == *title_id) {
+                match self
+                    .explorer
+                    .titles
+                    .iter()
+                    .find(|title| title.id == *title_id)
+                {
                     Some(title) => div()
                         .w(px(width))
                         .h(px(height))
@@ -312,10 +318,7 @@ impl Editor {
         }
     }
 
-    pub(crate) fn preview_timecode_and_duration(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> (String, String) {
+    pub(crate) fn preview_timecode_and_duration(&self, cx: &mut Context<Self>) -> (String, String) {
         match &self.preview.target {
             PreviewTarget::Timeline { .. } => {
                 if let Some(timeline) = &self.timeline {
@@ -348,7 +351,11 @@ impl Editor {
                 (current_tc, total_tc)
             }
             PreviewTarget::TextTitle(title_id) => {
-                let total_tc = match self.explorer.titles.iter().find(|title| title.id == *title_id)
+                let total_tc = match self
+                    .explorer
+                    .titles
+                    .iter()
+                    .find(|title| title.id == *title_id)
                 {
                     Some(title) => format_time(title.duration.as_secs_f64(), true),
                     None => "00:00".to_string(),
@@ -421,11 +428,13 @@ impl Editor {
                 // If already near beginning (<= 0.8s), go to previous video in the list
                 let current_path = path.clone();
                 let videos = self.ordered_media_videos();
-                if let Some(pos) = videos.iter().position(|p| {
-                    p == &current_path
-                        || self.project_root.join(p) == self.project_root.join(&current_path)
-                })
-                .filter(|&pos| pos > 0)
+                if let Some(pos) = videos
+                    .iter()
+                    .position(|p| {
+                        p == &current_path
+                            || self.project_root.join(p) == self.project_root.join(&current_path)
+                    })
+                    .filter(|&pos| pos > 0)
                 {
                     let prev_path = videos[pos - 1].clone();
                     self.emit_event(
@@ -551,7 +560,11 @@ impl Editor {
                     p == &current_path
                         || self.project_root.join(p) == self.project_root.join(&current_path)
                 }) {
-                    let next_pos = if pos + 1 < videos.len() { pos + 1 } else { 0 };
+                    let next_pos = if pos + 1 < videos.len() {
+                        pos + 1
+                    } else {
+                        0
+                    };
                     let next_path = videos[next_pos].clone();
                     self.emit_event(
                         cx,

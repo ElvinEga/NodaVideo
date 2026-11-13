@@ -9,7 +9,8 @@ use crate::property_panel_empty::empty_panel_view;
 use crate::property_panel_image_file::{ImageFilePanel, image_file_view};
 use crate::property_panel_srt_file::{SrtFilePanel, srt_file_panel, srt_file_view};
 use crate::property_panel_text::{
-    TextClipPanel, TextTitlePanel, text_clip_panel, text_clip_view, text_title_panel, text_title_view,
+    TextClipPanel, TextTitlePanel, text_clip_panel, text_clip_view, text_title_panel,
+    text_title_view,
 };
 use crate::property_panel_timeline::{TimelinePanel, timeline_panel, timeline_view};
 use crate::property_panel_transform::VideoTransformInputs;
@@ -78,6 +79,7 @@ pub(crate) fn current_property_panel(editor: &Editor) -> PropertyPanel {
                 editor.event_bus.clone(),
                 editor.focus_handle.clone(),
             )),
+            Clip::Composition(_) => PropertyPanel::None, // 合成图形检查器尚未实现，暂不显示属性面板。
         };
     }
 

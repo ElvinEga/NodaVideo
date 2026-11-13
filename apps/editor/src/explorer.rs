@@ -15,6 +15,7 @@ use gpui::{
     MouseButton, ParentElement, ScrollHandle, StatefulInteractiveElement, Styled, Task, div, px,
     rgb,
 };
+use nodavideo_hyperframes_bridge::{CompositionAsset, TemplateDefinition, load_compositions};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -42,6 +43,18 @@ pub(crate) enum MediaCategoryFilter {
     Image,
     Captions,
     Text,
+    Motion,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum CompositionThumbJob {
+    Composition(Ulid),
+    Template(TemplateDefinition),
+}
+
+pub(crate) struct TemplateGalleryState {
+    pub(crate) selected: usize,
+    pub(crate) templates: Vec<TemplateDefinition>, // 打开画廊时的模板快照；渲染不再读盘。
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -68,8 +81,17 @@ pub(crate) struct ExplorerState {
     pub(crate) view_mode: MediaViewMode,
     pub(crate) titles: Vec<TextTitle>, // 项目内可复用标题；不是导入文件，无源路径或缩略图二进制。
     pub(crate) selected_title: Option<Ulid>,
+    pub(crate) compositions: Vec<CompositionAsset>, // 项目内可复用 motion graphics；模板实例，非导入文件。
+    pub(crate) selected_composition: Option<Ulid>,
+    pub(crate) template_gallery: Option<TemplateGalleryState>,
+    pub(crate) composition_thumbs: HashMap<Ulid, PathBuf>, // 资产 id → 磁盘缓存 PNG。
+    pub(crate) gallery_thumbs: HashMap<String, PathBuf>,   // 模板 id → 磁盘缓存 PNG。
+    pub(crate) composition_thumb_queue: VecDeque<CompositionThumbJob>,
+    pub(crate) composition_thumb_task: Option<Task<()>>,
+    pub(crate) composition_thumb_failed: HashSet<Ulid>, // 本次会话内不再重试。
+    pub(crate) gallery_thumb_failed: HashSet<String>,
     pub(crate) imported_media: Vec<FileTreeEntry>, // 库中引用的素材；项目内的文件仍由 file_tree 展示。
-    pub(crate) imported_paths: HashSet<PathBuf>,   // 媒体库成员；media_metadata 还包含仅探测的项目文件。
+    pub(crate) imported_paths: HashSet<PathBuf>, // 媒体库成员；media_metadata 还包含仅探测的项目文件。
     pub(crate) media_metadata: HashMap<PathBuf, Asset>, // 键为规范化绝对路径。
     pub(crate) missing_media: HashSet<PathBuf>,
     pub(crate) media_errors: HashMap<PathBuf, String>,
@@ -80,7 +102,7 @@ pub(crate) struct ExplorerState {
     pub(crate) thumbnail_queue: VecDeque<PathBuf>,
     pub(crate) thumbnail_task: Option<Task<()>>,
     pub(crate) thumbnail_failed: HashSet<PathBuf>, // 本次会话内不再重试。
-    _file_tree_watch: Task<()>,                  // drop 时停止监听项目目录。
+    _file_tree_watch: Task<()>,                    // drop 时停止监听项目目录。
 }
 
 #[derive(Deserialize, Serialize)]
@@ -130,7 +152,9 @@ impl ExplorerState {
         let imported_media: Vec<FileTreeEntry> = media_metadata
             .values()
             .map(|asset| {
-                let size_bytes = fs::metadata(asset.path()).ok().map(|metadata| metadata.len());
+                let size_bytes = fs::metadata(asset.path())
+                    .ok()
+                    .map(|metadata| metadata.len());
                 FileTreeEntry::from_media_asset(asset, size_bytes)
             })
             .collect();
@@ -143,6 +167,13 @@ impl ExplorerState {
             Ok(titles) => titles,
             Err(error) => {
                 log::error!("Could not load titles: {error:?}");
+                Vec::new()
+            }
+        };
+        let compositions = match load_compositions(project_root) {
+            Ok(compositions) => compositions,
+            Err(error) => {
+                log::error!("Could not load compositions: {error:?}");
                 Vec::new()
             }
         };
@@ -163,6 +194,15 @@ impl ExplorerState {
             view_mode: MediaViewMode::List,
             titles,
             selected_title: None,
+            compositions,
+            selected_composition: None,
+            template_gallery: None,
+            composition_thumbs: HashMap::new(),
+            gallery_thumbs: HashMap::new(),
+            composition_thumb_queue: VecDeque::new(),
+            composition_thumb_task: None,
+            composition_thumb_failed: HashSet::new(),
+            gallery_thumb_failed: HashSet::new(),
             imported_media,
             imported_paths,
             media_metadata,
@@ -196,7 +236,9 @@ impl ExplorerState {
             .iter()
             .filter(|(path, _)| self.imported_paths.contains(*path))
             .map(|(_, asset)| {
-                let size_bytes = fs::metadata(asset.path()).ok().map(|metadata| metadata.len());
+                let size_bytes = fs::metadata(asset.path())
+                    .ok()
+                    .map(|metadata| metadata.len());
                 FileTreeEntry::from_media_asset(asset, size_bytes)
             })
             .collect();

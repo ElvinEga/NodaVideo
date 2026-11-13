@@ -14,4 +14,5 @@ pub(crate) const LINK: u32 = 0x818cf8;
 pub(crate) const CLIP_BLUE: u32 = 0x312e81;
 pub(crate) const CLIP_AUDIO: u32 = 0x064e3b;
 pub(crate) const CLIP_TEXT: u32 = 0x581c87;
+pub(crate) const CLIP_MOTION: u32 = 0x8a5a1e;
 pub(crate) const CLIP_OFFLINE: u32 = 0x2a1a1c;

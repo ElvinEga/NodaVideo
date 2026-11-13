@@ -435,11 +435,14 @@ pub(crate) fn text_change_edit_action(clip_id: Ulid, change: TextPropertyChange)
     match change {
         TextPropertyChange::Content(text) => EditAction::SetTextContent { clip_id, text },
         TextPropertyChange::Font(font) => EditAction::SetTextFont { clip_id, font },
-        TextPropertyChange::FontSize(font_size) => EditAction::SetTextFontSize { clip_id, font_size },
-        TextPropertyChange::Color(color) => EditAction::SetTextColor { clip_id, color },
-        TextPropertyChange::Background(background) => {
-            EditAction::SetTextBackground { clip_id, background }
+        TextPropertyChange::FontSize(font_size) => {
+            EditAction::SetTextFontSize { clip_id, font_size }
         }
+        TextPropertyChange::Color(color) => EditAction::SetTextColor { clip_id, color },
+        TextPropertyChange::Background(background) => EditAction::SetTextBackground {
+            clip_id,
+            background,
+        },
         TextPropertyChange::BackgroundColor { red, green, blue } => {
             EditAction::SetTextBackgroundColor {
                 clip_id,
@@ -646,8 +649,10 @@ impl RenderOnce for FontSizeInput {
         let target = self.target;
         let value = self.value;
         let event_bus = self.event_bus;
-        let input =
-            window.use_keyed_state(format!("text-font-size-{}", target.key()), cx, |window, cx| {
+        let input = window.use_keyed_state(
+            format!("text-font-size-{}", target.key()),
+            cx,
+            |window, cx| {
                 let field =
                     TextInput::new_property_number_field(value.to_string(), return_focus, cx);
                 cx.subscribe(&cx.entity(), move |input, _, _: &TextInputEvent, cx| {
@@ -668,7 +673,8 @@ impl RenderOnce for FontSizeInput {
                 cx.on_blur(&field.focus_handle(cx), window, |_, _, cx| cx.notify())
                     .detach();
                 field
-            });
+            },
+        );
         input.update(cx, |field, cx| {
             let focused = field.focus_handle(cx).is_focused(window);
             let parsed = field.text().parse::<f64>();

@@ -12,10 +12,10 @@ use crate::layout::{
 };
 use crate::preview::PreviewTarget;
 use crate::theme::{ACCENT, BORDER, ERROR, MUTED, SURFACE, SURFACE_HOVER, TEXT};
-use crate::title::TextTitle;
 use crate::timeline::TimelineFrameIndex;
 use crate::timeline_document;
 use crate::timeline_interactions::{MarqueeSelection, TimelineTool};
+use crate::title::TextTitle;
 use crate::track::TrackKind;
 use gpui::prelude::*;
 use gpui::{
@@ -256,10 +256,7 @@ impl Editor {
                                         },
                                     ))
                                     .on_drag_move::<TextTitle>(cx.listener(
-                                        move |editor,
-                                              event: &DragMoveEvent<TextTitle>,
-                                              _,
-                                              cx| {
+                                        move |editor, event: &DragMoveEvent<TextTitle>, _, cx| {
                                             let event = AssetDragMoveEvent {
                                                 event: event.event.clone(),
                                                 bounds: event.bounds,
@@ -272,11 +269,12 @@ impl Editor {
                                             editor.emit_event(cx, AppEvent::DragDrop);
                                         },
                                     ))
-                                    .on_drop(cx.listener(
-                                        |editor, paths: &ExternalPaths, _, cx| {
-                                            editor.handle_timeline_tracks_external_drop(paths.paths(), cx);
-                                        },
-                                    ))
+                                    .on_drop(cx.listener(|editor, paths: &ExternalPaths, _, cx| {
+                                        editor.handle_timeline_tracks_external_drop(
+                                            paths.paths(),
+                                            cx,
+                                        );
+                                    }))
                                     .on_mouse_up_out(
                                         MouseButton::Left,
                                         cx.listener(|editor, _, _, cx| {
@@ -427,9 +425,11 @@ impl Editor {
                                             .position(point(px(left), px(0.0)))
                                             .anchor(Anchor::BottomLeft)
                                             .offset(point(px(0.0), px(-6.0)))
-                                            .child(self.seek_preview_popup(
-                                                &preview, timecode, caret_x,
-                                            )),
+                                            .child(
+                                                self.seek_preview_popup(
+                                                    &preview, timecode, caret_x,
+                                                ),
+                                            ),
                                     )
                                     .with_priority(1),
                                 )
@@ -678,10 +678,26 @@ impl Editor {
         let snap_active = timeline.snapping_enabled;
         let magnet_active = timeline.track_magnet_enabled;
 
-        let selection_icon_color = if selection_active { rgb(0x818cf8) } else { rgb(MUTED) };
-        let blade_icon_color = if blade_active { rgb(0x818cf8) } else { rgb(MUTED) };
-        let snap_icon_color = if snap_active { rgb(0x818cf8) } else { rgb(MUTED) };
-        let magnet_icon_color = if magnet_active { rgb(0x818cf8) } else { rgb(MUTED) };
+        let selection_icon_color = if selection_active {
+            rgb(0x818cf8)
+        } else {
+            rgb(MUTED)
+        };
+        let blade_icon_color = if blade_active {
+            rgb(0x818cf8)
+        } else {
+            rgb(MUTED)
+        };
+        let snap_icon_color = if snap_active {
+            rgb(0x818cf8)
+        } else {
+            rgb(MUTED)
+        };
+        let magnet_icon_color = if magnet_active {
+            rgb(0x818cf8)
+        } else {
+            rgb(MUTED)
+        };
 
         let timeline_title = timeline
             .path
@@ -748,17 +764,21 @@ impl Editor {
                                     .items_center()
                                     .justify_center()
                                     .cursor_pointer()
-                                    .when(selection_active, |this| {
-                                        this.bg(rgb(0x312e81))
-                                    })
+                                    .when(selection_active, |this| this.bg(rgb(0x312e81)))
                                     .when(!selection_active, |this| {
                                         this.hover(|s| s.bg(rgb(SURFACE_HOVER)))
                                     })
                                     .tooltip(|_, cx| {
-                                        crate::tooltip::tooltip_view("Selection Tool", Some("V"), cx)
+                                        crate::tooltip::tooltip_view(
+                                            "Selection Tool",
+                                            Some("V"),
+                                            cx,
+                                        )
                                     })
                                     .on_click(cx.listener(|editor, _, _, cx| {
-                                        let Some(timeline) = editor.timeline.as_mut() else { return; };
+                                        let Some(timeline) = editor.timeline.as_mut() else {
+                                            return;
+                                        };
                                         timeline.activate_timeline_tool(TimelineTool::Selection);
                                         cx.notify();
                                     }))
@@ -783,9 +803,7 @@ impl Editor {
                                     .items_center()
                                     .justify_center()
                                     .cursor_pointer()
-                                    .when(blade_active, |this| {
-                                        this.bg(rgb(0x312e81))
-                                    })
+                                    .when(blade_active, |this| this.bg(rgb(0x312e81)))
                                     .when(!blade_active, |this| {
                                         this.hover(|s| s.bg(rgb(SURFACE_HOVER)))
                                     })
@@ -793,7 +811,9 @@ impl Editor {
                                         crate::tooltip::tooltip_view("Blade Tool", Some("B"), cx)
                                     })
                                     .on_click(cx.listener(|editor, _, _, cx| {
-                                        let Some(timeline) = editor.timeline.as_mut() else { return; };
+                                        let Some(timeline) = editor.timeline.as_mut() else {
+                                            return;
+                                        };
                                         timeline.activate_timeline_tool(TimelineTool::Blade);
                                         cx.notify();
                                     }))
@@ -818,9 +838,7 @@ impl Editor {
                                     .items_center()
                                     .justify_center()
                                     .cursor_pointer()
-                                    .when(snap_active, |this| {
-                                        this.bg(rgb(0x312e81))
-                                    })
+                                    .when(snap_active, |this| this.bg(rgb(0x312e81)))
                                     .when(!snap_active, |this| {
                                         this.hover(|s| s.bg(rgb(SURFACE_HOVER)))
                                     })
@@ -852,14 +870,16 @@ impl Editor {
                                     .items_center()
                                     .justify_center()
                                     .cursor_pointer()
-                                    .when(magnet_active, |this| {
-                                        this.bg(rgb(0x312e81))
-                                    })
+                                    .when(magnet_active, |this| this.bg(rgb(0x312e81)))
                                     .when(!magnet_active, |this| {
                                         this.hover(|s| s.bg(rgb(SURFACE_HOVER)))
                                     })
                                     .tooltip(|_, cx| {
-                                        crate::tooltip::tooltip_view("Track Magnet", Some("Ripple"), cx)
+                                        crate::tooltip::tooltip_view(
+                                            "Track Magnet",
+                                            Some("Ripple"),
+                                            cx,
+                                        )
                                     })
                                     .on_click(cx.listener(|editor, _, _, cx| {
                                         editor.toggle_track_magnet();
@@ -874,7 +894,7 @@ impl Editor {
                                                 this.hover(|s| s.text_color(rgb(TEXT)))
                                             }),
                                     ),
-                            )
+                            ),
                     )
                     // Divider
                     .child(div().h(px(14.0)).border_r_1().border_color(rgb(BORDER)))
@@ -1043,28 +1063,35 @@ impl Editor {
                                     .items_center()
                                     .cursor_pointer()
                                     .tooltip(|_, cx| {
-                                        crate::tooltip::tooltip_view("Timeline Zoom", Some("Cmd+Scroll"), cx)
+                                        crate::tooltip::tooltip_view(
+                                            "Timeline Zoom",
+                                            Some("Cmd+Scroll"),
+                                            cx,
+                                        )
                                     })
-                                    .on_click(cx.listener(move |editor, event: &ClickEvent, _, cx| {
-                                        let bounds = bounds_cell.get();
-                                        let width = f32::from(bounds.size.width);
-                                        if width <= 0.0 || editor.timeline.is_none() {
-                                            return;
-                                        }
-                                        let offset_x = (f32::from(event.position().x) - f32::from(bounds.origin.x))
+                                    .on_click(cx.listener(
+                                        move |editor, event: &ClickEvent, _, cx| {
+                                            let bounds = bounds_cell.get();
+                                            let width = f32::from(bounds.size.width);
+                                            if width <= 0.0 || editor.timeline.is_none() {
+                                                return;
+                                            }
+                                            let offset_x = (f32::from(event.position().x)
+                                                - f32::from(bounds.origin.x))
                                             .clamp(0.0, width);
-                                        let ratio = offset_x / width;
-                                        let target_log = min_log + ratio * (max_log - min_log);
-                                        let target_pps = target_log.exp().clamp(0.1, 1000.0);
-                                        let anchor = editor.timeline_playhead_seconds(cx);
-                                        let timeline = editor.timeline.as_mut().unwrap();
-                                        let factor = target_pps / timeline.pixels_per_second;
-                                        timeline.zoom(factor, anchor);
-                                        if let Err(error) = timeline.save() {
-                                            log::error!("{error:?}");
-                                        }
-                                        cx.notify();
-                                    }))
+                                            let ratio = offset_x / width;
+                                            let target_log = min_log + ratio * (max_log - min_log);
+                                            let target_pps = target_log.exp().clamp(0.1, 1000.0);
+                                            let anchor = editor.timeline_playhead_seconds(cx);
+                                            let timeline = editor.timeline.as_mut().unwrap();
+                                            let factor = target_pps / timeline.pixels_per_second;
+                                            timeline.zoom(factor, anchor);
+                                            if let Err(error) = timeline.save() {
+                                                log::error!("{error:?}");
+                                            }
+                                            cx.notify();
+                                        },
+                                    ))
                                     .child(
                                         div()
                                             .relative()
@@ -1099,7 +1126,9 @@ impl Editor {
                                             )
                                             .child(
                                                 canvas(
-                                                    move |bounds, _, _| zoom_track_bounds.set(bounds),
+                                                    move |bounds, _, _| {
+                                                        zoom_track_bounds.set(bounds)
+                                                    },
                                                     |_, _, _, _| {},
                                                 )
                                                 .absolute()
@@ -1207,7 +1236,10 @@ fn seek_preview_caret(caret_x: f32, card_height: f32) -> gpui::AnyElement {
             fill.line_to(tip);
             fill.line_to(right);
             fill.close();
-            window.paint_path(fill.build().expect("valid seek preview caret"), rgb(SURFACE));
+            window.paint_path(
+                fill.build().expect("valid seek preview caret"),
+                rgb(SURFACE),
+            );
             let mut outline = PathBuilder::stroke(px(1.0));
             outline.move_to(left);
             outline.line_to(tip);
@@ -1471,12 +1503,7 @@ impl Editor {
                     .strip_prefix(&self.project_root)
                     .unwrap_or(&drag.absolute_path)
                     .to_path_buf();
-                self.emit_event(
-                    cx,
-                    AppEvent::OpenTimeline {
-                        path: relative,
-                    },
-                );
+                self.emit_event(cx, AppEvent::OpenTimeline { path: relative });
             }
             FileTreeEntryKind::Video | FileTreeEntryKind::Audio | FileTreeEntryKind::Image => {
                 if let Err(error) =
@@ -1500,7 +1527,9 @@ impl Editor {
         self.import_external_paths(paths, cx);
 
         // Check if a .timeline file was dropped
-        if let Some(timeline_path) = paths.iter().find(|p| timeline_document::is_timeline_path(p))
+        if let Some(timeline_path) = paths
+            .iter()
+            .find(|p| timeline_document::is_timeline_path(p))
             && let Ok(relative) = timeline_path.strip_prefix(&self.project_root)
         {
             self.emit_event(

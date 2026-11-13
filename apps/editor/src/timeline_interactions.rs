@@ -742,7 +742,12 @@ impl Editor {
         {
             timeline.set_playhead(target);
             timeline.save()?;
-            self.emit_event(cx, AppEvent::TimelineSeek { frame_index: target }); // 标尺 playhead 读 player 位置，需同步 seek。
+            self.emit_event(
+                cx,
+                AppEvent::TimelineSeek {
+                    frame_index: target,
+                },
+            ); // 标尺 playhead 读 player 位置，需同步 seek。
         }
         Ok(())
     }

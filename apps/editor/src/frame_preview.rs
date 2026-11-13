@@ -114,8 +114,7 @@ impl Editor {
         }
         let task = cx.spawn(async move |editor, cx| {
             loop {
-                let next =
-                    editor.update(cx, |editor, _| editor.frame_previews.queue.pop_front());
+                let next = editor.update(cx, |editor, _| editor.frame_previews.queue.pop_front());
                 let request = match next {
                     Ok(Some(request)) => request,
                     Ok(None) => break,
@@ -157,9 +156,9 @@ impl Editor {
                         let pixels = image::open(&destination)
                             .context("decoding cached frame")?
                             .to_rgba8();
-                        Ok::<_, anyhow::Error>(Arc::new(RenderImage::new(vec![
-                            image::Frame::new(pixels),
-                        ])))
+                        Ok::<_, anyhow::Error>(Arc::new(RenderImage::new(vec![image::Frame::new(
+                            pixels,
+                        )])))
                     })
                     .await;
                 let updated = editor.update(cx, |editor, cx| {
@@ -241,7 +240,9 @@ pub(crate) fn hover_preview_at(
 /// 缓存键覆盖源路径、修改时间、大小与源时间，素材被编辑后重新生成。
 fn frame_cache_path(key: &FrameKey) -> Result<PathBuf> {
     let metadata = fs::metadata(&key.path).context("reading video metadata")?;
-    let modified = metadata.modified().context("reading video modification time")?;
+    let modified = metadata
+        .modified()
+        .context("reading video modification time")?;
     let mut hasher = DefaultHasher::new();
     key.path.hash(&mut hasher);
     modified.hash(&mut hasher);

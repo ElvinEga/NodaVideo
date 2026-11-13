@@ -26,7 +26,11 @@ impl Editor {
         for path in videos {
             if self.explorer.thumbnail_cache.contains_key(&path)
                 || self.explorer.thumbnail_failed.contains(&path)
-                || self.explorer.thumbnail_queue.iter().any(|queued| queued == &path)
+                || self
+                    .explorer
+                    .thumbnail_queue
+                    .iter()
+                    .any(|queued| queued == &path)
             {
                 continue;
             }
@@ -138,7 +142,9 @@ pub(crate) fn thumbnail_cache_dir() -> PathBuf {
 /// regenerates.
 pub(crate) fn thumbnail_cache_path(source: &Path) -> Result<PathBuf> {
     let metadata = fs::metadata(source).context("reading video metadata")?;
-    let modified = metadata.modified().context("reading video modification time")?;
+    let modified = metadata
+        .modified()
+        .context("reading video modification time")?;
     let mut hasher = DefaultHasher::new();
     source.hash(&mut hasher);
     modified.hash(&mut hasher);

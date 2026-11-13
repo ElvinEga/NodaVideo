@@ -1,5 +1,6 @@
 //! AI assistant dock: provider cycling, streamed conversation, and approval cards.
 
+use crate::edit_action::EditAction;
 use crate::editor::Editor;
 use crate::event_bus::AppEvent;
 use crate::theme::{ACCENT, BORDER, ERROR, LINK, MUTED, PANEL, SURFACE, SURFACE_HOVER, TEXT};
@@ -17,7 +18,14 @@ use nodavideo_agent_codex::CodexAgentProvider;
 use nodavideo_agent_runtime::{
     AgentConfig, AgentEvent, AgentRuntime, MockAgentProvider, SessionId,
 };
+use nodavideo_hyperframes_bridge::{CompositionAsset, load_compositions};
+use nodavideo_mcp_server::{McpError, McpExecutor, McpToolDefinition};
+use serde_json::{Value, json};
+use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
+use timeline::TimelineEditingState;
+use ulid::Ulid;
 
 pub(crate) struct AssistantState {
     runtime: AgentRuntime,
@@ -364,6 +372,100 @@ impl Editor {
 }
 
 // Private APIs only
+impl Editor {
+    /// Runs an in-process provider's tool call off the UI thread, then applies the result.
+    /// Approval-required tools were already gated by the provider's ApprovalRequested card,
+    /// so execution here is approved; the executor still validates before committing.
+    fn begin_assistant_tool_call(
+        &mut self,
+        call_id: String,
+        tool_name: String,
+        arguments: Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.assistant.push_entry(AssistantEntry::ToolCall {
+            tool_name: tool_name.clone(),
+            arguments: arguments.to_string(),
+        });
+        self.assistant.scroll.scroll_to_bottom();
+        cx.notify();
+
+        let seed = self.timeline.as_ref().map(|timeline| {
+            (
+                timeline.editing_state.clone(),
+                timeline.interaction.selected_clip_ids.clone(),
+            )
+        });
+        let project_root = self.project_root.clone();
+        let generation = self.assistant.session_generation;
+
+        cx.spawn(async move |editor, cx| {
+            let background_tool_name = tool_name.clone();
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    run_assistant_tool_background(
+                        background_tool_name,
+                        &arguments,
+                        seed,
+                        &project_root,
+                    )
+                })
+                .await;
+            let _ = editor.update(cx, |editor, cx| {
+                if editor.assistant.session_generation != generation {
+                    return;
+                }
+                editor.finish_assistant_tool_call(call_id, tool_name, outcome, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_assistant_tool_call(
+        &mut self,
+        call_id: String,
+        tool_name: String,
+        outcome: AssistantToolOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(timeline) = outcome.mutated_timeline {
+            self.emit_event(cx, AppEvent::Edit(EditAction::ApplyAgentEdit { timeline }));
+        }
+        if let Some(compositions) = outcome.reloaded_compositions {
+            self.explorer.compositions = compositions;
+            self.schedule_composition_thumbnails(cx);
+        }
+
+        let (result, is_error) = match outcome.result {
+            Ok(result) => (result, false),
+            Err(error) => (json!({ "error": error.to_string() }), true),
+        };
+        self.assistant.push_entry(AssistantEntry::ToolResult {
+            tool_name,
+            result: result.to_string(),
+            is_error,
+        });
+        self.assistant.scroll.scroll_to_bottom();
+        cx.notify();
+
+        let Some(session) = self.assistant.session else {
+            return;
+        };
+        let runtime = self.assistant.runtime.clone();
+        gpui_tokio::Tokio::spawn(cx, async move {
+            if let Err(error) = runtime
+                .submit_tool_result(session, call_id, result, is_error)
+                .await
+            {
+                log::error!("Could not deliver the tool result to the agent: {error:?}");
+            }
+        })
+        .detach();
+    }
+}
+
+// Private APIs only
 impl AssistantState {
     fn provider(&self) -> &'static AssistantProvider {
         &ASSISTANT_PROVIDERS[self.provider_index]
@@ -375,6 +477,10 @@ impl AssistantState {
 
     fn provider_display_name(&self) -> &'static str {
         self.provider().display_name
+    }
+
+    fn provider_executes_in_process(&self) -> bool {
+        self.provider().executes_in_process
     }
 
     fn cycle_provider(&mut self) -> Option<SessionId> {
@@ -447,11 +553,14 @@ impl AssistantState {
                 is_error,
                 ..
             } => {
-                self.push_entry(AssistantEntry::ToolResult {
-                    tool_name,
-                    result: result.to_string(),
-                    is_error,
-                });
+                // 进程内执行的提供方由编辑器回填真实结果，忽略其自带的占位结果。
+                if !self.provider_executes_in_process() {
+                    self.push_entry(AssistantEntry::ToolResult {
+                        tool_name,
+                        result: result.to_string(),
+                        is_error,
+                    });
+                }
             }
             AgentEvent::ApprovalRequested {
                 request_id,
@@ -530,32 +639,49 @@ struct AssistantApproval {
     command_summary: String,
 }
 
+/// Result of an off-thread MCP tool call, applied back on the UI thread.
+struct AssistantToolOutcome {
+    result: Result<Value, McpError>,
+    /// Present only when a timeline-mutating tool succeeded; applied as one undoable edit.
+    mutated_timeline: Option<TimelineEditingState>,
+    /// Present only when a composition was created or edited on disk; refreshes the Media Pool.
+    reloaded_compositions: Option<Vec<CompositionAsset>>,
+}
+
 #[derive(Clone, Copy)]
 struct AssistantProvider {
     id: &'static str,
     display_name: &'static str,
+    /// True when the editor executes the provider's tool calls in-process (offline Mock).
+    /// Self-executing providers (ACP/Codex/Claude) run their own tools and only stream results.
+    executes_in_process: bool,
 }
 
 const ASSISTANT_PROVIDERS: [AssistantProvider; 5] = [
     AssistantProvider {
         id: "mock",
         display_name: "Mock Assistant (Offline)",
+        executes_in_process: true,
     },
     AssistantProvider {
         id: "acp-antigravity",
         display_name: "Antigravity (ACP)",
+        executes_in_process: false,
     },
     AssistantProvider {
         id: "acp-gemini",
         display_name: "Gemini CLI (ACP)",
+        executes_in_process: false,
     },
     AssistantProvider {
         id: "codex-app-server",
         display_name: "Codex (App-Server)",
+        executes_in_process: false,
     },
     AssistantProvider {
         id: "claude-cli",
         display_name: "Claude Code (CLI)",
+        executes_in_process: false,
     },
 ];
 
@@ -582,7 +708,16 @@ fn start_assistant_event_pump(
                 if editor.assistant.session_generation != generation {
                     return false;
                 }
-                editor.assistant.apply_agent_event(event, cx);
+                match event {
+                    AgentEvent::ToolCallRequested {
+                        call_id,
+                        tool_name,
+                        arguments,
+                    } if editor.assistant.provider_executes_in_process() => {
+                        editor.begin_assistant_tool_call(call_id, tool_name, arguments, cx);
+                    }
+                    event => editor.assistant.apply_agent_event(event, cx),
+                }
                 true
             });
             match applied {
@@ -600,6 +735,63 @@ fn assistant_failed(editor: &WeakEntity<Editor>, cx: &mut AsyncApp, message: Str
         editor.assistant.push_entry(AssistantEntry::Error(message));
         cx.notify();
     });
+}
+
+/// Executes one MCP tool against a timeline snapshot on the background executor, so disk and
+/// rasterization work (create/edit/render composition) never blocks the UI thread. The caller
+/// applies the returned mutation and refreshed compositions back on the UI thread.
+fn run_assistant_tool_background(
+    tool_name: String,
+    arguments: &Value,
+    seed: Option<(TimelineEditingState, HashSet<Ulid>)>,
+    project_root: &Path,
+) -> AssistantToolOutcome {
+    let Some((editing_state, selected_clips)) = seed else {
+        return AssistantToolOutcome {
+            result: Err(McpError::Unsupported {
+                tool: tool_name,
+                reason: "no timeline is open".to_string(),
+            }),
+            mutated_timeline: None,
+            reloaded_compositions: None,
+        };
+    };
+
+    let mut executor = McpExecutor::new(editing_state)
+        .with_project_root(project_root.to_path_buf())
+        .with_selection(selected_clips);
+    let result = executor.execute(&tool_name, arguments, true);
+
+    let is_mutation = McpToolDefinition::all_tools()
+        .iter()
+        .any(|definition| definition.name == tool_name && definition.is_mutation);
+    let mutated_timeline = if result.is_ok() && is_mutation {
+        Some(executor.into_timeline())
+    } else {
+        None
+    };
+
+    let reloaded_compositions = if result.is_ok()
+        && matches!(
+            tool_name.as_str(),
+            "create_composition" | "edit_composition"
+        ) {
+        match load_compositions(project_root) {
+            Ok(compositions) => Some(compositions),
+            Err(error) => {
+                log::error!("Could not reload compositions after an AI edit: {error:?}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    AssistantToolOutcome {
+        result,
+        mutated_timeline,
+        reloaded_compositions,
+    }
 }
 
 fn assistant_entry_view(entry: &AssistantEntry) -> gpui::AnyElement {

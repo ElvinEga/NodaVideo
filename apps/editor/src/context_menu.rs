@@ -61,7 +61,7 @@ impl Editor {
         viewport: gpui::Size<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let width = 268.0;
+        let width = 224.0;
         let can_create_timeline = menu.is_directory;
         let is_timeline_file =
             !menu.is_directory && timeline_document::is_timeline_path(&menu.relative_path);
@@ -83,33 +83,23 @@ impl Editor {
             .is_some_and(|timeline| timeline.path.starts_with(&absolute_path));
         let can_trash = can_rename && (is_active_timeline || !contains_active_timeline);
         let trash_relative_path = menu.relative_path.clone();
-        let height = 132.0
-            + if is_media { 80.0 } else { 0.0 }
-            + if can_transcribe {
-                40.0
+        // Reveal in Finder, Open in Default App and Copy Path, plus the conditional entries.
+        let item_count = 3
+            + usize::from(can_create_timeline)
+            + if is_media {
+                2
             } else {
-                0.0
+                0
             }
-            + if can_create_timeline {
-                40.0
-            } else {
-                0.0
-            }
+            + usize::from(can_transcribe)
             + if is_timeline_file {
-                120.0
+                4
             } else {
-                0.0
+                0
             }
-            + if can_rename {
-                40.0
-            } else {
-                0.0
-            }
-            + if can_trash {
-                40.0
-            } else {
-                0.0
-            };
+            + usize::from(can_rename)
+            + usize::from(can_trash);
+        let height = menu_height(item_count);
         let left = menu
             .x
             .clamp(8.0, (f32::from(viewport.width) - width - 8.0).max(8.0));
@@ -143,7 +133,7 @@ impl Editor {
                     .left(px(left))
                     .top(px(top))
                     .w(px(width))
-                    .p_1()
+                    .p(px(MENU_PADDING))
                     .flex()
                     .flex_col()
                     .rounded_lg()
@@ -165,19 +155,17 @@ impl Editor {
                     .when(is_media, |this| {
                         let media_path = self.project_root.join(&menu.relative_path);
                         let media_path_2 = media_path.clone();
-                        this.child(
-                            file_menu_item("Create Timeline from Clip", "").on_click(cx.listener(
-                                move |editor, _, _, cx| {
-                                    editor.dismiss_context_menu();
-                                    if let Err(error) =
-                                        editor.auto_create_timeline_and_insert_asset(&media_path, cx)
-                                    {
-                                        log::error!("Failed to create timeline from clip: {error:?}");
-                                    }
-                                    cx.notify();
-                                },
-                            )),
-                        )
+                        this.child(file_menu_item("Create Timeline from Clip", "").on_click(
+                            cx.listener(move |editor, _, _, cx| {
+                                editor.dismiss_context_menu();
+                                if let Err(error) =
+                                    editor.auto_create_timeline_and_insert_asset(&media_path, cx)
+                                {
+                                    log::error!("Failed to create timeline from clip: {error:?}");
+                                }
+                                cx.notify();
+                            }),
+                        ))
                         .child(
                             file_menu_item("Insert into Timeline", "").on_click(cx.listener(
                                 move |editor, _, _, cx| {
@@ -187,10 +175,12 @@ impl Editor {
                                             std::slice::from_ref(&media_path_2),
                                             cx,
                                         );
-                                    } else if let Err(error) =
-                                        editor.auto_create_timeline_and_insert_asset(&media_path_2, cx)
+                                    } else if let Err(error) = editor
+                                        .auto_create_timeline_and_insert_asset(&media_path_2, cx)
                                     {
-                                        log::error!("Failed to insert clip into timeline: {error:?}");
+                                        log::error!(
+                                            "Failed to insert clip into timeline: {error:?}"
+                                        );
                                     }
                                     cx.notify();
                                 },
@@ -366,22 +356,50 @@ impl Editor {
     }
 }
 
-fn file_menu_item(label: &'static str, shortcut: &'static str) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(label)
-        .h(px(40.0))
-        .px_3()
+/// Native macOS context menus use compact rows of 13px regular text.
+const MENU_TEXT_SIZE: f32 = 13.0;
+const MENU_ITEM_HEIGHT: f32 = 24.0;
+const MENU_PADDING: f32 = 4.0;
+
+fn menu_height(item_count: usize) -> f32 {
+    MENU_PADDING * 2.0 + MENU_ITEM_HEIGHT * item_count as f32
+}
+
+fn menu_row(id: impl Into<gpui::ElementId>, enabled: bool) -> gpui::Stateful<gpui::Div> {
+    let row = div()
+        .id(id)
+        .h(px(MENU_ITEM_HEIGHT))
+        .px_2()
         .flex()
         .items_center()
-        .justify_between()
         .rounded_md()
-        .cursor(CursorStyle::PointingHand)
-        .hover(|style| style.bg(rgb(0x34343a)))
-        .child(div().text_sm().child(label))
+        .text_size(px(MENU_TEXT_SIZE))
+        .font_weight(gpui::FontWeight::NORMAL)
+        .cursor(if enabled {
+            CursorStyle::PointingHand
+        } else {
+            CursorStyle::Arrow
+        })
+        .text_color(rgb(if enabled {
+            TEXT
+        } else {
+            MUTED
+        }));
+    if enabled {
+        row.hover(|style| style.bg(rgb(0x34343a)))
+    } else {
+        row
+    }
+}
+
+fn file_menu_item(label: &'static str, shortcut: &'static str) -> gpui::Stateful<gpui::Div> {
+    menu_row(label, true)
+        .justify_between()
+        .gap_2()
+        .child(label)
         .child(
             div()
-                .font_family("monospace")
-                .text_sm()
+                .text_size(px(MENU_TEXT_SIZE))
                 .text_color(rgb(MUTED))
                 .child(shortcut),
         )
@@ -412,8 +430,8 @@ impl Editor {
             (true, false) => 3,
             (false, _) => 2,
         };
-        let width = 292.0;
-        let height = 16.0 + 40.0 * item_count as f32;
+        let width = 240.0;
+        let height = menu_height(item_count);
         let left = menu
             .x
             .clamp(8.0, (f32::from(viewport.width) - width - 8.0).max(8.0));
@@ -454,7 +472,7 @@ impl Editor {
                     .left(px(left))
                     .top(px(top))
                     .w(px(width))
-                    .p_1()
+                    .p(px(MENU_PADDING))
                     .rounded_lg()
                     .border_1()
                     .border_color(rgb(BORDER))
@@ -515,31 +533,14 @@ impl Editor {
                         )
                     })
                     .child(
-                        div()
-                            .id("apply-properties-to-track-clips")
-                            .h(px(40.0))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .rounded_md()
-                            .cursor(if enabled {
-                                CursorStyle::PointingHand
-                            } else {
-                                CursorStyle::Arrow
-                            })
-                            .text_color(rgb(if enabled {
-                                TEXT
-                            } else {
-                                MUTED
-                            }))
+                        menu_row("apply-properties-to-track-clips", enabled)
                             .when(enabled, |this| {
-                                this.hover(|style| style.bg(rgb(0x34343a)))
-                                    .on_click(cx.listener(|editor, _, _, cx| {
-                                        editor.apply_properties_to_track_clips(cx);
-                                        cx.notify();
-                                    }))
+                                this.on_click(cx.listener(|editor, _, _, cx| {
+                                    editor.apply_properties_to_track_clips(cx);
+                                    cx.notify();
+                                }))
                             })
-                            .child(div().text_sm().child("Apply Properties to All Other Clips")),
+                            .child("Apply Properties to All Other Clips"),
                     ),
             )
             .into_any_element()
@@ -591,8 +592,8 @@ impl Editor {
             }
             None => (false, None),
         };
-        let width = 240.0;
-        let height = 56.0;
+        let width = 176.0;
+        let height = menu_height(1);
         let left = menu
             .x
             .clamp(8.0, (f32::from(viewport.width) - width - 8.0).max(8.0));
@@ -628,7 +629,7 @@ impl Editor {
                     .left(px(left))
                     .top(px(top))
                     .w(px(width))
-                    .p_1()
+                    .p(px(MENU_PADDING))
                     .rounded_lg()
                     .border_1()
                     .border_color(rgb(BORDER))
@@ -637,40 +638,25 @@ impl Editor {
                     .occlude()
                     .when(!on_text_clip, |this| {
                         this.child(
-                            div()
-                                .id(gpui::SharedString::from(format!(
+                            menu_row(
+                                gpui::SharedString::from(format!(
                                     "add-text-to-track-{}",
                                     menu.track_id
-                                )))
-                                .h(px(40.0))
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .rounded_md()
-                                .cursor(CursorStyle::PointingHand)
-                                .text_color(rgb(TEXT))
-                                .hover(|style| style.bg(rgb(0x34343a)))
-                                .on_click(cx.listener(move |editor, _, _, cx| {
-                                    if let Err(error) = editor.add_text(track_id, position, cx) {
-                                        log::error!("{error:?}");
-                                        cx.notify();
-                                    }
-                                }))
-                                .child(div().text_sm().child("Add text")),
+                                )),
+                                true,
+                            )
+                            .on_click(cx.listener(move |editor, _, _, cx| {
+                                if let Err(error) = editor.add_text(track_id, position, cx) {
+                                    log::error!("{error:?}");
+                                    cx.notify();
+                                }
+                            }))
+                            .child("Add text"),
                         )
                     })
                     .when_some(source_clip_id, |menu, clip_id| {
                         menu.child(
-                            div()
-                                .id("apply-text-style-to-track")
-                                .h(px(40.0))
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .rounded_md()
-                                .cursor(CursorStyle::PointingHand)
-                                .text_color(rgb(TEXT))
-                                .hover(|style| style.bg(rgb(0x34343a)))
+                            menu_row("apply-text-style-to-track", true)
                                 .on_click(cx.listener(move |editor, _, _, cx| {
                                     editor.dismiss_context_menu();
                                     editor.emit_event(
@@ -682,7 +668,7 @@ impl Editor {
                                     );
                                     cx.notify();
                                 }))
-                                .child(div().text_sm().child("Apply style to track")),
+                                .child("Apply style to track"),
                         )
                     }),
             )
@@ -761,14 +747,5 @@ fn style_source_clip(
 }
 
 fn disabled_menu_item(label: &'static str) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(label)
-        .h(px(40.0))
-        .px_3()
-        .flex()
-        .items_center()
-        .rounded_md()
-        .cursor(CursorStyle::Arrow)
-        .text_color(rgb(MUTED))
-        .child(div().text_sm().child(label))
+    menu_row(label, false).child(label)
 }

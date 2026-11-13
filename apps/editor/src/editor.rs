@@ -166,11 +166,15 @@ pub(crate) enum WorkspaceTab {
 
 impl Editor {
     pub(crate) fn can_undo(&self) -> bool {
-        self.timeline.as_ref().is_some_and(|t| !t.undo_stack.is_empty())
+        self.timeline
+            .as_ref()
+            .is_some_and(|t| !t.undo_stack.is_empty())
     }
 
     pub(crate) fn can_redo(&self) -> bool {
-        self.timeline.as_ref().is_some_and(|t| !t.redo_stack.is_empty())
+        self.timeline
+            .as_ref()
+            .is_some_and(|t| !t.redo_stack.is_empty())
     }
 
     pub(crate) fn import_media_dialog(&mut self, cx: &mut Context<Self>) {
@@ -230,7 +234,12 @@ impl Editor {
                     | crate::explorer_file_entry::FileTreeEntryKind::Audio
                     | crate::explorer_file_entry::FileTreeEntryKind::Image
             );
-            if !is_media || self.explorer.media_metadata.contains_key(&entry.absolute_path) {
+            if !is_media
+                || self
+                    .explorer
+                    .media_metadata
+                    .contains_key(&entry.absolute_path)
+            {
                 continue;
             }
             let already_queued = self

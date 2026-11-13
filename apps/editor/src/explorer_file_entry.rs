@@ -26,10 +26,8 @@ impl Editor {
         //     entry.absolute_path.display(),
         //     self.project_root.display()
         // );
-        let path = crate::timeline_document::relative_asset_path(
-            &self.project_root,
-            &entry.absolute_path,
-        );
+        let path =
+            crate::timeline_document::relative_asset_path(&self.project_root, &entry.absolute_path);
 
         let selected = self.explorer.selected_file.as_ref() == Some(&path);
         let context_menu_target =

@@ -2,6 +2,7 @@ mod actions;
 mod asset;
 mod assistant;
 mod clip_placement;
+mod composition_thumbnail;
 mod context_menu;
 mod debug_state;
 mod dialog_missing_media;
@@ -24,6 +25,7 @@ mod keyboard_shortcuts;
 mod layout;
 mod media_thumbnail;
 mod preview;
+mod preview_composition;
 mod preview_events;
 mod preview_image;
 mod preview_text;
@@ -163,6 +165,9 @@ fn open_project(cx: &mut App, project_root: PathBuf, event_bus: Entity<EventBus>
     // 订阅建立之后再触发，否则 WaveformsNeeded 事件没有处理者。
     window.update(cx, |editor, _, cx| editor.schedule_project_waveforms(cx))?;
     window.update(cx, |editor, _, cx| editor.schedule_media_thumbnails(cx))?;
+    window.update(cx, |editor, _, cx| {
+        editor.schedule_composition_thumbnails(cx)
+    })?;
     Ok(())
 }
 

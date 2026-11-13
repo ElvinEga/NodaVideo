@@ -146,6 +146,10 @@ pub(crate) enum EditAction {
     ReplaceTimeline {
         timeline: TimelineEditingState,
     },
+    /// Applies an AI-executed timeline as one undoable edit (records history).
+    ApplyAgentEdit {
+        timeline: TimelineEditingState,
+    },
     KeepTextSections,
     RemoveGaps,
     Undo,
@@ -292,6 +296,14 @@ pub(crate) fn edit_timeline(
                             media.source_in += edge - start;
                         } else {
                             media.source_out += edge - end;
+                        }
+                    }
+                    Clip::Composition(composition) => {
+                        if drag.start_edge {
+                            composition.timeline_start = edge;
+                            composition.duration = frame_rate.duration(end - edge);
+                        } else {
+                            composition.duration = frame_rate.duration(edge - start);
                         }
                     }
                 }
@@ -678,6 +690,9 @@ impl TimelineEditExt for TimelineEditingState {
                     Clip::Video(clip) => &mut clip.audio_properties,
                     Clip::Audio(clip) => &mut clip.audio_properties,
                     Clip::Text(_) => return Err(anyhow!("Clip {clip_id} is a text clip")),
+                    Clip::Composition(_) => {
+                        return Err(anyhow!("Clip {clip_id} is a composition clip"));
+                    }
                 };
                 audio_properties.muted = muted;
             }
@@ -697,6 +712,9 @@ impl TimelineEditExt for TimelineEditingState {
                     Clip::Video(clip) => &mut clip.audio_properties,
                     Clip::Audio(clip) => &mut clip.audio_properties,
                     Clip::Text(_) => return Err(anyhow!("Clip {clip_id} is a text clip")),
+                    Clip::Composition(_) => {
+                        return Err(anyhow!("Clip {clip_id} is a composition clip"));
+                    }
                 };
                 audio_properties.gain_db = gain_db;
             }
@@ -863,6 +881,9 @@ impl TimelineEditExt for TimelineEditingState {
                 }
             }
             EditAction::ReplaceTimeline { timeline: updated } => {
+                data = updated;
+            }
+            EditAction::ApplyAgentEdit { timeline: updated } => {
                 data = updated;
             }
         }

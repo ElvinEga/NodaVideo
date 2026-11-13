@@ -1,5 +1,6 @@
 use crate::clip_placement::{
-    ClipPlacementRejection, validate_clip_placement, validate_text_clip_placement,
+    ClipPlacementRejection, validate_clip_placement, validate_composition_clip_placement,
+    validate_text_clip_placement,
 };
 use crate::edit_action::{EditAction, edit_timeline};
 use crate::editor::Editor;
@@ -125,6 +126,7 @@ impl ClipClipboard {
                             .max(clip.source_in + TimelineFrameIndex::ONE_FRAME);
                     }
                     Clip::Text(_) => {}
+                    Clip::Composition(_) => {}
                 }
                 clip
             })
@@ -215,6 +217,7 @@ impl ClipClipboard {
                     Clip::Video(clip) => &mut clip.asset_id,
                     Clip::Audio(clip) => &mut clip.asset_id,
                     Clip::Text(_) => continue,
+                    Clip::Composition(_) => continue, // 合成引用项目库 composition_id，无媒体 asset_id 可重映射。
                 };
                 *asset_id = *asset_ids
                     .get(asset_id)
@@ -550,6 +553,13 @@ pub(super) fn validate_clips_placements(
                 )?;
             }
             Clip::Text(clip) => validate_text_clip_placement(
+                timeline,
+                clip.track_id,
+                clip.frame_length(timeline.settings.frame_rate),
+                clip.timeline_start,
+                &HashSet::new(),
+            )?,
+            Clip::Composition(clip) => validate_composition_clip_placement(
                 timeline,
                 clip.track_id,
                 clip.frame_length(timeline.settings.frame_rate),

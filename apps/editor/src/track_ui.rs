@@ -8,8 +8,8 @@ use crate::frame_preview::FrameKey;
 use crate::layout::{THIN_CLIP_WIDTH, TIMELINE_PADDING, TRACK_HEIGHT};
 use crate::srt::srt_text_clips;
 use crate::theme::{
-    ACCENT, BORDER, CLIP_AUDIO, CLIP_BLUE, CLIP_OFFLINE, CLIP_TEXT, ERROR, MUTED, SURFACE,
-    SURFACE_HOVER, TEXT,
+    ACCENT, BORDER, CLIP_AUDIO, CLIP_BLUE, CLIP_MOTION, CLIP_OFFLINE, CLIP_TEXT, ERROR, MUTED,
+    SURFACE, SURFACE_HOVER, TEXT,
 };
 use crate::timeline::{PreviewDropAsset, TimelineFrameIndex};
 use crate::timeline_clip::{Clip, text_clip_component};
@@ -21,12 +21,13 @@ use ::timeline::TimelineEditingState;
 use gpui::prelude::*;
 use gpui::{
     Bounds, Corners, CursorStyle, ElementId, MouseButton, MouseDownEvent, ObjectFit, PathBuilder,
-    SharedString, WeakEntity, canvas, div, fill, img, linear_color_stop, linear_gradient, point, px,
-    rgb, rgba, size,
+    SharedString, WeakEntity, canvas, div, fill, img, linear_color_stop, linear_gradient, point,
+    px, rgb, rgba, size,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use ulid::Ulid;
 
 const CLIP_WAVEFORM_HEIGHT: f32 = 80.0;
 const CLIP_WAVEFORM_VISUAL_GAIN: f32 = 2.0;
@@ -326,6 +327,10 @@ impl Editor {
                                         },
                                     )
                                 }
+                                Clip::Composition(composition) => (
+                                    self.composition_display_name(composition.composition_id),
+                                    PlacementKind::Composition,
+                                ),
                             };
                             let left = TIMELINE_PADDING
                                 + timeline.editing_state.seconds(*start) as f32
@@ -413,6 +418,7 @@ impl Editor {
         match clip {
             Clip::Video(_) => self.video_clip(clip, cx),
             Clip::Audio(_) => self.audio_clip(clip, cx),
+            Clip::Composition(_) => self.composition_clip(clip, cx),
             Clip::Text(text_clip) => {
                 let timeline = self
                     .timeline
@@ -590,6 +596,30 @@ impl Editor {
             .child(timeline_clip_label(name, detail));
 
         self.timeline_clip_frame(clip, CLIP_AUDIO, content.into_any_element(), cx)
+    }
+
+    fn composition_clip(&self, clip: &Clip, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let composition = clip
+            .composition()
+            .expect("composition clips contain a composition reference");
+        let name = self.composition_display_name(composition.composition_id);
+        let content = div()
+            .absolute()
+            .inset_0()
+            .child(video_timeline_clip_label(name.to_string()));
+        self.timeline_clip_frame(clip, CLIP_MOTION, content.into_any_element(), cx)
+    }
+
+    fn composition_display_name(&self, composition_id: Ulid) -> SharedString {
+        match self
+            .explorer
+            .compositions
+            .iter()
+            .find(|composition| composition.id == composition_id)
+        {
+            Some(composition) => SharedString::from(composition.name.clone()),
+            None => SharedString::from("Missing composition"),
+        }
     }
 
     fn timeline_clip_frame(
@@ -1123,6 +1153,7 @@ fn preview_drop_asset(
 enum PlacementKind {
     Media(MediaKind),
     Text,
+    Composition,
 }
 
 // Private APIs only
@@ -1133,6 +1164,7 @@ impl PlacementKind {
             Self::Media(MediaKind::Audio) => "Audio",
             Self::Media(MediaKind::Image) => "Image",
             Self::Text => "Text",
+            Self::Composition => "Motion",
         }
     }
 }

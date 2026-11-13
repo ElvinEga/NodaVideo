@@ -5,7 +5,7 @@ use crate::dialog_missing_media::missing_media_dialog;
 use crate::edit_action::{EditAction, edit_timeline};
 use crate::editing::{next_track, validate_clips_placements};
 use crate::editor::Editor;
-use crate::explorer::MediaCategoryFilter;
+use crate::explorer::{MediaCategoryFilter, TemplateGalleryState};
 use crate::explorer_drag::AssetBeingDragged;
 use crate::explorer_file_entry::select_preview_file;
 use crate::export_window::{ExportState, ExportWindow};
@@ -43,6 +43,9 @@ use engine::media_asset::probe_media_asset;
 use gpui::prelude::*;
 use gpui::{
     AsyncApp, Bounds, Entity, EventEmitter, MouseMoveEvent, PathPromptOptions, Pixels, WeakEntity,
+};
+use nodavideo_hyperframes_bridge::{
+    CompositionAsset, save_composition, template_registry, unique_folder,
 };
 use platform_fs::move_to_trash;
 use player_ui::Seeker;
@@ -157,6 +160,22 @@ pub(crate) enum AppEvent {
     },
     WaveformsGeneration {
         paths: Vec<PathBuf>, // 素材的绝对路径
+    },
+    /// The user chose New Motion Graphic: open the template gallery.
+    OpenTemplateGallery,
+    /// The user dismissed the template gallery without creating.
+    CloseTemplateGallery,
+    /// The user highlighted a template in the gallery.
+    GalleryTemplateSelected {
+        index: usize,
+    },
+    /// The user chose Create in the gallery: instantiate the selected template.
+    CreateComposition {
+        template_id: String,
+    },
+    /// The user selected a reusable composition in the Media Pool.
+    SelectComposition {
+        composition_id: Ulid,
     },
 }
 
@@ -809,7 +828,12 @@ async fn handle_app_event(
         }
         AppEvent::SelectTitle { title_id } => {
             editor.update(cx, |editor, cx| -> Result<()> {
-                if !editor.explorer.titles.iter().any(|title| title.id == title_id) {
+                if !editor
+                    .explorer
+                    .titles
+                    .iter()
+                    .any(|title| title.id == title_id)
+                {
                     bail!("Title {title_id} no longer exists");
                 }
                 select_title(editor, title_id);
@@ -824,6 +848,76 @@ async fn handle_app_event(
                 };
                 let start = timeline.playhead();
                 editor.place_title(title_id, None, start, cx)?;
+                cx.notify();
+                Ok(())
+            })?;
+        }
+        AppEvent::OpenTemplateGallery => {
+            editor.update(cx, |editor, cx| {
+                let mut templates = template_registry()
+                    .list()
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                templates.sort_by(|a, b| a.name.cmp(&b.name));
+                editor.explorer.template_gallery = Some(TemplateGalleryState {
+                    selected: 0,
+                    templates,
+                });
+                editor.schedule_composition_thumbnails(cx);
+                cx.notify();
+            });
+        }
+        AppEvent::CloseTemplateGallery => {
+            editor.update(cx, |editor, cx| {
+                editor.explorer.template_gallery = None;
+                cx.notify();
+            });
+        }
+        AppEvent::GalleryTemplateSelected { index } => {
+            editor.update(cx, |editor, cx| {
+                if let Some(gallery) = editor.explorer.template_gallery.as_mut() {
+                    gallery.selected = index;
+                }
+                cx.notify();
+            });
+        }
+        AppEvent::CreateComposition { template_id } => {
+            editor.update(cx, |editor, cx| -> Result<()> {
+                let registry = template_registry();
+                let Some(template) = registry.get(&template_id) else {
+                    bail!("Motion graphics template '{template_id}' not found");
+                };
+                // 先在副本上追加并落盘，全部成功后再替换库，失败时保持原状。
+                let folder = unique_folder(&editor.project_root, &template.name);
+                let asset = CompositionAsset::new_from_template(template, &template.name, folder);
+                let composition_id = asset.id;
+                let mut new_compositions = editor.explorer.compositions.clone();
+                new_compositions.push(asset);
+                save_composition(
+                    &editor.project_root,
+                    new_compositions.last().expect("just pushed"),
+                )?;
+                editor.explorer.compositions = new_compositions;
+                editor.explorer.category = MediaCategoryFilter::Motion;
+                editor.explorer.template_gallery = None;
+                select_composition(editor, composition_id);
+                editor.schedule_composition_thumbnails(cx);
+                cx.notify();
+                Ok(())
+            })?;
+        }
+        AppEvent::SelectComposition { composition_id } => {
+            editor.update(cx, |editor, cx| -> Result<()> {
+                if !editor
+                    .explorer
+                    .compositions
+                    .iter()
+                    .any(|asset| asset.id == composition_id)
+                {
+                    bail!("Composition {composition_id} no longer exists");
+                }
+                select_composition(editor, composition_id);
                 cx.notify();
                 Ok(())
             })?;
@@ -1224,7 +1318,12 @@ impl Editor {
         start: TimelineFrameIndex,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        let Some(title) = self.explorer.titles.iter().find(|title| title.id == title_id) else {
+        let Some(title) = self
+            .explorer
+            .titles
+            .iter()
+            .find(|title| title.id == title_id)
+        else {
             bail!("Title {title_id} no longer exists");
         };
         let properties = title.properties.clone();
@@ -1278,7 +1377,9 @@ impl Editor {
             return Ok(());
         };
         let clip_id = Ulid::generate();
-        let text_clip = Clip::Text(TextClip::new(clip_id, track_id, start, duration, properties));
+        let text_clip = Clip::Text(TextClip::new(
+            clip_id, track_id, start, duration, properties,
+        ));
         let should_save = match new_track {
             Some(track) => edit_timeline(
                 timeline,
@@ -1319,6 +1420,16 @@ fn select_title(editor: &mut Editor, title_id: Ulid) {
     editor.explorer.selected_file = None;
     editor.explorer.selected_title = Some(title_id);
     editor.preview.target = PreviewTarget::TextTitle(title_id);
+    editor.property_panel = current_property_panel(editor);
+}
+
+/// Selects a reusable pool composition: clears clip, file and title selection so the
+/// pool highlight and the Inspector agree on what is selected.
+fn select_composition(editor: &mut Editor, composition_id: Ulid) {
+    editor.select_only_clip(None);
+    editor.explorer.selected_file = None;
+    editor.explorer.selected_title = None;
+    editor.explorer.selected_composition = Some(composition_id);
     editor.property_panel = current_property_panel(editor);
 }
 
@@ -1388,6 +1499,7 @@ fn handle_app_event_edit(
                 // do nothing
             }
         }
+        editor.schedule_composition_thumbnails(cx);
         cx.notify();
         Ok(())
     })

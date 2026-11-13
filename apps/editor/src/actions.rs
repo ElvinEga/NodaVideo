@@ -201,16 +201,48 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-i", ImportMedia, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("cmd-1", ToggleMediaBrowser, None),
         KeyBinding::new("cmd-2", ToggleInspector, None),
-        KeyBinding::new("cmd-alt-m", ToggleMediaBrowser, Some(EDITOR_SHORTCUT_CONTEXT)),
-        KeyBinding::new("cmd-alt-1", SwitchToEditWorkspace, Some(EDITOR_SHORTCUT_CONTEXT)),
-        KeyBinding::new("cmd-alt-2", SwitchToColorWorkspace, Some(EDITOR_SHORTCUT_CONTEXT)),
-        KeyBinding::new("cmd-alt-3", SwitchToAudioWorkspace, Some(EDITOR_SHORTCUT_CONTEXT)),
-        KeyBinding::new("cmd-alt-4", SwitchToAiStudioWorkspace, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new(
+            "cmd-alt-m",
+            ToggleMediaBrowser,
+            Some(EDITOR_SHORTCUT_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-alt-1",
+            SwitchToEditWorkspace,
+            Some(EDITOR_SHORTCUT_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-alt-2",
+            SwitchToColorWorkspace,
+            Some(EDITOR_SHORTCUT_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-alt-3",
+            SwitchToAudioWorkspace,
+            Some(EDITOR_SHORTCUT_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-alt-4",
+            SwitchToAiStudioWorkspace,
+            Some(EDITOR_SHORTCUT_CONTEXT),
+        ),
         KeyBinding::new("cmd-e", ExportVideoAction, Some(EDITOR_SHORTCUT_CONTEXT)),
-        KeyBinding::new("cmd-o", OpenProjectFolderAction, Some(EDITOR_SHORTCUT_CONTEXT)),
-        KeyBinding::new("cmd-shift-o", OpenProjectPickerAction, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new(
+            "cmd-o",
+            OpenProjectFolderAction,
+            Some(EDITOR_SHORTCUT_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-shift-o",
+            OpenProjectPickerAction,
+            Some(EDITOR_SHORTCUT_CONTEXT),
+        ),
         KeyBinding::new("cmd-n", NewProjectAction, Some(EDITOR_SHORTCUT_CONTEXT)),
-        KeyBinding::new("cmd-shift-n", NewTimelineAction, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new(
+            "cmd-shift-n",
+            NewTimelineAction,
+            Some(EDITOR_SHORTCUT_CONTEXT),
+        ),
         KeyBinding::new("cmd-s", SaveProject, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
         KeyBinding::new("cmd-m", MinimizeWindow, None),
@@ -652,17 +684,17 @@ impl Editor {
         }
     }
 
-    pub(crate) fn action_go_to_end(
-        &mut self,
-        _: &GoToEnd,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn action_go_to_end(&mut self, _: &GoToEnd, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(timeline) = self.timeline.as_mut() {
             let duration = timeline.editing_state.content_duration();
             timeline.set_playhead(duration);
             let _ = timeline.save();
-            self.emit_event(cx, AppEvent::TimelineSeek { frame_index: duration });
+            self.emit_event(
+                cx,
+                AppEvent::TimelineSeek {
+                    frame_index: duration,
+                },
+            );
             cx.notify();
         }
     }
