@@ -718,7 +718,7 @@ impl Editor {
         cx.notify();
     }
 
-    pub(super) fn step_playhead(&mut self, frames: i64) -> Result<()> {
+    pub(super) fn step_playhead(&mut self, frames: i64, cx: &mut Context<Self>) -> Result<()> {
         let Some(timeline) = self.timeline.as_mut() else {
             return Ok(());
         };
@@ -734,6 +734,7 @@ impl Editor {
         {
             timeline.set_playhead(target);
             timeline.save()?;
+            self.emit_event(cx, AppEvent::TimelineSeek { frame_index: target }); // 标尺 playhead 读 player 位置，需同步 seek。
         }
         Ok(())
     }

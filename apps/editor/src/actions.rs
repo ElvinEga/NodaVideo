@@ -256,7 +256,7 @@ impl Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Err(error) = self.step_playhead(-1) {
+        if let Err(error) = self.step_playhead(-1, cx) {
             log::error!("{error:?}");
         }
         cx.notify();
@@ -268,7 +268,7 @@ impl Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Err(error) = self.step_playhead(1) {
+        if let Err(error) = self.step_playhead(1, cx) {
             log::error!("{error:?}");
         }
         cx.notify();
@@ -642,6 +642,12 @@ impl Editor {
         if let Some(timeline) = self.timeline.as_mut() {
             timeline.set_playhead(::timeline::TimelineFrameIndex::ZERO);
             let _ = timeline.save();
+            self.emit_event(
+                cx,
+                AppEvent::TimelineSeek {
+                    frame_index: ::timeline::TimelineFrameIndex::ZERO,
+                },
+            );
             cx.notify();
         }
     }
@@ -656,6 +662,7 @@ impl Editor {
             let duration = timeline.editing_state.content_duration();
             timeline.set_playhead(duration);
             let _ = timeline.save();
+            self.emit_event(cx, AppEvent::TimelineSeek { frame_index: duration });
             cx.notify();
         }
     }

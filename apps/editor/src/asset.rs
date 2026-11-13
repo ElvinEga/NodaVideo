@@ -29,8 +29,10 @@ pub(crate) enum IconName {
     Scissors,
     Snap,
     Spinner,
+    Text,
     Trash,
     Unmute,
+    Video,
     Warning,
 }
 
@@ -64,8 +66,10 @@ impl IconName {
             Self::Scissors => "icons/scissors.svg",
             Self::Snap => "icons/snap.svg",
             Self::Spinner => "icons/spinner.svg",
+            Self::Text => "icons/text.svg",
             Self::Trash => "icons/trash.svg",
             Self::Unmute => "icons/unmute.svg",
+            Self::Video => "icons/video.svg",
             Self::Warning => "icons/warning.svg",
         }
     }
@@ -94,7 +98,7 @@ impl AssetSource for EditorAssets {
 
 // Private APIs only
 impl IconName {
-    const ALL: [Self; 29] = [
+    const ALL: [Self; 31] = [
         Self::AlertTriangle,
         Self::App,
         Self::ArrowDown,
@@ -121,8 +125,10 @@ impl IconName {
         Self::Scissors,
         Self::Snap,
         Self::Spinner,
+        Self::Text,
         Self::Trash,
         Self::Unmute,
+        Self::Video,
         Self::Warning,
     ];
 
@@ -154,8 +160,10 @@ impl IconName {
             Self::Scissors => include_bytes!("../../../icons/scissors.svg"),
             Self::Snap => include_bytes!("../../../icons/snap.svg"),
             Self::Spinner => include_bytes!("../../../icons/spinner.svg"),
+            Self::Text => include_bytes!("../../../icons/text.svg"),
             Self::Trash => include_bytes!("../../../icons/trash.svg"),
             Self::Unmute => include_bytes!("../../../icons/unmute.svg"),
+            Self::Video => include_bytes!("../../../icons/video.svg"),
             Self::Warning => include_bytes!("../../../icons/warning.svg"),
         }
     }

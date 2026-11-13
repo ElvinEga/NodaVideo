@@ -10,19 +10,20 @@ use crate::layout::{
     RULER_HEIGHT, TIMELINE_HEADER_HEIGHT, TIMELINE_PADDING, TRACK_HEADER_WIDTH, TRACK_HEIGHT,
 };
 use crate::preview::PreviewTarget;
-use crate::theme::{ACCENT, BORDER, ERROR, MUTED, SURFACE, SURFACE_HOVER, TEXT};
-use crate::time_format::format_time;
+use crate::theme::{ACCENT, BORDER, ERROR, MUTED, SURFACE_HOVER, TEXT};
 use crate::timeline::TimelineFrameIndex;
 use crate::timeline_document;
 use crate::timeline_interactions::{MarqueeSelection, TimelineTool};
 use crate::track::TrackKind;
 use gpui::prelude::*;
 use gpui::{
-    CursorStyle, DragMoveEvent, ElementId, Empty, ExternalPaths, FontWeight, MouseButton,
-    MouseDownEvent, MouseUpEvent, Window, div, px, rgb, rgba, svg,
+    Bounds, ClickEvent, CursorStyle, DragMoveEvent, ElementId, Empty, ExternalPaths, FontWeight,
+    MouseButton, MouseDownEvent, MouseUpEvent, Window, canvas, div, px, relative, rgb, rgba, svg,
 };
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use ulid::Ulid;
 
 // 捏合增量倍率；越大缩放越灵敏。It's fun to be PI.
@@ -538,6 +539,21 @@ impl Editor {
             .expect("timeline view requires timeline state");
         let selection_active = timeline.interaction.active_tool == TimelineTool::Selection;
         let blade_active = timeline.interaction.active_tool == TimelineTool::Blade;
+        let timeline_title = timeline
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Sequence 01".to_string());
+
+        let playhead_frame = timeline.playhead();
+        let timecode_text = format_smpte_timecode(playhead_frame, frames_per_second);
+
+        let min_log = 0.1_f32.ln();
+        let max_log = 1000.0_f32.ln();
+        let current_log = timeline.pixels_per_second.clamp(0.1, 1000.0).ln();
+        let zoom_fraction = ((current_log - min_log) / (max_log - min_log)).clamp(0.0, 1.0);
+        let zoom_track_bounds = Rc::new(Cell::new(Bounds::default()));
+
         div()
             .id("timeline-toolbar")
             .h(px(TIMELINE_HEADER_HEIGHT))
@@ -548,159 +564,267 @@ impl Editor {
             .px_3()
             .border_b_1()
             .border_color(rgb(BORDER))
+            // Left Group: Identity, Tools, Add Track
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_3()
+                    // Sequence Name
                     .child(
-                        toolbar_segment_view()
-                            .child(
-                                toolbar_segment_item_view(
-                                    "timeline-selection-tool",
-                                    IconName::Pointer,
-                                    selection_active,
-                                )
-                                .child("Select")
-                                .child(toolbar_shortcut_view("V", selection_active))
-                                .on_click(cx.listener(
-                                    |editor, _, _, cx| {
-                                        let Some(timeline) = editor.timeline.as_mut() else {
-                                            return;
-                                        };
-                                        timeline.activate_timeline_tool(TimelineTool::Selection);
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(
-                                toolbar_segment_item_view(
-                                    "timeline-blade-tool",
-                                    IconName::Scissors,
-                                    blade_active,
-                                )
-                                .child("Blade")
-                                .child(toolbar_shortcut_view("B", blade_active))
-                                .on_click(cx.listener(
-                                    |editor, _, _, cx| {
-                                        let Some(timeline) = editor.timeline.as_mut() else {
-                                            return;
-                                        };
-                                        timeline.activate_timeline_tool(TimelineTool::Blade);
-                                        cx.notify();
-                                    },
-                                )),
-                            ),
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(TEXT))
+                            .child(timeline_title),
                     )
-                    .child(toolbar_divider_view(16.0))
+                    // Frame Rate
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(rgb(MUTED))
+                            .child(format!("{frames_per_second:.0} fps")),
+                    )
+                    // Divider
+                    .child(div().h(px(14.0)).border_r_1().border_color(rgb(BORDER)))
+                    // Primary Edit Tools (Icon-only with tooltips and active state)
                     .child(
                         div()
                             .flex()
-                            .font_family("monospace")
-                            .text_sm()
-                            .child(format_time(self.timeline_playhead_seconds(cx), false))
-                            .child(div().text_color(rgb(MUTED)).child(format!(
-                                " / {}",
-                                format_time(
-                                    timeline
-                                        .editing_state
-                                        .seconds(timeline.editing_state.content_duration()),
-                                    false
-                                )
-                            ))),
-                    )
-                    .child(toolbar_divider_view(16.0))
-                    .child(
-                        toolbar_segment_view()
+                            .items_center()
+                            .gap_1()
+                            // Select Tool
                             .child(
-                                toolbar_segment_item_view("add-video-track", IconName::Plus, false)
-                                    .child(div().text_color(rgb(TEXT)).child("Video"))
+                                div()
+                                    .id("timeline-selection-tool")
+                                    .w(px(26.0))
+                                    .h(px(26.0))
+                                    .rounded(px(4.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .when(selection_active, |this| {
+                                        this.bg(rgb(0x312e81)).text_color(rgb(0x818cf8))
+                                    })
+                                    .when(!selection_active, |this| {
+                                        this.text_color(rgb(MUTED))
+                                            .hover(|s| s.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                                    })
+                                    .tooltip(|_, cx| {
+                                        crate::tooltip::tooltip_view("Selection Tool", Some("V"), cx)
+                                    })
+                                    .on_click(cx.listener(|editor, _, _, cx| {
+                                        let Some(timeline) = editor.timeline.as_mut() else { return; };
+                                        timeline.activate_timeline_tool(TimelineTool::Selection);
+                                        cx.notify();
+                                    }))
+                                    .child(svg().path(IconName::Pointer.path()).size(px(13.0))),
+                            )
+                            // Blade Tool
+                            .child(
+                                div()
+                                    .id("timeline-blade-tool")
+                                    .w(px(26.0))
+                                    .h(px(26.0))
+                                    .rounded(px(4.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .when(blade_active, |this| {
+                                        this.bg(rgb(0x312e81)).text_color(rgb(0x818cf8))
+                                    })
+                                    .when(!blade_active, |this| {
+                                        this.text_color(rgb(MUTED))
+                                            .hover(|s| s.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                                    })
+                                    .tooltip(|_, cx| {
+                                        crate::tooltip::tooltip_view("Blade Tool", Some("B"), cx)
+                                    })
+                                    .on_click(cx.listener(|editor, _, _, cx| {
+                                        let Some(timeline) = editor.timeline.as_mut() else { return; };
+                                        timeline.activate_timeline_tool(TimelineTool::Blade);
+                                        cx.notify();
+                                    }))
+                                    .child(svg().path(IconName::Scissors.path()).size(px(13.0))),
+                            )
+                            // Snap Toggle
+                            .child(
+                                div()
+                                    .id("toggle-timeline-snapping")
+                                    .w(px(26.0))
+                                    .h(px(26.0))
+                                    .rounded(px(4.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .when(timeline.snapping_enabled, |this| {
+                                        this.bg(rgb(0x312e81)).text_color(rgb(0x818cf8))
+                                    })
+                                    .when(!timeline.snapping_enabled, |this| {
+                                        this.text_color(rgb(MUTED))
+                                            .hover(|s| s.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                                    })
+                                    .tooltip(|_, cx| {
+                                        crate::tooltip::tooltip_view("Snapping", Some("S"), cx)
+                                    })
+                                    .on_click(cx.listener(|editor, _, _, cx| {
+                                        editor.toggle_snapping();
+                                        cx.notify();
+                                    }))
+                                    .child(svg().path(IconName::Snap.path()).size(px(13.0))),
+                            )
+                            // Magnet Toggle
+                            .child(
+                                div()
+                                    .id("toggle-track-magnet")
+                                    .w(px(26.0))
+                                    .h(px(26.0))
+                                    .rounded(px(4.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .when(timeline.track_magnet_enabled, |this| {
+                                        this.bg(rgb(0x312e81)).text_color(rgb(0x818cf8))
+                                    })
+                                    .when(!timeline.track_magnet_enabled, |this| {
+                                        this.text_color(rgb(MUTED))
+                                            .hover(|s| s.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                                    })
+                                    .tooltip(|_, cx| {
+                                        crate::tooltip::tooltip_view("Track Magnet", Some("Ripple"), cx)
+                                    })
+                                    .on_click(cx.listener(|editor, _, _, cx| {
+                                        editor.toggle_track_magnet();
+                                        cx.notify();
+                                    }))
+                                    .child(svg().path(IconName::Magnet.path()).size(px(13.0))),
+                            ),
+                    )
+                    // Divider
+                    .child(div().h(px(14.0)).border_r_1().border_color(rgb(BORDER)))
+                    // Add Track Tools (Icon buttons with tooltips)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            // Add Video Track
+                            .child(
+                                div()
+                                    .id("add-video-track")
+                                    .w(px(26.0))
+                                    .h(px(26.0))
+                                    .rounded(px(4.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .text_color(rgb(MUTED))
+                                    .hover(|s| s.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                                    .tooltip(|_, cx| {
+                                        crate::tooltip::tooltip_view("Add Video Track", None, cx)
+                                    })
                                     .on_click(cx.listener(|editor, _, _, cx| {
                                         if let Err(error) = editor.add_track(TrackKind::Video) {
                                             log::error!("{error:?}");
                                         }
                                         cx.notify();
-                                    })),
+                                    }))
+                                    .child(svg().path(IconName::Video.path()).size(px(13.0))),
                             )
-                            .child(toolbar_divider_view(14.0))
+                            // Add Audio Track
                             .child(
-                                toolbar_segment_item_view("add-audio-track", IconName::Plus, false)
-                                    .child(div().text_color(rgb(TEXT)).child("Audio"))
+                                div()
+                                    .id("add-audio-track")
+                                    .w(px(26.0))
+                                    .h(px(26.0))
+                                    .rounded(px(4.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .text_color(rgb(MUTED))
+                                    .hover(|s| s.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                                    .tooltip(|_, cx| {
+                                        crate::tooltip::tooltip_view("Add Audio Track", None, cx)
+                                    })
                                     .on_click(cx.listener(|editor, _, _, cx| {
                                         if let Err(error) = editor.add_track(TrackKind::Audio) {
                                             log::error!("{error:?}");
                                         }
                                         cx.notify();
-                                    })),
+                                    }))
+                                    .child(svg().path(IconName::Mic.path()).size(px(13.0))),
                             )
-                            .child(toolbar_divider_view(14.0))
+                            // Add Text Track
                             .child(
-                                toolbar_segment_item_view("add-text-track", IconName::Plus, false)
-                                    .child(div().text_color(rgb(TEXT)).child("Text"))
+                                div()
+                                    .id("add-text-track")
+                                    .w(px(26.0))
+                                    .h(px(26.0))
+                                    .rounded(px(4.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .text_color(rgb(MUTED))
+                                    .hover(|s| s.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                                    .tooltip(|_, cx| {
+                                        crate::tooltip::tooltip_view("Add Text Track", None, cx)
+                                    })
                                     .on_click(cx.listener(|editor, _, _, cx| {
                                         if let Err(error) = editor.add_track(TrackKind::Text) {
                                             log::error!("{error:?}");
                                         }
                                         cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(toolbar_divider_view(16.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                toolbar_segment_view().child(
-                                    toolbar_segment_item_view(
-                                        "toggle-timeline-snapping",
-                                        IconName::Snap,
-                                        timeline.snapping_enabled,
-                                    )
-                                    .child("Snap")
-                                    .on_click(cx.listener(
-                                        |editor, _, _, cx| {
-                                            editor.toggle_snapping();
-                                            cx.notify();
-                                        },
-                                    )),
-                                ),
-                            )
-                            .child(
-                                toolbar_segment_view().child(
-                                    toolbar_segment_item_view(
-                                        "toggle-track-magnet",
-                                        IconName::Magnet,
-                                        timeline.track_magnet_enabled,
-                                    )
-                                    .child("Magnet")
-                                    .on_click(cx.listener(
-                                        |editor, _, _, cx| {
-                                            editor.toggle_track_magnet();
-                                            cx.notify();
-                                        },
-                                    )),
-                                ),
+                                    }))
+                                    .child(svg().path(IconName::Text.path()).size(px(13.0))),
                             ),
                     ),
             )
+            // Right Group: Playhead Timecode & Sleek Zoom Slider
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_3()
+                    // Timecode in accent-soft monospace
                     .child(
                         div()
                             .font_family("monospace")
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child(format!("{frames_per_second:.2} fps")),
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(0x818cf8))
+                            .child(timecode_text),
                     )
+                    // Divider
+                    .child(div().h(px(14.0)).border_r_1().border_color(rgb(BORDER)))
+                    // Sleek Zoom Bar
                     .child(
-                        toolbar_segment_view()
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            // Zoom Out
                             .child(
-                                toolbar_segment_item_view("zoom-out", IconName::Minus, false)
+                                div()
+                                    .id("zoom-out")
+                                    .w(px(20.0))
+                                    .h(px(20.0))
+                                    .rounded(px(3.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .text_color(rgb(MUTED))
+                                    .hover(|s| s.text_color(rgb(TEXT)))
+                                    .tooltip(|_, cx| {
+                                        crate::tooltip::tooltip_view("Zoom Out", Some("−"), cx)
+                                    })
                                     .on_click(cx.listener(|editor, _, _, cx| {
                                         if editor.timeline.is_none() {
                                             return;
@@ -712,21 +836,100 @@ impl Editor {
                                             log::error!("{error:?}");
                                         }
                                         cx.notify();
-                                    })),
+                                    }))
+                                    .child(svg().path(IconName::Minus.path()).size(px(11.0))),
                             )
-                            .child(toolbar_divider_view(14.0))
+                            // Sleek Zoom Progress Rail
+                            .child({
+                                let bounds_cell = zoom_track_bounds.clone();
+                                div()
+                                    .id("timeline-zoom-slider")
+                                    .w(px(64.0))
+                                    .h(px(16.0))
+                                    .flex()
+                                    .items_center()
+                                    .cursor_pointer()
+                                    .tooltip(|_, cx| {
+                                        crate::tooltip::tooltip_view("Timeline Zoom", Some("Cmd+Scroll"), cx)
+                                    })
+                                    .on_click(cx.listener(move |editor, event: &ClickEvent, _, cx| {
+                                        let bounds = bounds_cell.get();
+                                        let width = f32::from(bounds.size.width);
+                                        if width <= 0.0 || editor.timeline.is_none() {
+                                            return;
+                                        }
+                                        let offset_x = (f32::from(event.position().x) - f32::from(bounds.origin.x))
+                                            .clamp(0.0, width);
+                                        let ratio = offset_x / width;
+                                        let target_log = min_log + ratio * (max_log - min_log);
+                                        let target_pps = target_log.exp().clamp(0.1, 1000.0);
+                                        let anchor = editor.timeline_playhead_seconds(cx);
+                                        let timeline = editor.timeline.as_mut().unwrap();
+                                        let factor = target_pps / timeline.pixels_per_second;
+                                        timeline.zoom(factor, anchor);
+                                        if let Err(error) = timeline.save() {
+                                            log::error!("{error:?}");
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .relative()
+                                            .w_full()
+                                            .h(px(2.0))
+                                            .rounded_full()
+                                            .bg(rgb(0x27272a))
+                                            .child(
+                                                div()
+                                                    .h_full()
+                                                    .w(relative(zoom_fraction))
+                                                    .rounded_full()
+                                                    .bg(rgb(0x818cf8)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .top(px(-3.5))
+                                                    .left(relative(zoom_fraction))
+                                                    .w_0()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .child(
+                                                        div()
+                                                            .size(px(9.0))
+                                                            .rounded_full()
+                                                            .bg(rgb(0x94a3b8))
+                                                            .border_1()
+                                                            .border_color(rgb(0x18181b)),
+                                                    ),
+                                            )
+                                            .child(
+                                                canvas(
+                                                    move |bounds, _, _| zoom_track_bounds.set(bounds),
+                                                    |_, _, _, _| {},
+                                                )
+                                                .absolute()
+                                                .inset_0(),
+                                            ),
+                                    )
+                            })
+                            // Zoom In
                             .child(
                                 div()
-                                    .w(px(58.0))
-                                    .text_center()
-                                    .font_family("monospace")
-                                    .text_xs()
+                                    .id("zoom-in")
+                                    .w(px(20.0))
+                                    .h(px(20.0))
+                                    .rounded(px(3.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
                                     .text_color(rgb(MUTED))
-                                    .child(format!("{:.1}px/s", timeline.pixels_per_second)),
-                            )
-                            .child(toolbar_divider_view(14.0))
-                            .child(
-                                toolbar_segment_item_view("zoom-in", IconName::Plus, false)
+                                    .hover(|s| s.text_color(rgb(TEXT)))
+                                    .tooltip(|_, cx| {
+                                        crate::tooltip::tooltip_view("Zoom In", Some("+"), cx)
+                                    })
                                     .on_click(cx.listener(|editor, _, _, cx| {
                                         if editor.timeline.is_none() {
                                             return;
@@ -738,7 +941,8 @@ impl Editor {
                                             log::error!("{error:?}");
                                         }
                                         cx.notify();
-                                    })),
+                                    }))
+                                    .child(svg().path(IconName::Plus.path()).size(px(11.0))),
                             ),
                     ),
             )
@@ -769,68 +973,16 @@ fn ruler_tick_step(duration: f64, pixels_per_second: f32) -> f64 {
         })
 }
 
-fn toolbar_segment_view() -> gpui::Div {
-    div()
-        .h_7()
-        .p(px(1.0))
-        .flex()
-        .items_center()
-        .gap_1()
-        .rounded(px(7.0))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(SURFACE))
-}
-
-fn toolbar_segment_item_view(
-    id: impl Into<gpui::ElementId>,
-    icon: IconName,
-    active: bool,
-) -> gpui::Stateful<gpui::Div> {
-    let color = if active {
-        ACCENT
-    } else {
-        MUTED
-    };
-    div()
-        .id(id)
-        .h(px(24.0))
-        .min_w(px(24.0))
-        .px_2()
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(6.0))
-        .rounded(px(5.0))
-        .cursor(CursorStyle::PointingHand)
-        .text_xs()
-        .text_color(rgb(color))
-        .when(active, |item| item.bg(rgba(0xf0b75e29)))
-        .when(!active, |item| {
-            item.hover(|style| style.bg(rgb(SURFACE_HOVER)))
-        })
-        .child(
-            svg()
-                .path(icon.path())
-                .size(px(14.0))
-                .text_color(rgb(color)),
-        )
-}
-
-fn toolbar_shortcut_view(key: &'static str, active: bool) -> gpui::Div {
-    div()
-        .font_family("monospace")
-        .text_size(px(11.0))
-        .text_color(if active {
-            rgba(0xf0b75e99)
-        } else {
-            rgba(0x55555eff)
-        })
-        .child(key)
-}
-
-fn toolbar_divider_view(height: f32) -> gpui::Div {
-    div().w(px(1.0)).h(px(height)).bg(rgb(BORDER))
+fn format_smpte_timecode(frame_index: TimelineFrameIndex, fps: f64) -> String {
+    let total_frames: i64 = i64::from(frame_index).max(0);
+    let fps_int = fps.round().max(1.0) as i64;
+    let frames = total_frames % fps_int;
+    let total_seconds = total_frames / fps_int;
+    let seconds = total_seconds % 60;
+    let total_minutes = total_seconds / 60;
+    let minutes = total_minutes % 60;
+    let hours = total_minutes / 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}:{frames:02}")
 }
 
 fn format_time_precise(seconds: f64) -> String {

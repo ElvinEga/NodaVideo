@@ -27,7 +27,7 @@ Mockups:
       dismissal, independently of selection and the active timeline. Opening the
       menu does not select the entry or change the active timeline. After dismissal,
       normal hover, selection, and active-timeline styling apply.
-- [ ] Media can be dragged from the Explorer onto a compatible track.
+- [x] Media can be dragged from the Explorer onto a compatible track.
 - [ ] Waveforms are generated in the background and kept in memory only.
 - [x] Source media is never rewritten.
 
@@ -36,7 +36,7 @@ Supported file extensions:
 | Status | Kind      | Extensions                                               | Notes                                                                                                                                    |
 | ------ | --------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | ☑      | Video     | `.mp4`, `.mov`, `.m4v`, `.mkv`, `.webm`, `.avi`          |                                                                                                                                          |
-| ☐      | Image     | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`, `.ico` | Preview and drag affordance exist; track placement remains unresolved. The earlier proposal was five-second still clips on image tracks. |
+| ☑      | Image     | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`, `.ico` | Placed as five-second still clips on video tracks.                                                                                       |
 | ☑      | Audio     | `.aac`, `.flac`, `.m4a`, `.mp3`, `.ogg`, `.wav`          |                                                                                                                                          |
 | ☑      | Subtitles | `.srt`                                                   | Added as text clips                                                                                                                      |
 

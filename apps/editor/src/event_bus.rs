@@ -1110,6 +1110,7 @@ impl Editor {
             }
         }
 
+        self.property_panel = current_property_panel(self);
         self.schedule_active_timeline_waveforms(cx);
         Ok(())
     }
