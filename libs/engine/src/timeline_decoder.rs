@@ -89,6 +89,7 @@ impl TimelineDecoder {
             for clip in clips_at_position {
                 match clip {
                     Clip::Audio(_) => {}
+                    Clip::Composition(_) => {} // 合成图形由编辑器 GPUI 叠加层渲染，引擎不解码。
                     Clip::Text(clip) => layers.push(PreparedLayer::Text { clip_id: clip.id() }),
                     Clip::Video(media) => {
                         let asset = timeline

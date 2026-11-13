@@ -284,6 +284,7 @@ pub fn mix_timeline_audio(
                 media.audio_properties,
             ),
             Clip::Text(_) => continue,
+            Clip::Composition(_) => continue,
         };
         let track = timeline
             .tracks
@@ -606,6 +607,14 @@ fn validate_export(
                     || properties.font_size <= 0.0
                 {
                     bail!("Text clip {} has an invalid track or layout", text.id());
+                }
+            }
+            Clip::Composition(composition) => {
+                if track.kind != TrackKind::Video {
+                    bail!(
+                        "Composition clip {} requires a video track",
+                        composition.id()
+                    );
                 }
             }
         }

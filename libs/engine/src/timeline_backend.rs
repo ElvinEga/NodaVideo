@@ -92,6 +92,7 @@ impl TimelineBackend {
             Clip::Video(clip) => &mut clip.audio_properties,
             Clip::Audio(clip) => &mut clip.audio_properties,
             Clip::Text(_) => bail!("Cannot mute a text clip"),
+            Clip::Composition(_) => bail!("Cannot mute a composition clip"),
         };
         properties.muted = muted;
         Ok(())
