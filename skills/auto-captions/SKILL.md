@@ -4,7 +4,7 @@ id: auto-captions
 version: 1.0.0
 description: Transcribe speech audio tracks and generate frame-accurate animated subtitle overlay clips.
 tags: [subtitles, captions, speech-to-text, typography, accessibility]
-recommended_tools: [get_timeline, search_media, preview_changeset, propose_changeset, add_clip]
+tools: [get_project, get_timeline, search_media, preview_changeset, propose_changeset, add_clip]
 ---
 
 # Auto Captions Skill
@@ -17,11 +17,12 @@ Generate frame-accurate, readable subtitle text clips aligned to spoken audio ac
 ## Workflow Instructions
 
 1. **Audio Inspection**:
-   - Inspect speech audio tracks from `get_timeline`.
+   - Read the sequence frame rate from `get_project`, then inspect speech audio tracks from `get_timeline`.
+   - Compute all frame counts from that frame rate (engine default 30fps; projects vary, so never assume 24fps).
    - Calculate timing boundaries for sentence and clause segments (1 to 5 words per subtitle card for social video, or 1 to 2 lines for standard narrative).
 
 2. **Subtitle Segment Sizing & Timing**:
-   - Keep each caption card between 18 and 60 frames (0.75s to 2.5s) to guarantee viewer legibility.
+   - Keep each caption card between 0.75s and 2.5s (about 23-75 frames at 30fps, 18-60 at 24fps) to guarantee viewer legibility.
    - Align the start frame to the exact audio phoneme onset.
    - Leave at least 2 empty frames between consecutive subtitle cards to let the viewer's eye refresh.
 
