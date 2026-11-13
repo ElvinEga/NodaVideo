@@ -14,11 +14,13 @@ pub enum MediaEngineError {
     },
 
     #[error(
-        "FFprobe executable not found on system PATH. Please ensure FFmpeg/FFprobe is installed."
+        "FFprobe executable not found. Install FFmpeg/FFprobe, or set NODAVIDEO_FFPROBE to the absolute path of ffprobe."
     )]
     FfprobeNotFound,
 
-    #[error("FFmpeg executable not found on system PATH. Please ensure FFmpeg is installed.")]
+    #[error(
+        "FFmpeg executable not found. Install FFmpeg, or set NODAVIDEO_FFMPEG to the absolute path of ffmpeg."
+    )]
     FfmpegNotFound,
 
     #[error("Media inspection/probe failed for {path:?}: {reason}")]
