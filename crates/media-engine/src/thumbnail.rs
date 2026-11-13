@@ -2,12 +2,11 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use nodavideo_project::{AssetId, MediaType, TimeRational};
 
+use crate::binaries::ffmpeg_command;
 use crate::error::MediaEngineError;
-use crate::probe::is_ffmpeg_available;
 
 /// Target maximum bounding box dimensions for generated thumbnails.
 pub const THUMBNAIL_MAX_DIMENSION: u32 = 320;
@@ -77,10 +76,6 @@ fn generate_video_thumbnail(
     output_path: &Path,
     duration: Option<TimeRational>,
 ) -> Result<PathBuf, MediaEngineError> {
-    if !is_ffmpeg_available() {
-        return Err(MediaEngineError::FfmpegNotFound);
-    }
-
     // Pick a representative timestamp: 1.0s or 10% into clip, else 0.0s
     let seek_seconds = match duration {
         Some(d) => {
@@ -98,7 +93,7 @@ fn generate_video_thumbnail(
 
     let seek_str = format!("{seek_seconds:.3}");
 
-    let output = Command::new("ffmpeg")
+    let output = ffmpeg_command()?
         .arg("-ss")
         .arg(&seek_str)
         .arg("-i")
