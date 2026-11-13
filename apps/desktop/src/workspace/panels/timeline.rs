@@ -24,6 +24,13 @@ use nodavideo_timeline::{
 
 use crate::theme::metrics;
 
+/// Clamp a requested playhead frame to `[0, last_playable]`.
+///
+/// Pure so the no-overshoot rule can be regression-tested without a GPUI window.
+pub fn clamp_to_timeline(frame: i64, last_playable: i64) -> i64 {
+    frame.clamp(0, last_playable.max(0))
+}
+
 /// Active timeline editing tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TimelineTool {
@@ -147,7 +154,17 @@ impl TimelinePanel {
         }
     }
 
-    /// Move playhead to specified frame.
+    /// Last frame that actually contains timeline content.
+    ///
+    /// `effective_duration_frames()` is an exclusive end (and a 30s fallback for
+    /// an empty timeline), so displaying it produces a black frame past the end.
+    pub fn last_playable_frame(&self) -> i64 {
+        (self.effective_duration_frames() - 1).max(0)
+    }
+
+    /// Move playhead to specified frame, applying magnetic snapping.
+    ///
+    /// Used for user-driven scrubbing, where snapping to clip edges is intended.
     pub fn set_playhead(&mut self, frame: i64, cx: &mut Context<Self>) {
         let target = if self.snapping_enabled {
             snap_frame(
@@ -161,22 +178,48 @@ impl TimelinePanel {
         } else {
             frame.max(0)
         };
+        let target = target.min(self.last_playable_frame());
         self.selection.set_playhead(target);
         cx.notify();
     }
 
-    /// Advance playhead by a number of frames.
-    pub fn step_forward(&mut self, frames: i64, cx: &mut Context<Self>) {
-        let new_frame = self.selection.playhead_frame + frames;
-        self.selection.set_playhead(new_frame);
-        cx.notify();
+    /// Move playhead to an exact frame without snapping.
+    ///
+    /// Playback and frame stepping must be frame-accurate: applying magnetic
+    /// snapping here would stall or jump the playhead at every nearby clip edge.
+    pub fn set_playhead_exact(&mut self, frame: i64, cx: &mut Context<Self>) {
+        let target = clamp_to_timeline(frame, self.last_playable_frame());
+        if self.selection.playhead_frame != target {
+            self.selection.set_playhead(target);
+            cx.notify();
+        }
     }
 
-    /// Move playhead backwards by a number of frames.
+    /// Advance playhead by a number of frames, clamped to the last valid frame.
+    pub fn step_forward(&mut self, frames: i64, cx: &mut Context<Self>) {
+        let new_frame = self.selection.playhead_frame.saturating_add(frames);
+        self.set_playhead_exact(new_frame, cx);
+    }
+
+    /// Move playhead backwards by a number of frames, clamped to zero.
     pub fn step_backward(&mut self, frames: i64, cx: &mut Context<Self>) {
-        let new_frame = (self.selection.playhead_frame - frames).max(0);
-        self.selection.set_playhead(new_frame);
-        cx.notify();
+        let new_frame = self.selection.playhead_frame.saturating_sub(frames);
+        self.set_playhead_exact(new_frame, cx);
+    }
+
+    /// Convert an x coordinate inside the timeline canvas to a frame number.
+    pub fn frame_from_canvas_x(x: f32, ppf: f32) -> i64 {
+        if ppf <= 0.0 {
+            return 0;
+        }
+        (x / ppf).max(0.0) as i64
+    }
+
+    /// Convert a window x coordinate to a timeline frame, subtracting the track
+    /// header column. Derived from the shared layout metric, never a magic 130.0.
+    pub fn frame_from_window_x(window_x: f32, ppf: f32) -> i64 {
+        let header_width: f32 = metrics::TIMELINE_TRACK_HEADER_WIDTH.into();
+        Self::frame_from_canvas_x(window_x - header_width, ppf)
     }
 
     /// Register or update cached audio waveform data for an asset.
@@ -1001,14 +1044,14 @@ impl TimelinePanel {
                                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                                     this.is_scrubbing = true;
                                     let x = f32::from(event.position.x);
-                                    let frame = (x / ppf).max(0.0) as i64;
+                                    let frame = Self::frame_from_canvas_x(x, ppf);
                                     this.set_playhead(frame, cx);
                                 }),
                             )
                             .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
                                 if this.is_scrubbing {
                                     let x = f32::from(event.position.x);
-                                    let frame = (x / ppf).max(0.0) as i64;
+                                    let frame = Self::frame_from_canvas_x(x, ppf);
                                     this.set_playhead(frame, cx);
                                 }
                             }))
@@ -1049,14 +1092,14 @@ impl TimelinePanel {
                                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                                     this.is_scrubbing = true;
                                     let x = f32::from(event.position.x);
-                                    let frame = (x / ppf).max(0.0) as i64;
+                                    let frame = Self::frame_from_canvas_x(x, ppf);
                                     this.set_playhead(frame, cx);
                                 }),
                             )
                             .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
                                 if this.is_scrubbing {
                                     let x = f32::from(event.position.x);
-                                    let frame = (x / ppf).max(0.0) as i64;
+                                    let frame = Self::frame_from_canvas_x(x, ppf);
                                     this.set_playhead(frame, cx);
                                 }
                             }))
@@ -1104,21 +1147,19 @@ impl TimelinePanel {
                                             cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                                                 this.is_scrubbing = true;
                                                 let x = f32::from(event.position.x);
-                                                let frame = (x / ppf).max(0.0) as i64;
+                                                let frame = Self::frame_from_canvas_x(x, ppf);
                                                 this.set_playhead(frame, cx);
                                             }),
                                         )
                                         .when_some(default_v1, |this, v1_id| {
                                             this.on_drop(cx.listener(move |this, asset: &MediaAsset, window, cx| {
                                                 let mouse_x: f32 = window.mouse_position().x.into();
-                                                let timeline_x = (mouse_x - 130.0).max(0.0);
-                                                let target_frame = (timeline_x / ppf) as i64;
+                                                let target_frame = Self::frame_from_window_x(mouse_x, ppf);
                                                 this.handle_asset_drop_with_frame(v1_id, asset, Some(target_frame), cx);
                                             }))
                                             .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
                                                 let mouse_x: f32 = window.mouse_position().x.into();
-                                                let timeline_x = (mouse_x - 130.0).max(0.0);
-                                                let target_frame = (timeline_x / ppf) as i64;
+                                                let target_frame = Self::frame_from_window_x(mouse_x, ppf);
                                                 if let Some(cb) = this.on_external_drop.clone() {
                                                     cb(paths.0.to_vec(), Some(v1_id), Some(target_frame), window, cx);
                                                 }
@@ -1298,15 +1339,13 @@ impl TimelinePanel {
             // Dropping an imported asset from Media Browser onto this track
             .on_drop(cx.listener(move |this, asset: &MediaAsset, window, cx| {
                 let mouse_x: f32 = window.mouse_position().x.into();
-                let timeline_x = (mouse_x - 130.0).max(0.0);
-                let target_frame = (timeline_x / ppf) as i64;
+                let target_frame = Self::frame_from_window_x(mouse_x, ppf);
                 this.handle_asset_drop_with_frame(track_id, asset, Some(target_frame), cx);
             }))
             // Dropping an external file from Finder/OS onto this track
             .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
                 let mouse_x: f32 = window.mouse_position().x.into();
-                let timeline_x = (mouse_x - 130.0).max(0.0);
-                let target_frame = (timeline_x / ppf) as i64;
+                let target_frame = Self::frame_from_window_x(mouse_x, ppf);
                 if let Some(cb) = this.on_external_drop.clone() {
                     cb(paths.0.to_vec(), Some(track_id), Some(target_frame), window, cx);
                 }
@@ -1422,6 +1461,11 @@ impl TimelinePanel {
             })
             .cursor_pointer()
             .overflow_hidden()
+            // A clip is an object to select, not a ruler to scrub. The parent lane
+            // installs a bubble-phase mouse-down handler that moves the playhead;
+            // stopping propagation here keeps clip selection from jumping the
+            // playhead to the click position. Click (mouse-up) still selects.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.selected_transition = None;
                 match current_tool {
@@ -1546,6 +1590,8 @@ impl TimelinePanel {
             })
             .cursor_pointer()
             .overflow_hidden()
+            // Same rule as clips: selecting a transition must not scrub the playhead.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.selection.clear_selection();
                 this.selected_transition = Some(transition_id);
@@ -1575,5 +1621,61 @@ impl TimelinePanel {
                     ),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nodavideo_project::AssetId;
+
+    #[core::prelude::v1::test]
+    fn clamp_never_overshoots_last_playable_frame() {
+        assert_eq!(clamp_to_timeline(-10, 719), 0);
+        assert_eq!(clamp_to_timeline(0, 719), 0);
+        assert_eq!(clamp_to_timeline(400, 719), 400);
+        assert_eq!(clamp_to_timeline(719, 719), 719);
+        assert_eq!(clamp_to_timeline(720, 719), 719);
+        assert_eq!(clamp_to_timeline(10_000, 719), 719);
+    }
+
+    #[core::prelude::v1::test]
+    fn last_playable_frame_is_one_before_exclusive_duration() {
+        let mut panel = TimelinePanel::default();
+        // Empty sequence: 30s fallback at 24 fps.
+        assert_eq!(panel.effective_duration_frames(), 720);
+        assert_eq!(panel.last_playable_frame(), 719);
+
+        let track_id = panel.sequence.tracks[1].id;
+        let clip = Clip::new(ClipId::new(), AssetId::new(), track_id, "Clip", 0, 0, 48).unwrap();
+        panel.sequence.add_clip(track_id, clip).unwrap();
+        assert_eq!(panel.effective_duration_frames(), 48);
+        assert_eq!(panel.last_playable_frame(), 47);
+    }
+
+    #[core::prelude::v1::test]
+    fn canvas_x_maps_to_frames_at_current_zoom() {
+        let panel = TimelinePanel::default();
+        let ppf = panel.pixels_per_frame();
+        assert_eq!(ppf, 5.0);
+        assert_eq!(TimelinePanel::frame_from_canvas_x(0.0, ppf), 0);
+        assert_eq!(TimelinePanel::frame_from_canvas_x(50.0, ppf), 10);
+        assert_eq!(TimelinePanel::frame_from_canvas_x(125.0, ppf), 25);
+    }
+
+    #[core::prelude::v1::test]
+    fn window_x_subtracts_the_shared_track_header_metric() {
+        let ppf = 5.0;
+        let header: f32 = metrics::TIMELINE_TRACK_HEADER_WIDTH.into();
+        assert_eq!(TimelinePanel::frame_from_window_x(header, ppf), 0);
+        assert_eq!(TimelinePanel::frame_from_window_x(header + 50.0, ppf), 10);
+        // A click in the header column must not produce a negative frame.
+        assert_eq!(TimelinePanel::frame_from_window_x(0.0, ppf), 0);
+    }
+
+    #[core::prelude::v1::test]
+    fn degenerate_zoom_is_safe() {
+        assert_eq!(TimelinePanel::frame_from_canvas_x(100.0, 0.0), 0);
+        assert_eq!(TimelinePanel::frame_from_canvas_x(-100.0, 5.0), 0);
     }
 }
