@@ -4,14 +4,14 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 use nodavideo_project::{AssetId, FrameRate, ProjectDocument};
 use nodavideo_timeline::{Clip, Sequence, TrackType};
 use serde::{Deserialize, Serialize};
 
+use crate::binaries::ffmpeg_command;
 use crate::error::MediaEngineError;
-use crate::probe::is_ffmpeg_available;
+use crate::time_math::{format_seconds, frames_to_seconds, retiming_factor};
 
 /// Parameters governing sequence export.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,10 +64,6 @@ pub fn export_sequence(
     project: &ProjectDocument,
     settings: &ExportSettings,
 ) -> Result<ExportReport, MediaEngineError> {
-    if !is_ffmpeg_available() {
-        return Err(MediaEngineError::FfmpegNotFound);
-    }
-
     let duration_frames = sequence.duration_frames();
     if duration_frames <= 0 {
         return Err(MediaEngineError::ExportFailed {
@@ -76,12 +72,14 @@ pub fn export_sequence(
     }
 
     let seq_fps = settings.fps.to_f64().max(1.0);
-    let total_duration_sec = (duration_frames as f64) / seq_fps;
+    let total_duration_sec = frames_to_seconds(duration_frames, settings.fps);
 
-    // Collect active video clips (ordered from bottom track to top track so higher tracks overlay on top)
-    let mut video_clips: Vec<(usize, Clip, PathBuf, f64)> = Vec::new();
+    // Collect active video clips (ordered from bottom track to top track so higher tracks overlay on top).
+    // The third element is the asset's frame rate, used to convert source-frame values
+    // (`source_in`, `duration_frames`) into source seconds and to retime onto the sequence.
+    let mut video_clips: Vec<(usize, Clip, FrameRate)> = Vec::new();
     // Collect active audio clips
-    let mut audio_clips: Vec<(usize, Clip, PathBuf, f64)> = Vec::new();
+    let mut audio_clips: Vec<(usize, Clip, FrameRate)> = Vec::new();
 
     // Map assets to unique FFmpeg input indexes
     let mut asset_input_indices: HashMap<AssetId, usize> = HashMap::new();
@@ -110,8 +108,8 @@ pub fn export_sequence(
                     input_paths.push(asset.file_path.clone());
                     input_paths.len() - 1
                 });
-                let asset_fps = asset.frame_rate.unwrap_or(settings.fps).to_f64().max(1.0);
-                video_clips.push((input_idx, clip.clone(), asset.file_path.clone(), asset_fps));
+                let asset_fps = asset.frame_rate.unwrap_or(settings.fps);
+                video_clips.push((input_idx, clip.clone(), asset_fps));
             }
         }
     }
@@ -137,15 +135,15 @@ pub fn export_sequence(
                             input_paths.push(asset.file_path.clone());
                             input_paths.len() - 1
                         });
-                    let asset_fps = asset.frame_rate.unwrap_or(settings.fps).to_f64().max(1.0);
-                    audio_clips.push((input_idx, clip.clone(), asset.file_path.clone(), asset_fps));
+                    let asset_fps = asset.frame_rate.unwrap_or(settings.fps);
+                    audio_clips.push((input_idx, clip.clone(), asset_fps));
                 }
             }
         }
     }
 
-    // Build FFmpeg command
-    let mut cmd = Command::new("ffmpeg");
+    // Build FFmpeg command using the centrally resolved executable
+    let mut cmd = ffmpeg_command()?;
 
     // 1. Inputs
     for path in &input_paths {
@@ -158,24 +156,38 @@ pub fn export_sequence(
     // Video canvas: start with black background matching target resolution, fps, and duration
     let _ = write!(
         filtergraph,
-        "color=c=black:s={}x{}:r={}:d={:.4}[vbase];",
-        settings.width, settings.height, seq_fps, total_duration_sec
+        "color=c=black:s={}x{}:r={}:d={}[vbase];",
+        settings.width,
+        settings.height,
+        seq_fps,
+        format_seconds(total_duration_sec)
     );
 
     let mut current_video_link = "vbase".to_string();
 
-    for (k, (input_idx, clip, _, asset_fps)) in video_clips.iter().enumerate() {
-        let start_sec = (clip.start_frame as f64) / seq_fps;
-        let end_sec = (clip.end_frame() as f64) / seq_fps;
-        let source_in_sec = (clip.source_in as f64) / asset_fps;
-        let source_dur_sec = (clip.duration_frames() as f64) / asset_fps;
+    for (k, (input_idx, clip, asset_fps)) in video_clips.iter().enumerate() {
+        // Timeline frames use the SEQUENCE rate; source-frame offsets use the ASSET rate.
+        let start_sec = frames_to_seconds(clip.start_frame, settings.fps);
+        let end_sec = frames_to_seconds(clip.end_frame(), settings.fps);
+        let source_in_sec = frames_to_seconds(clip.source_in, *asset_fps);
+        let source_dur_sec = frames_to_seconds(clip.duration_frames(), *asset_fps);
+        // Retime the trimmed source so its on-screen duration matches the timeline
+        // exactly when asset fps != sequence fps. Equal rates produce a factor of 1.0.
+        let factor = retiming_factor(*asset_fps, settings.fps);
 
-        // Process clip segment: trim, scale to fit, pad to canvas center, delay PTS to timeline position
+        // Process clip segment: trim, retime + offset PTS, scale to fit, pad to canvas center
         let processed_label = format!("vclip_{k}");
         let _ = write!(
             filtergraph,
-            "[{input_idx}:v]trim=start={source_in_sec:.4}:duration={source_dur_sec:.4},setpts=PTS-STARTPTS+{start_sec:.4}/TB,scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,format=yuv420p[{processed_label}];",
-            settings.width, settings.height, settings.width, settings.height
+            "[{input_idx}:v]trim=start={}:duration={},setpts=(PTS-STARTPTS)*{}+{}/TB,scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,format=yuv420p[{processed_label}];",
+            format_seconds(source_in_sec),
+            format_seconds(source_dur_sec),
+            format_seconds(factor),
+            format_seconds(start_sec),
+            settings.width,
+            settings.height,
+            settings.width,
+            settings.height
         );
 
         let next_video_link = if k == video_clips.len() - 1 {
@@ -186,7 +198,10 @@ pub fn export_sequence(
 
         let _ = write!(
             filtergraph,
-            "[{current_video_link}][{processed_label}]overlay=x=0:y=0:enable='between(t,{start_sec:.4},{end_sec:.4})'[{next_video_link}];"
+            "[{current_video_link}][{processed_label}]overlay=x=0:y=0:enable='between(t,{},{})'[{}];",
+            format_seconds(start_sec),
+            format_seconds(end_sec),
+            next_video_link
         );
 
         current_video_link = next_video_link;
@@ -205,29 +220,44 @@ pub fn export_sequence(
         // Start with silent base audio
         let _ = write!(
             filtergraph,
-            "anullsrc=channel_layout=stereo:sample_rate=48000:d={total_duration_sec:.4}[abase];"
+            "anullsrc=channel_layout=stereo:sample_rate=48000:d={}[abase];",
+            format_seconds(total_duration_sec)
         );
         audio_labels.push("[abase]".to_string());
 
-        for (j, (input_idx, clip, _, asset_fps)) in audio_clips.iter().enumerate() {
-            let start_sec = (clip.start_frame as f64) / seq_fps;
+        for (j, (input_idx, clip, asset_fps)) in audio_clips.iter().enumerate() {
+            let start_sec = frames_to_seconds(clip.start_frame, settings.fps);
             let delay_ms = (start_sec * 1000.0).round() as i64;
-            let source_in_sec = (clip.source_in as f64) / asset_fps;
-            let source_dur_sec = (clip.duration_frames() as f64) / asset_fps;
+            let source_in_sec = frames_to_seconds(clip.source_in, *asset_fps);
+            let source_dur_sec = frames_to_seconds(clip.duration_frames(), *asset_fps);
+            let factor = retiming_factor(*asset_fps, settings.fps);
+
+            // `atempo` keeps audio in sync with the retimed video. FFmpeg's single
+            // instance accepts 0.5..=2.0; outside that range audio retiming is
+            // deferred to the Phase B decode engine (documented limitation).
+            let tempo_filter = if (factor - 1.0).abs() > 1e-6 && (0.5..=2.0).contains(&factor) {
+                format!("atempo={},", format_seconds(factor))
+            } else {
+                String::new()
+            };
 
             let audio_label = format!("aclip_{j}");
             let _ = write!(
                 filtergraph,
-                "[{input_idx}:a]atrim=start={source_in_sec:.4}:duration={source_dur_sec:.4},asetpts=PTS-STARTPTS,adelay={delay_ms}|{delay_ms},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[{audio_label}];"
+                "[{input_idx}:a]atrim=start={}:duration={},asetpts=PTS-STARTPTS,{tempo_filter}adelay={delay_ms}|{delay_ms},aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[{audio_label}];",
+                format_seconds(source_in_sec),
+                format_seconds(source_dur_sec),
             );
             audio_labels.push(format!("[{audio_label}]"));
         }
 
         let mix_inputs = audio_labels.len();
         let mix_str = audio_labels.join("");
+        // normalize=0 prevents the silent base track from dividing every real
+        // clip's amplitude by the number of inputs.
         let _ = write!(
             filtergraph,
-            "{mix_str}amix=inputs={mix_inputs}:duration=first:dropout_transition=0[afinal];"
+            "{mix_str}amix=inputs={mix_inputs}:duration=first:dropout_transition=0:normalize=0[afinal];"
         );
     }
 
@@ -236,11 +266,19 @@ pub fn export_sequence(
         filtergraph.pop();
     }
 
+    // Force a constant frame rate output so the MP4 has exactly the sequence fps,
+    // independent of the source streams' timestamps.
+    let _ = write!(
+        filtergraph,
+        ";[{current_video_link}]fps={},format=yuv420p[vout]",
+        format_seconds(seq_fps)
+    );
+
     // Filter complex argument
     cmd.arg("-filter_complex").arg(&filtergraph);
 
     // Map output streams
-    cmd.arg("-map").arg(format!("[{current_video_link}]"));
+    cmd.arg("-map").arg("[vout]");
     if has_audio {
         cmd.arg("-map").arg("[afinal]");
     }
@@ -251,7 +289,11 @@ pub fn export_sequence(
         .arg("-b:v")
         .arg(format!("{}k", settings.video_bitrate_kbps))
         .arg("-pix_fmt")
-        .arg("yuv420p");
+        .arg("yuv420p")
+        .arg("-r")
+        .arg(format_seconds(seq_fps))
+        .arg("-fps_mode")
+        .arg("cfr");
 
     // Audio codec and bitrate
     if has_audio {
@@ -270,7 +312,7 @@ pub fn export_sequence(
     cmd.arg("-movflags")
         .arg("+faststart")
         .arg("-t")
-        .arg(format!("{total_duration_sec:.4}"))
+        .arg(format_seconds(total_duration_sec))
         .arg("-y")
         .arg(&settings.output_path);
 
