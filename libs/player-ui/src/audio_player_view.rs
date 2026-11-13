@@ -1,6 +1,6 @@
 use crate::audio_player::{AudioPlayer, PlaybackState};
+use crate::format_time;
 use crate::progress_bar::{ProgressBarDrag, progress, progress_bar, seek_position};
-use crate::{Seeker, format_time};
 use gpui::{Bounds, ClickEvent, Context, DragMoveEvent, Render, Window, div, prelude::*, rgb};
 use std::{cell::Cell, rc::Rc};
 

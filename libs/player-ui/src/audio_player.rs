@@ -82,6 +82,10 @@ impl Seeker for AudioPlayer {
 }
 
 impl AudioPlayer {
+    pub fn seek(&mut self, position: Duration) -> Result<()> {
+        Seeker::seek(self, position)
+    }
+
     pub fn toggle_playback(&mut self, cx: &mut Context<Self>) -> Result<()> {
         if matches!(self.playback_state, PlaybackState::Ended) {
             self.seek(Duration::ZERO)?;

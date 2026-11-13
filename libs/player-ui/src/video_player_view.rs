@@ -1,7 +1,5 @@
-use crate::Seeker;
-use crate::playback_row::{PlaybackIcon, playback_button_view, playback_row_view};
 use crate::progress_bar::{ProgressBarDrag, progress, progress_bar, seek_position};
-use crate::video_player::{PlaybackState, VideoPlayer};
+use crate::video_player::VideoPlayer;
 use engine::video_surface::video_surface_view;
 use gpui::{
     Bounds, ClickEvent, Context, DragMoveEvent, MouseButton, MouseUpEvent, ObjectFit, Render,
@@ -24,11 +22,6 @@ impl Render for VideoPlayer {
             (true, _) => duration,
             (_, Some((_, pts, _))) => (*pts).min(duration), // 播放中和暂停时，UI 进度使用当前展示帧的 PTS。
             (_, None) => Duration::ZERO,
-        };
-        let playback_icon = match (ended, &self.playback_state) {
-            (true, _) => PlaybackIcon::Replay,
-            (_, PlaybackState::Playing) => PlaybackIcon::Pause,
-            (_, PlaybackState::Paused) => PlaybackIcon::Play,
         };
         let drag_seek_bounds = seek_bounds.clone();
 
@@ -86,17 +79,7 @@ impl Render for VideoPlayer {
                         // A drag can end over the bar or anywhere else in the window.
                         .on_mouse_up(MouseButton::Left, cx.listener(release_scrub))
                         .on_mouse_up_out(MouseButton::Left, cx.listener(release_scrub)),
-                    )
-                    .child(playback_row_view(
-                        playback_button_view("play-pause", playback_icon).on_click(cx.listener(
-                            |player, _, _, cx| {
-                                player.toggle_playback(cx);
-                            },
-                        )),
-                        position,
-                        duration,
-                        self.title.clone(),
-                    )),
+                    ),
             )
     }
 }

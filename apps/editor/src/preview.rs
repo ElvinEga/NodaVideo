@@ -1,5 +1,8 @@
 use crate::asset::IconName;
 use crate::editor::Editor;
+use crate::event_bus::AppEvent;
+use crate::explorer_file_entry::FileTreeEntryKind;
+use crate::preview_events::PreviewEvent;
 use crate::preview_image::preview_image_file;
 use crate::theme::MUTED;
 use crate::time_format::{format_time, format_time_precise};
@@ -330,6 +333,164 @@ impl Editor {
                 (current_tc, total_tc)
             }
             _ => ("00:00:00:00".to_string(), "24 fps".to_string()),
+        }
+    }
+
+    pub(crate) fn ordered_media_videos(&self) -> Vec<PathBuf> {
+        let mut list = Vec::new();
+        for entry in &self.explorer.imported_media {
+            if entry.kind == FileTreeEntryKind::Video {
+                let rel = crate::timeline_document::relative_asset_path(
+                    &self.project_root,
+                    &entry.absolute_path,
+                );
+                if !list.contains(&rel) {
+                    list.push(rel);
+                }
+            }
+        }
+        for entry in &self.explorer.file_tree {
+            if entry.kind == FileTreeEntryKind::Video {
+                let rel = crate::timeline_document::relative_asset_path(
+                    &self.project_root,
+                    &entry.absolute_path,
+                );
+                if !list.contains(&rel) {
+                    list.push(rel);
+                }
+            }
+        }
+        list
+    }
+
+    pub(crate) fn navigate_previous_video_or_start(&mut self, cx: &mut Context<Self>) {
+        match &self.preview.target {
+            PreviewTarget::VideoFile { path, player, .. } => {
+                let position = player
+                    .read(cx)
+                    .position()
+                    .unwrap_or(std::time::Duration::ZERO);
+                // When you click Previous should first go to beginning of the video
+                if position.as_secs_f64() > 0.8 {
+                    player.update(cx, |player, _| {
+                        let _ = player.seek(std::time::Duration::ZERO);
+                    });
+                    cx.notify();
+                    return;
+                }
+
+                // If already near beginning (<= 0.8s), go to previous video in the list
+                let current_path = path.clone();
+                let videos = self.ordered_media_videos();
+                if let Some(pos) = videos.iter().position(|p| {
+                    p == &current_path
+                        || self.project_root.join(p) == self.project_root.join(&current_path)
+                })
+                .filter(|&pos| pos > 0)
+                {
+                    let prev_path = videos[pos - 1].clone();
+                    self.emit_event(
+                        cx,
+                        AppEvent::Preview(PreviewEvent::SelectFile(prev_path.clone())),
+                    );
+                    self.emit_event(
+                        cx,
+                        AppEvent::VideoFileSelected {
+                            path: prev_path,
+                            size_bytes: None,
+                        },
+                    );
+                    return;
+                }
+                // If at the very first or not found, seek to 0
+                player.update(cx, |player, _| {
+                    let _ = player.seek(std::time::Duration::ZERO);
+                });
+                cx.notify();
+            }
+            PreviewTarget::AudioFile { player, .. } => {
+                let position = player.read(cx).position();
+                if position.as_secs_f64() > 0.8 {
+                    player.update(cx, |player, _| {
+                        let _ = player.seek(std::time::Duration::ZERO);
+                    });
+                    cx.notify();
+                }
+            }
+            PreviewTarget::Timeline { .. } => {
+                if let Some(timeline) = self.timeline.as_mut() {
+                    timeline.set_playhead(TimelineFrameIndex::ZERO);
+                    let _ = timeline.save();
+                }
+                self.emit_event(
+                    cx,
+                    AppEvent::TimelineSeek {
+                        frame_index: TimelineFrameIndex::ZERO,
+                    },
+                );
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn navigate_next_video(&mut self, cx: &mut Context<Self>) {
+        match &self.preview.target {
+            PreviewTarget::VideoFile { path, .. } => {
+                let current_path = path.clone();
+                let videos = self.ordered_media_videos();
+                if let Some(pos) = videos.iter().position(|p| {
+                    p == &current_path
+                        || self.project_root.join(p) == self.project_root.join(&current_path)
+                }) {
+                    let next_pos = if pos + 1 < videos.len() { pos + 1 } else { 0 };
+                    let next_path = videos[next_pos].clone();
+                    self.emit_event(
+                        cx,
+                        AppEvent::Preview(PreviewEvent::SelectFile(next_path.clone())),
+                    );
+                    self.emit_event(
+                        cx,
+                        AppEvent::VideoFileSelected {
+                            path: next_path,
+                            size_bytes: None,
+                        },
+                    );
+                } else if let Some(first) = videos.first() {
+                    self.emit_event(
+                        cx,
+                        AppEvent::Preview(PreviewEvent::SelectFile(first.clone())),
+                    );
+                    self.emit_event(
+                        cx,
+                        AppEvent::VideoFileSelected {
+                            path: first.clone(),
+                            size_bytes: None,
+                        },
+                    );
+                }
+            }
+            PreviewTarget::Timeline { .. } => {
+                let _ = self.step_playhead(24);
+                cx.notify();
+            }
+            PreviewTarget::None => {
+                let videos = self.ordered_media_videos();
+                if let Some(first) = videos.first() {
+                    self.emit_event(
+                        cx,
+                        AppEvent::Preview(PreviewEvent::SelectFile(first.clone())),
+                    );
+                    self.emit_event(
+                        cx,
+                        AppEvent::VideoFileSelected {
+                            path: first.clone(),
+                            size_bytes: None,
+                        },
+                    );
+                }
+            }
+            _ => {}
         }
     }
 }

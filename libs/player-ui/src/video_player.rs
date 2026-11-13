@@ -20,6 +20,7 @@ pub struct VideoPlayer {
     play_wakers: Vec<Waker>,                              // 分别唤醒视频、音频循环；只保存等待者，不保存播放进度。
     pub(crate) displayed: Option<(VideoSurface, Duration, Duration)>, // (图像, 帧 PTS, 该帧时长)；None：尚未呈现首帧。
     pub(crate) playback_state: PlaybackState,
+    #[allow(dead_code)]
     pub(crate) title: String,
     scrub: Option<Scrub>,                                 // 拖动进度条期间的状态；None：未在拖动。
 }
@@ -174,6 +175,10 @@ impl VideoPlayer {
             }
         }
         cx.notify();
+    }
+
+    pub fn seek(&mut self, position: Duration) -> Result<()> {
+        Seeker::seek(self, position)
     }
 }
 

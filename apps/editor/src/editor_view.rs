@@ -457,7 +457,7 @@ impl Editor {
                             .flex()
                             .items_center()
                             .gap_1()
-                            // Back / Previous frame
+                            // Back / Previous video or start
                             .child(
                                 div()
                                     .id("monitor-prev-frame")
@@ -470,10 +470,7 @@ impl Editor {
                                     .cursor_pointer()
                                     .hover(|s| s.bg(rgb(SURFACE_HOVER)))
                                     .on_click(cx.listener(|editor, _, _, cx| {
-                                        if let Err(error) = editor.step_playhead(-1) {
-                                            log::debug!("step playhead error: {error:?}");
-                                        }
-                                        cx.notify();
+                                        editor.navigate_previous_video_or_start(cx);
                                     }))
                                     .child(
                                         svg()
@@ -514,7 +511,7 @@ impl Editor {
                                             .text_color(rgb(TEXT)),
                                     ),
                             )
-                            // Next frame
+                            // Next video
                             .child(
                                 div()
                                     .id("monitor-next-frame")
@@ -527,10 +524,7 @@ impl Editor {
                                     .cursor_pointer()
                                     .hover(|s| s.bg(rgb(SURFACE_HOVER)))
                                     .on_click(cx.listener(|editor, _, _, cx| {
-                                        if let Err(error) = editor.step_playhead(1) {
-                                            log::debug!("step playhead error: {error:?}");
-                                        }
-                                        cx.notify();
+                                        editor.navigate_next_video(cx);
                                     }))
                                     .child(
                                         svg()
