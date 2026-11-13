@@ -50,14 +50,26 @@ actions!(
         OpenProjectFolderAction,
         OpenProjectPickerAction,
         OpenSettingsAction,
-        NewTimelineAction
+        NewTimelineAction,
+        NewProjectAction,
+        SaveProject,
+        CloseWindow,
+        MinimizeWindow,
+        ZoomWindow,
+        BringAllToFront,
+        ShowKeyboardShortcuts,
+        ShowAbout,
+        ToggleDebugInspector,
+        MarkSourceIn,
+        MarkSourceOut,
+        InsertSourceToTimeline
     ]
 );
 
 pub(crate) fn set_app_menus(cx: &mut App) {
     cx.set_menus([
         Menu::new("NodaVideo").items([
-            MenuItem::action("About NodaVideo", gpui::NoAction).disabled(true),
+            MenuItem::action("About NodaVideo", ShowAbout),
             MenuItem::separator(),
             MenuItem::action("Settings...", OpenSettingsAction),
             MenuItem::separator(),
@@ -66,9 +78,13 @@ pub(crate) fn set_app_menus(cx: &mut App) {
             MenuItem::action("Quit NodaVideo", QuitApp),
         ]),
         Menu::new("File").items([
+            MenuItem::action("New Project...", NewProjectAction),
             MenuItem::action("New Timeline...", NewTimelineAction),
             MenuItem::action("Open Project Folder...", OpenProjectFolderAction),
             MenuItem::action("Open Project Picker...", OpenProjectPickerAction),
+            MenuItem::separator(),
+            MenuItem::action("Save", SaveProject),
+            MenuItem::action("Close Window", CloseWindow),
             MenuItem::separator(),
             MenuItem::action("Import Media...", ImportMedia),
             MenuItem::separator(),
@@ -86,6 +102,10 @@ pub(crate) fn set_app_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Select All", SelectAllUnlockedClips),
             MenuItem::action("Split Clip", SplitClip),
+            MenuItem::separator(),
+            MenuItem::action("Mark Source In", MarkSourceIn),
+            MenuItem::action("Mark Source Out", MarkSourceOut),
+            MenuItem::action("Insert Source to Timeline", InsertSourceToTimeline),
         ]),
         Menu::new("View").items([
             MenuItem::action("Toggle Fullscreen", ToggleFullscreen),
@@ -102,13 +122,24 @@ pub(crate) fn set_app_menus(cx: &mut App) {
         Menu::new("Playback").items([
             MenuItem::action("Play / Pause", TogglePlayback),
             MenuItem::separator(),
+            MenuItem::action("Mark In", MarkSourceIn),
+            MenuItem::action("Mark Out", MarkSourceOut),
+            MenuItem::action("Insert to Timeline", InsertSourceToTimeline),
+            MenuItem::separator(),
             MenuItem::action("Step Backward One Frame", StepBackwardFrame),
             MenuItem::action("Step Forward One Frame", StepForwardFrame),
             MenuItem::separator(),
             MenuItem::action("Jump to Start", GoToStart),
             MenuItem::action("Jump to End", GoToEnd),
         ]),
+        Menu::new("Window").items([
+            MenuItem::action("Minimize", MinimizeWindow),
+            MenuItem::action("Zoom", ZoomWindow),
+            MenuItem::separator(),
+            MenuItem::action("Bring All to Front", BringAllToFront),
+        ]),
         Menu::new("Help").items([
+            MenuItem::action("Keyboard Shortcuts", ShowKeyboardShortcuts),
             MenuItem::action("NodaVideo Help", gpui::NoAction).disabled(true),
         ]),
     ]);
@@ -158,23 +189,36 @@ pub(crate) fn bind_keys(cx: &mut App) {
         ),
         KeyBinding::new("v", ActivateSelectionTool, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("b", ActivateBladeTool, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("i", MarkSourceIn, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("o", MarkSourceOut, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new(".", InsertSourceToTimeline, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("f", ToggleFullscreen, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-f", ToggleFullscreen, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("escape", ExitFullscreen, Some(EDITOR_SHORTCUT_CONTEXT)),
-        KeyBinding::new("cmd-alt-i", ToggleInspector, None),
+        KeyBinding::new("cmd-alt-i", ToggleDebugInspector, None),
         KeyBinding::new("cmd-shift-a", ToggleAssistant, None),
         KeyBinding::new("cmd-alt-a", ToggleAssistant, None),
         KeyBinding::new("cmd-i", ImportMedia, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-1", ToggleMediaBrowser, None),
+        KeyBinding::new("cmd-2", ToggleInspector, None),
         KeyBinding::new("cmd-alt-m", ToggleMediaBrowser, Some(EDITOR_SHORTCUT_CONTEXT)),
-        KeyBinding::new("cmd-1", SwitchToEditWorkspace, Some(EDITOR_SHORTCUT_CONTEXT)),
-        KeyBinding::new("cmd-2", SwitchToColorWorkspace, Some(EDITOR_SHORTCUT_CONTEXT)),
-        KeyBinding::new("cmd-3", SwitchToAudioWorkspace, Some(EDITOR_SHORTCUT_CONTEXT)),
-        KeyBinding::new("cmd-4", SwitchToAiStudioWorkspace, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-alt-1", SwitchToEditWorkspace, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-alt-2", SwitchToColorWorkspace, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-alt-3", SwitchToAudioWorkspace, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-alt-4", SwitchToAiStudioWorkspace, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("cmd-e", ExportVideoAction, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("cmd-o", OpenProjectFolderAction, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("cmd-shift-o", OpenProjectPickerAction, Some(EDITOR_SHORTCUT_CONTEXT)),
-        KeyBinding::new("cmd-n", NewTimelineAction, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-n", NewProjectAction, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-shift-n", NewTimelineAction, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("cmd-s", SaveProject, None),
+        KeyBinding::new("cmd-w", CloseWindow, None),
+        KeyBinding::new("cmd-m", MinimizeWindow, None),
         KeyBinding::new("cmd-,", OpenSettingsAction, None),
         KeyBinding::new("cmd-q", QuitApp, None),
+        KeyBinding::new("i", MarkSourceIn, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("o", MarkSourceOut, Some(EDITOR_SHORTCUT_CONTEXT)),
+        KeyBinding::new("w", InsertSourceToTimeline, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("cmd-alt-r", RevealInFinder, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new(
             "ctrl-shift-enter",
@@ -182,7 +226,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
             Some(EDITOR_SHORTCUT_CONTEXT),
         ),
     ]);
-    cx.on_action::<ToggleInspector>(|_, cx| {
+    cx.on_action::<ToggleDebugInspector>(|_, cx| {
         let Some(window) = cx.active_window() else {
             return;
         };
@@ -498,6 +542,11 @@ impl Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.shortcuts_open {
+            self.shortcuts_open = false;
+            cx.notify();
+            return;
+        }
         if self.preview.fullscreen {
             self.preview.fullscreen = false;
             cx.notify();
@@ -507,10 +556,16 @@ impl Editor {
     pub(crate) fn action_toggle_inspector(
         &mut self,
         _: &ToggleInspector,
-        window: &mut Window,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        crate::gpui_inspector::toggle(window, cx);
+        if self.show_inspector && self.right_dock == RightDockTab::Inspector {
+            self.show_inspector = false;
+        } else {
+            self.show_inspector = true;
+            self.right_dock = RightDockTab::Inspector;
+        }
+        cx.notify();
     }
 
     pub(crate) fn action_toggle_assistant(
@@ -519,10 +574,12 @@ impl Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.right_dock = match self.right_dock {
-            RightDockTab::Inspector => RightDockTab::Assistant,
-            RightDockTab::Assistant => RightDockTab::Inspector,
-        };
+        if self.show_inspector && self.right_dock == RightDockTab::Assistant {
+            self.show_inspector = false;
+        } else {
+            self.show_inspector = true;
+            self.right_dock = RightDockTab::Assistant;
+        }
         cx.notify();
     }
 
@@ -662,5 +719,140 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         self.import_media_dialog(cx);
+    }
+
+    pub(crate) fn action_new_project(
+        &mut self,
+        _: &NewProjectAction,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.new_project_dialog(cx);
+    }
+
+    pub(crate) fn action_save_project(
+        &mut self,
+        _: &SaveProject,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        let Some(timeline) = self.timeline.as_ref() else {
+            return;
+        };
+        if let Err(error) = timeline.save() {
+            log::error!("Could not save timeline: {error:?}");
+        }
+    }
+
+    pub(crate) fn action_close_window(
+        &mut self,
+        _: &CloseWindow,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        window.remove_window();
+    }
+
+    pub(crate) fn action_minimize_window(
+        &mut self,
+        _: &MinimizeWindow,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        window.minimize_window();
+    }
+
+    pub(crate) fn action_zoom_window(
+        &mut self,
+        _: &ZoomWindow,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        window.zoom_window();
+    }
+
+    pub(crate) fn action_bring_all_to_front(
+        &mut self,
+        _: &BringAllToFront,
+        _: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        #[cfg(target_os = "macos")]
+        {
+            let Some(main_thread) = objc2_foundation::MainThreadMarker::new() else {
+                return;
+            };
+            let application = objc2_app_kit::NSApplication::sharedApplication(main_thread);
+            application.arrangeInFront(None);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            for handle in _cx.windows() {
+                let _ = handle.update(_cx, |_, window, _| window.activate_window());
+            }
+        }
+    }
+
+    pub(crate) fn action_show_keyboard_shortcuts(
+        &mut self,
+        _: &ShowKeyboardShortcuts,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.shortcuts_open = !self.shortcuts_open;
+        cx.notify();
+    }
+
+    pub(crate) fn action_show_about(
+        &mut self,
+        _: &ShowAbout,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        #[cfg(target_os = "macos")]
+        {
+            let Some(main_thread) = objc2_foundation::MainThreadMarker::new() else {
+                return;
+            };
+            let application = objc2_app_kit::NSApplication::sharedApplication(main_thread);
+            application.orderFrontStandardAboutPanel(None);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = _window.prompt(
+                gpui::PromptLevel::Info,
+                "NodaVideo",
+                Some("Your timeline. Your creativity. Your AI."),
+                &["OK"],
+                _cx,
+            );
+        }
+    }
+
+    pub(crate) fn action_mark_source_in(
+        &mut self,
+        _: &MarkSourceIn,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.emit_event(cx, AppEvent::Preview(PreviewEvent::MarkSourceIn));
+    }
+
+    pub(crate) fn action_mark_source_out(
+        &mut self,
+        _: &MarkSourceOut,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.emit_event(cx, AppEvent::Preview(PreviewEvent::MarkSourceOut));
+    }
+
+    pub(crate) fn action_insert_source_to_timeline(
+        &mut self,
+        _: &InsertSourceToTimeline,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.emit_event(cx, AppEvent::Preview(PreviewEvent::InsertSourceToTimeline));
     }
 }

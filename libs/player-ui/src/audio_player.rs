@@ -48,6 +48,14 @@ impl AudioPlayer {
             }
         })
     }
+
+    pub fn position(&self) -> Duration {
+        self.position
+    }
+
+    pub fn duration(&self) -> Duration {
+        self.audio_backend.metadata.duration
+    }
 }
 
 pub(crate) enum PlaybackState {

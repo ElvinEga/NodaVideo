@@ -11,7 +11,7 @@ use crate::timeline_document::resolve_asset_path;
 use crate::track::TrackKind;
 use crate::transcription_window::{ClipRange, TranscriptionScope};
 use ::timeline::TimelineEditingState;
-use engine::media_asset::{is_audio_path, is_video_path};
+use engine::media_asset::{is_audio_path, is_image_path, is_video_path};
 use gpui::prelude::*;
 use gpui::{CursorStyle, MouseButton, MouseDownEvent, div, px, rgb};
 use std::path::PathBuf;
@@ -65,6 +65,10 @@ impl Editor {
         let can_create_timeline = menu.is_directory;
         let is_timeline_file =
             !menu.is_directory && timeline_document::is_timeline_path(&menu.relative_path);
+        let is_media = !menu.is_directory
+            && (is_video_path(&menu.relative_path)
+                || is_audio_path(&menu.relative_path)
+                || is_image_path(&menu.relative_path));
         let can_transcribe = !menu.is_directory
             && (is_video_path(&menu.relative_path) || is_audio_path(&menu.relative_path));
         let can_rename = !menu.relative_path.as_os_str().is_empty();
@@ -80,6 +84,7 @@ impl Editor {
         let can_trash = can_rename && (is_active_timeline || !contains_active_timeline);
         let trash_relative_path = menu.relative_path.clone();
         let height = 132.0
+            + if is_media { 80.0 } else { 0.0 }
             + if can_transcribe {
                 40.0
             } else {
@@ -153,6 +158,41 @@ impl Editor {
                             file_menu_item("Create New Timeline", "").on_click(cx.listener(
                                 move |editor, _, window, cx| {
                                     editor.begin_create_timeline(directory.clone(), window, cx);
+                                },
+                            )),
+                        )
+                    })
+                    .when(is_media, |this| {
+                        let media_path = self.project_root.join(&menu.relative_path);
+                        let media_path_2 = media_path.clone();
+                        this.child(
+                            file_menu_item("Create Timeline from Clip", "").on_click(cx.listener(
+                                move |editor, _, _, cx| {
+                                    editor.dismiss_context_menu();
+                                    if let Err(error) =
+                                        editor.auto_create_timeline_and_insert_asset(&media_path, cx)
+                                    {
+                                        log::error!("Failed to create timeline from clip: {error:?}");
+                                    }
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                        .child(
+                            file_menu_item("Insert into Timeline", "").on_click(cx.listener(
+                                move |editor, _, _, cx| {
+                                    editor.dismiss_context_menu();
+                                    if editor.timeline.is_some() {
+                                        editor.handle_timeline_tracks_external_drop(
+                                            std::slice::from_ref(&media_path_2),
+                                            cx,
+                                        );
+                                    } else if let Err(error) =
+                                        editor.auto_create_timeline_and_insert_asset(&media_path_2, cx)
+                                    {
+                                        log::error!("Failed to insert clip into timeline: {error:?}");
+                                    }
+                                    cx.notify();
                                 },
                             )),
                         )

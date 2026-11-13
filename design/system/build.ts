@@ -4,6 +4,7 @@
 import type { Markup } from "./jsx/jsx-runtime.ts";
 import { COLOR, FONT_MONO, FONT_SANS } from "./theme.ts";
 import { compile } from "tailwindcss";
+import { DESIGN_PAGES, DesignNavigation } from "./components/sidebar-nav.tsx";
 
 const pagesDirectory = new URL("./pages/", import.meta.url);
 const distDirectory = new URL("../pages/", import.meta.url);
@@ -30,12 +31,25 @@ const pageFiles = [...Deno.readDirSync(pagesDirectory)]
   .map((entry) => entry.name)
   .sort();
 
+const index = new Map(DESIGN_PAGES.map((page) => [page.file, page]));
+const pageNames = new Set(pageFiles.map((fileName) => fileName.replace(/\.tsx$/, "")));
+const navigationPages = [
+  ...DESIGN_PAGES.filter((page) => pageNames.has(page.file)),
+  ...[...pageNames].filter((name) => !index.has(name)).map((name) => ({
+    file: name,
+    label: name,
+    group: "Other",
+  })),
+];
+
 for (const fileName of pageFiles) {
   const name = fileName.replace(/\.tsx$/, "");
   const module = await import(new URL(fileName, pagesDirectory).href);
   const page: () => Markup = module.default;
   const markup = page().html;
-  const classes = [...markup.matchAll(/\bclass="([^"]*)"/g)].flatMap((match) =>
+  const navigation = DesignNavigation({ current: name, pages: navigationPages });
+  const content = `${navigation.html}<div class="design-stage">${markup}</div>`;
+  const classes = [...content.matchAll(/\bclass="([^"]*)"/g)].flatMap((match) =>
     match[1].replaceAll("&quot;", '"').replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&")
       .split(/\s+/)
   );
@@ -46,12 +60,12 @@ for (const fileName of pageFiles) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${name}</title>
+<title>${index.get(name)?.label ?? name} · NodaVideo design</title>
 <style>${css}</style>
 <style>body{margin:0;background:#fefefe}svg{display:block}</style>
 </head>
 <body>
-${markup}
+${content}
 </body>
 </html>
 `;

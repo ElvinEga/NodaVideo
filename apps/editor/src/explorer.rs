@@ -3,7 +3,9 @@ use crate::event_bus::AppEvent;
 use crate::explorer_file_entry::{FileTreeEntry, FileTreeEntryKind, search_tree, visible_tree};
 use crate::preview::{PreviewTarget, timeline_preview_target};
 use crate::theme::{ACCENT, BORDER, MUTED, PANEL, SURFACE, TEXT};
+use crate::timeline_document::{relative_asset_path, resolve_asset_path};
 use crate::ui_components::TextInput;
+use ::timeline::Asset;
 use anyhow::{Result, anyhow, bail};
 use futures::StreamExt;
 use futures::channel::mpsc;
@@ -14,7 +16,7 @@ use gpui::{
 };
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -61,6 +63,14 @@ pub(crate) struct ExplorerState {
     pub(crate) trash_timeline_dialog_open: bool, // 确认把当前打开的时间线移到废纸篓。
     pub(crate) category: MediaCategoryFilter,
     pub(crate) view_mode: MediaViewMode,
+    pub(crate) imported_media: Vec<FileTreeEntry>, // 库中引用的素材；项目内的文件仍由 file_tree 展示。
+    pub(crate) imported_paths: HashSet<PathBuf>,   // 媒体库成员；media_metadata 还包含仅探测的项目文件。
+    pub(crate) media_metadata: HashMap<PathBuf, Asset>, // 键为规范化绝对路径。
+    pub(crate) missing_media: HashSet<PathBuf>,
+    pub(crate) media_errors: HashMap<PathBuf, String>,
+    pub(crate) import_errors: Vec<String>,
+    pub(crate) import_queue: VecDeque<(PathBuf, bool)>, // true 表示导入进媒体库，false 仅补齐元数据。
+    pub(crate) import_task: Option<Task<()>>,
     _file_tree_watch: Task<()>,                  // drop 时停止监听项目目录。
 }
 
@@ -91,6 +101,35 @@ impl ExplorerState {
         let expansion = load_explorer_expansion(project_root);
         let file_tree =
             visible_tree(project_root, &expansion.expanded_directories).unwrap_or_default();
+        let (media_metadata, import_errors) = match load_imported_media(project_root) {
+            Ok(assets) => (
+                assets
+                    .into_iter()
+                    .map(|asset| (asset.path().clone(), asset))
+                    .collect(),
+                Vec::new(),
+            ),
+            Err(error) => {
+                log::error!("Could not load media library: {error:?}");
+                (
+                    HashMap::new(),
+                    vec![format!("Could not load media library: {error:#}")],
+                )
+            }
+        };
+        let imported_paths: HashSet<PathBuf> = media_metadata.keys().cloned().collect();
+        let imported_media: Vec<FileTreeEntry> = media_metadata
+            .values()
+            .map(|asset| {
+                let size_bytes = fs::metadata(asset.path()).ok().map(|metadata| metadata.len());
+                FileTreeEntry::from_media_asset(asset, size_bytes)
+            })
+            .collect();
+        let missing_media = imported_media
+            .iter()
+            .filter(|entry: &&FileTreeEntry| !entry.absolute_path.is_file())
+            .map(|entry| entry.absolute_path.clone())
+            .collect();
         Self {
             file_tree,
             expanded_directories: expansion.expanded_directories,
@@ -106,13 +145,41 @@ impl ExplorerState {
             trash_timeline_dialog_open: false,
             category: MediaCategoryFilter::All,
             view_mode: MediaViewMode::List,
+            imported_media,
+            imported_paths,
+            media_metadata,
+            missing_media,
+            media_errors: HashMap::new(),
+            import_errors,
+            import_queue: VecDeque::new(),
+            import_task: None,
             _file_tree_watch: watch_file_tree(project_root.to_path_buf(), cx),
         }
     }
 
     pub(super) fn refresh_file_tree(&mut self, project_root: &Path) -> Result<()> {
         self.file_tree = visible_tree(project_root, &self.expanded_directories)?;
+        self.missing_media = self
+            .imported_media
+            .iter()
+            .filter(|entry| !entry.absolute_path.is_file())
+            .map(|entry| entry.absolute_path.clone())
+            .collect();
         Ok(())
+    }
+
+    pub(crate) fn rebuild_imported_media(&mut self) {
+        self.imported_media = self
+            .media_metadata
+            .iter()
+            .filter(|(path, _)| self.imported_paths.contains(*path))
+            .map(|(_, asset)| {
+                let size_bytes = fs::metadata(asset.path()).ok().map(|metadata| metadata.len());
+                FileTreeEntry::from_media_asset(asset, size_bytes)
+            })
+            .collect();
+        self.imported_media
+            .sort_by(|left, right| left.absolute_path.cmp(&right.absolute_path));
     }
 
     pub(crate) fn toggle_directory(
@@ -645,6 +712,7 @@ fn watch_file_tree(project_root: PathBuf, cx: &mut Context<Editor>) -> Task<()> 
             }
             let result = editor.update(cx, |editor, cx| -> Result<()> {
                 editor.explorer.refresh_file_tree(&editor.project_root)?;
+                editor.schedule_media_metadata(cx);
                 // 素材文件可能被移走或放回；offline 状态变了就按新状态重建 preview。
                 match editor.timeline.as_mut() {
                     Some(timeline) => {
@@ -682,6 +750,33 @@ fn watch_file_tree(project_root: PathBuf, cx: &mut Context<Editor>) -> Task<()> 
             }
         }
     })
+}
+
+pub(crate) fn load_imported_media(project_root: &Path) -> Result<Vec<Asset>> {
+    let contents = match fs::read(project_root.join(".opencut/media.json")) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut assets: Vec<Asset> = serde_json::from_slice(&contents)?;
+    for asset in &mut assets {
+        asset.set_path(resolve_asset_path(project_root, asset.path()));
+    }
+    Ok(assets)
+}
+
+pub(crate) fn save_imported_media(project_root: &Path, assets: &[Asset]) -> Result<()> {
+    let mut stored_assets = assets.to_vec();
+    for asset in &mut stored_assets {
+        asset.set_path(relative_asset_path(project_root, asset.path()));
+    }
+    let contents = serde_json::to_vec_pretty(&stored_assets)?;
+    let directory = project_root.join(".opencut");
+    fs::create_dir_all(&directory)?;
+    let temporary_path = directory.join("media.json.tmp");
+    fs::write(&temporary_path, contents)?;
+    fs::rename(temporary_path, directory.join("media.json"))?;
+    Ok(())
 }
 
 #[cfg(test)]

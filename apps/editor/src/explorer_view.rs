@@ -6,12 +6,13 @@ use crate::explorer_drag::{AssetBeingDragged, ExplorerDragView};
 use crate::explorer_file_entry::{FileTreeEntry, FileTreeEntryKind};
 use crate::preview_events::PreviewEvent;
 use crate::theme::{
-    ACCENT, ACCENT_HOVER, BORDER, MUTED, PANEL, SURFACE, SURFACE_HOVER, TEXT,
+    ACCENT, ACCENT_HOVER, BORDER, MUTED, PANEL, SURFACE, SURFACE_HOVER, TEXT, WARNING,
 };
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AppContext, Context, CursorStyle, ExternalPaths, FontWeight, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement, StatefulInteractiveElement, Styled, div, px, rgb,
+    MouseButton, MouseDownEvent, ParentElement, StatefulInteractiveElement, Styled, StyledImage,
+    div, px, rgb,
 };
 use std::path::PathBuf;
 
@@ -21,11 +22,20 @@ impl Editor {
         let filter = filter_query.trim().to_lowercase();
         let show_root_contents = self.explorer.root_expanded || !filter.is_empty();
 
-        let visible_entries = if filter.is_empty() {
-            &self.explorer.file_tree
+        let mut visible_entries: Vec<FileTreeEntry> = if filter.is_empty() {
+            self.explorer.file_tree.clone()
         } else {
-            &self.explorer.search_results
+            self.explorer.search_results.clone()
         };
+        for entry in &self.explorer.imported_media {
+            if entry.absolute_path.starts_with(&self.project_root) {
+                continue; // 项目内的导入文件已由文件树展示，避免重复。
+            }
+            if !filter.is_empty() && !entry.name.to_lowercase().contains(&filter) {
+                continue;
+            }
+            visible_entries.push(entry.clone());
+        }
 
         // Compute counts per category
         let mut count_all = 0;
@@ -34,7 +44,7 @@ impl Editor {
         let mut count_image = 0;
         let mut count_captions = 0;
 
-        for entry in visible_entries {
+        for entry in &visible_entries {
             count_all += 1;
             match entry.kind {
                 FileTreeEntryKind::Video => count_video += 1,
@@ -57,7 +67,14 @@ impl Editor {
             })
             .collect();
 
-        let header = self.media_browser_header(cx);
+        let import_error = self
+            .explorer
+            .import_errors
+            .first()
+            .cloned()
+            .or_else(|| self.explorer.media_errors.values().next().cloned());
+
+        let header = self.media_browser_header(count_all, cx);
         let category_bar = self.media_category_bar(
             count_all,
             count_video,
@@ -96,13 +113,50 @@ impl Editor {
                     .bg(rgb(SURFACE))
                     .child(self.explorer.filter.clone().into_any_element()),
             )
+            .when_some(import_error, |this, message| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(0x2a1a1c))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .text_size(px(10.0))
+                                .text_color(rgb(0xfca5a5))
+                                .child(message),
+                        )
+                        .child(
+                            div()
+                                .id("dismiss-import-error")
+                                .cursor_pointer()
+                                .text_size(px(10.0))
+                                .text_color(rgb(MUTED))
+                                .hover(|s| s.text_color(rgb(TEXT)))
+                                .on_click(cx.listener(|editor, _, _, cx| {
+                                    editor.explorer.import_errors.clear();
+                                    editor.explorer.media_errors.clear();
+                                    cx.notify();
+                                }))
+                                .child("Dismiss"),
+                        ),
+                )
+            })
             .child(div().flex_1().min_h_0().overflow_hidden().child(content))
             .into_any_element()
     }
 
-    fn media_browser_header(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn media_browser_header(&self, item_count: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         let is_list = self.explorer.view_mode == MediaViewMode::List;
         let is_grid = self.explorer.view_mode == MediaViewMode::Grid;
+        let importing = self.explorer.import_task.is_some();
 
         div()
             .h(px(38.0))
@@ -134,8 +188,16 @@ impl Editor {
                             .rounded(px(3.0))
                             .bg(rgb(SURFACE))
                             .text_color(rgb(MUTED))
-                            .child(format!("{} items", self.explorer.file_tree.len())),
-                    ),
+                            .child(format!("{item_count} items")),
+                    )
+                    .when(importing, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(ACCENT))
+                                .child("Importing…"),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -362,7 +424,12 @@ impl Editor {
                     .justify_center()
                     .text_size(px(24.0))
                     .text_color(rgb(MUTED))
-                    .child("📁"),
+                    .child(
+                        gpui::svg()
+                            .path(crate::asset::IconName::Folder.path())
+                            .size(px(24.0))
+                            .text_color(rgb(MUTED)),
+                    ),
             )
             .child(
                 div()
@@ -561,6 +628,12 @@ impl Editor {
         let event_bus = self.event_bus.clone();
         let drag_editor = cx.entity().downgrade();
 
+        let is_missing = self.explorer.missing_media.contains(&entry.absolute_path);
+        let metadata_text = match self.explorer.media_metadata.get(&entry.absolute_path) {
+            Some(asset) => crate::explorer_file_entry::media_asset_summary(asset),
+            None => format_file_size(entry.size_bytes.unwrap_or(0)),
+        };
+
         div()
             .id(("media-card", index))
             .w(px(140.0))
@@ -571,9 +644,7 @@ impl Editor {
             .p_1p5()
             .rounded(px(6.0))
             .border_1()
-            .border_color(rgb(if active_timeline {
-                0xf0b75e
-            } else if selected {
+            .border_color(rgb(if active_timeline || selected {
                 ACCENT
             } else {
                 BORDER
@@ -688,28 +759,37 @@ impl Editor {
                     .items_center()
                     .justify_center()
                     .overflow_hidden()
-                    .child(
-                        div()
-                            .text_size(px(22.0))
-                            .opacity(0.4)
-                            .child(match entry.kind {
-                                FileTreeEntryKind::Video => "🎬",
-                                FileTreeEntryKind::Audio => "🎵",
-                                FileTreeEntryKind::Image => "🖼️",
-                                FileTreeEntryKind::Srt => "📝",
-                                FileTreeEntryKind::Timeline => "⏱️",
-                                _ => "📄",
-                            }),
-                    )
+                    .when(entry.kind == FileTreeEntryKind::Image, |this| {
+                        this.child(
+                            gpui::img(entry.absolute_path.clone())
+                                .size_full()
+                                .object_fit(gpui::ObjectFit::Contain),
+                        )
+                    })
                     .child(
                         div()
                             .absolute()
                             .top(px(4.0))
                             .left(px(4.0))
                             .child(explorer_file_badge(entry)),
-                    ),
+                    )
+                    .when(is_missing, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(gpui::rgba(0x131417cc))
+                                .text_size(px(10.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(WARNING))
+                                .child("MISSING"),
+                        )
+                    }),
             )
-            // Title and size
+            // Title and metadata
             .child(
                 div()
                     .w_full()
@@ -723,7 +803,8 @@ impl Editor {
                 div()
                     .text_size(px(10.0))
                     .text_color(rgb(MUTED))
-                    .child(format_file_size(entry.size_bytes.unwrap_or(0))),
+                    .text_ellipsis()
+                    .child(metadata_text),
             )
             .into_any_element()
     }

@@ -40,7 +40,14 @@ impl Editor {
                 .as_ref()
                 .is_some_and(|timeline| timeline.path == entry.absolute_path);
 
-        let metadata = file_entry_metadata(entry, active_timeline);
+        let metadata = if self.explorer.missing_media.contains(&entry.absolute_path) {
+            Some("MISSING".to_string())
+        } else {
+            match self.explorer.media_metadata.get(&entry.absolute_path) {
+                Some(asset) => Some(media_asset_summary(asset)),
+                None => file_entry_metadata(entry, active_timeline),
+            }
+        };
         let draggable = match entry.kind {
             FileTreeEntryKind::Video
             | FileTreeEntryKind::Image
@@ -66,9 +73,9 @@ impl Editor {
             .bg(rgb(if context_menu_target {
                 SURFACE_HOVER
             } else if active_timeline {
-                0x211a0f
+                0x252544
             } else if selected {
-                0x1e1b13
+                SURFACE_HOVER
             } else {
                 PANEL
             }))
@@ -243,13 +250,13 @@ impl Editor {
                                 .items_center()
                                 .rounded_sm()
                                 .border_1()
-                                .border_color(rgb(0x8a652d))
-                                .bg(rgb(0x2a241b))
+                                .border_color(rgb(ACCENT))
+                                .bg(rgb(0x252544))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(rgb(ACCENT))
                         })
                         .when(!active_timeline, |this| {
-                            this.max_w(px(58.0)).text_color(rgb(0x55555e))
+                            this.max_w(px(96.0)).text_color(rgb(MUTED))
                         })
                         .child(metadata),
                 )
@@ -260,10 +267,32 @@ impl Editor {
 #[derive(Clone, PartialEq)]
 pub(crate) struct FileTreeEntry {
     pub(crate) absolute_path: PathBuf,
-    name: String,
+    pub(crate) name: String,
     depth: usize,
     pub(crate) kind: FileTreeEntryKind,
     pub(crate) size_bytes: Option<u64>,
+}
+
+impl FileTreeEntry {
+    pub(crate) fn from_media_asset(asset: &::timeline::Asset, size_bytes: Option<u64>) -> Self {
+        let kind = match asset.kind() {
+            ::timeline::MediaKind::Video => FileTreeEntryKind::Video,
+            ::timeline::MediaKind::Audio => FileTreeEntryKind::Audio,
+            ::timeline::MediaKind::Image => FileTreeEntryKind::Image,
+        };
+        let name = asset
+            .path()
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| asset.name().clone());
+        Self {
+            absolute_path: asset.path().clone(),
+            name,
+            depth: 0,
+            kind,
+            size_bytes,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -500,6 +529,31 @@ pub(crate) async fn select_preview_file(
     }
 
     return Editor::open_file_preview(editor, project_root, relative_path, is_audio, cx).await;
+}
+
+pub(crate) fn media_asset_summary(asset: &::timeline::Asset) -> String {
+    let mut parts = Vec::new();
+    if let Some(duration) = asset.duration() {
+        let total_seconds = duration.round() as u64;
+        if total_seconds >= 3600 {
+            parts.push(format!(
+                "{}:{:02}:{:02}",
+                total_seconds / 3600,
+                (total_seconds % 3600) / 60,
+                total_seconds % 60
+            ));
+        } else {
+            parts.push(format!("{}:{:02}", total_seconds / 60, total_seconds % 60));
+        }
+    }
+    if asset.width() > 0 && asset.height() > 0 {
+        parts.push(format!("{}×{}", asset.width(), asset.height()));
+    }
+    if parts.is_empty() {
+        asset.codec().clone()
+    } else {
+        parts.join(" · ")
+    }
 }
 
 fn file_entry_metadata(entry: &FileTreeEntry, active_timeline: bool) -> Option<String> {

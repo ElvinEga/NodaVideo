@@ -1,7 +1,8 @@
-use ::timeline::TimelineSerialization;
+use ::timeline::{TimelineSerialization, Track, TrackKind};
 use anyhow::{Result, anyhow};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use ulid::Ulid;
 
 const TIMELINE_SUFFIX: &str = ".timeline";
 const LEGACY_TIMELINE_SUFFIX: &str = ".timeline.json";
@@ -72,6 +73,81 @@ fn timeline_file_name(name: &str) -> Option<String> {
     Some(file_name)
 }
 
+/// Default standard tracks for a newly created timeline (V1, V2, A1, A2).
+pub(crate) fn default_timeline_tracks() -> Vec<Track> {
+    vec![
+        Track {
+            id: Ulid::generate(),
+            name: "Video 1".to_string(),
+            kind: TrackKind::Video,
+            locked: false,
+            muted: false,
+            visible: true,
+        },
+        Track {
+            id: Ulid::generate(),
+            name: "Video 2".to_string(),
+            kind: TrackKind::Video,
+            locked: false,
+            muted: false,
+            visible: true,
+        },
+        Track {
+            id: Ulid::generate(),
+            name: "Audio 1".to_string(),
+            kind: TrackKind::Audio,
+            locked: false,
+            muted: false,
+            visible: true,
+        },
+        Track {
+            id: Ulid::generate(),
+            name: "Audio 2".to_string(),
+            kind: TrackKind::Audio,
+            locked: false,
+            muted: false,
+            visible: true,
+        },
+    ]
+}
+
+/// Computes a unique, collision-free timeline name from a media file stem (e.g., "Interview").
+pub(crate) fn unique_timeline_name_from_stem(
+    project_root: &Path,
+    relative_directory: &Path,
+    stem: &str,
+) -> String {
+    let stem = stem.trim();
+    if stem.is_empty() {
+        return default_timeline_name(project_root, relative_directory);
+    }
+    let clean_stem: String = stem
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            other => other,
+        })
+        .collect();
+    let clean_stem = clean_stem.trim();
+    if clean_stem.is_empty() {
+        return default_timeline_name(project_root, relative_directory);
+    }
+    let existing = timeline_file_names(&project_root.join(relative_directory)).unwrap_or_default();
+    let initial_candidate = format!("{clean_stem}{TIMELINE_SUFFIX}");
+    if !existing.contains(&initial_candidate)
+        && !existing.contains(&format!("{clean_stem}{LEGACY_TIMELINE_SUFFIX}"))
+    {
+        return clean_stem.to_string();
+    }
+    (2usize..)
+        .map(|index| format!("{clean_stem} {index}"))
+        .find(|candidate| {
+            !existing.contains(&format!("{candidate}{TIMELINE_SUFFIX}"))
+                && !existing.contains(&format!("{candidate}{LEGACY_TIMELINE_SUFFIX}"))
+        })
+        .unwrap_or_else(|| format!("{clean_stem} 1"))
+}
+
 /// The next unused `timeline-N` name for `relative_directory`, without the extension,
 /// suitable for pre-filling the create dialog.
 pub(super) fn default_timeline_name(project_root: &Path, relative_directory: &Path) -> String {
@@ -85,8 +161,8 @@ pub(super) fn default_timeline_name(project_root: &Path, relative_directory: &Pa
         .unwrap_or_else(|| "timeline".to_string())
 }
 
-/// Creates an empty timeline named `name` inside `relative_directory`, which is relative
-/// to the project root. An empty directory places the timeline at the root. The caller
+/// Creates a new timeline named `name` inside `relative_directory`, initialized with default
+/// tracks (V1, V2, A1, A2). An empty directory places the timeline at the root. The caller
 /// does not need to include the `.timeline` extension. The file contents are JSON.
 ///
 /// The returned path is relative to the project root, so it can be handed straight to
@@ -107,7 +183,8 @@ pub(super) fn create(
     if path.exists() {
         return Err(anyhow!("{} already exists.", relative_path.display()));
     }
-    let timeline = TimelineSerialization::default();
+    let mut timeline = TimelineSerialization::default();
+    timeline.editing_state.tracks = default_timeline_tracks();
     timeline.save(&path)?;
     Ok((relative_path, timeline))
 }

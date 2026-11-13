@@ -4,7 +4,7 @@ use crate::edit_action::EditAction;
 use crate::editor::Editor;
 use crate::event_bus::{AppEvent, AssetDragMoveEvent};
 use crate::explorer_drag::AssetBeingDragged;
-use crate::explorer_file_entry::FileTreeEntry;
+use crate::explorer_file_entry::{FileTreeEntry, FileTreeEntryKind};
 use crate::layout::{
     RULER_HEIGHT, TIMELINE_HEADER_HEIGHT, TIMELINE_PADDING, TRACK_HEADER_WIDTH, TRACK_HEIGHT,
 };
@@ -12,14 +12,17 @@ use crate::preview::PreviewTarget;
 use crate::theme::{ACCENT, BORDER, ERROR, MUTED, SURFACE, SURFACE_HOVER, TEXT};
 use crate::time_format::format_time;
 use crate::timeline::TimelineFrameIndex;
+use crate::timeline_document;
 use crate::timeline_interactions::{MarqueeSelection, TimelineTool};
 use crate::track::TrackKind;
 use gpui::prelude::*;
 use gpui::{
-    CursorStyle, DragMoveEvent, Empty, MouseButton, MouseDownEvent, MouseUpEvent, Window, div, px,
-    rgb, rgba, svg,
+    CursorStyle, DragMoveEvent, ElementId, Empty, ExternalPaths, FontWeight, MouseButton,
+    MouseDownEvent, MouseUpEvent, Window, div, px, rgb, rgba, svg,
 };
 use std::collections::HashMap;
+use std::path::PathBuf;
+use ulid::Ulid;
 
 // 捏合增量倍率；越大缩放越灵敏。It's fun to be PI.
 const TIMELINE_PINCH_SENSITIVITY: f32 = std::f32::consts::PI;
@@ -59,16 +62,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let Some(timeline) = self.timeline.as_ref() else {
-            return div()
-                .id("editor-timeline-empty")
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgb(0x0a0a0c))
-                .text_color(rgb(MUTED))
-                .child("Create or select a timeline to begin editing")
-                .into_any_element();
+            return self.empty_timeline_view(cx);
         };
         let frames_per_second = timeline
             .editing_state
@@ -228,6 +222,11 @@ impl Editor {
                                     .on_drop(cx.listener(
                                         move |editor, _drag: &FileTreeEntry, _, cx| {
                                             editor.emit_event(cx, AppEvent::DragDrop);
+                                        },
+                                    ))
+                                    .on_drop(cx.listener(
+                                        |editor, paths: &ExternalPaths, _, cx| {
+                                            editor.handle_timeline_tracks_external_drop(paths.paths(), cx);
                                         },
                                     ))
                                     .on_mouse_up_out(
@@ -895,4 +894,358 @@ fn pinch_timeline(
         cx.notify();
     }
     cx.stop_propagation();
+}
+
+impl Editor {
+    pub(super) fn empty_timeline_view(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let existing_timelines =
+            timeline_document::project_timeline_files(&self.project_root).unwrap_or_default();
+
+        div()
+            .id("editor-timeline-empty")
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .p_6()
+            .bg(rgb(0x131417))
+            .on_drop(cx.listener(|editor, drag: &FileTreeEntry, _, cx| {
+                editor.handle_empty_timeline_asset_drop(drag, cx);
+            }))
+            .on_drop(cx.listener(|editor, paths: &ExternalPaths, _, cx| {
+                editor.handle_empty_timeline_external_drop(paths.paths(), cx);
+            }))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(520.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .p_8()
+                    .rounded_xl()
+                    .border_2()
+                    .border_dashed()
+                    .border_color(rgb(0x2e313a))
+                    .bg(rgb(0x18191e))
+                    .hover(|s| s.border_color(rgb(0x6366f1)).bg(rgb(0x1c1e26)))
+                    .child(
+                        div()
+                            .size(px(46.0))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(rgb(0x22242e))
+                            .border_1()
+                            .border_color(rgb(0x363945))
+                            .child(
+                                svg()
+                                    .path(IconName::Playhead.path())
+                                    .size(px(20.0))
+                                    .text_color(rgb(0x6366f1)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(15.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0xe4e4e7))
+                            .child("No Active Timeline"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(0x8a8f9d))
+                            .child(
+                                "Drag media from your computer or the Media Pool to create a timeline instantly",
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("btn-create-new-timeline")
+                            .cursor(CursorStyle::PointingHand)
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .mt_2()
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(0x6366f1))
+                            .hover(|s| s.bg(rgb(0x4f46e5)))
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(0xffffff))
+                            .child(
+                                svg()
+                                    .path(IconName::Plus.path())
+                                    .size(px(13.0))
+                                    .text_color(rgb(0xffffff)),
+                            )
+                            .child("Create New Timeline")
+                            .on_click(cx.listener(|editor, _, _, cx| {
+                                if let Err(error) =
+                                    editor.create_and_activate_new_timeline(None, cx)
+                                {
+                                    log::error!("Failed to create timeline: {error:?}");
+                                }
+                            })),
+                    ),
+            )
+            .when(!existing_timelines.is_empty(), |this| {
+                this.child(
+                    div()
+                        .mt_5()
+                        .w_full()
+                        .max_w(px(520.0))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(10.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0x6b7280))
+                                .child("OR OPEN AN EXISTING TIMELINE"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .justify_center()
+                                .gap_2()
+                                .children(existing_timelines.into_iter().take(8).map(|path| {
+                                    let display_name = path
+                                        .file_name()
+                                        .and_then(|name| name.to_str())
+                                        .and_then(|name| {
+                                            name.strip_suffix(".timeline")
+                                                .or_else(|| name.strip_suffix(".timeline.json"))
+                                        })
+                                        .unwrap_or("Timeline")
+                                        .to_string();
+                                    let path_clone = path.clone();
+                                    div()
+                                        .id(ElementId::Name(
+                                            format!("chip-open-{}", path.display()).into(),
+                                        ))
+                                        .cursor(CursorStyle::PointingHand)
+                                        .flex()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .px_2p5()
+                                        .py_1()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(rgb(0x2e313a))
+                                        .bg(rgb(0x18191e))
+                                        .hover(|s| {
+                                            s.bg(rgb(0x252833)).border_color(rgb(0x6366f1))
+                                        })
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(0xd1d5db))
+                                        .child(
+                                            svg()
+                                                .path(IconName::Playhead.path())
+                                                .size(px(11.0))
+                                                .text_color(rgb(0x9ca3af)),
+                                        )
+                                        .child(display_name)
+                                        .on_click(cx.listener(move |editor, _, _, cx| {
+                                            editor.emit_event(
+                                                cx,
+                                                AppEvent::OpenTimeline {
+                                                    path: path_clone.clone(),
+                                                },
+                                            );
+                                        }))
+                                })),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
+    pub(crate) fn handle_empty_timeline_asset_drop(
+        &mut self,
+        drag: &FileTreeEntry,
+        cx: &mut Context<Self>,
+    ) {
+        match drag.kind {
+            FileTreeEntryKind::Timeline => {
+                let relative = drag
+                    .absolute_path
+                    .strip_prefix(&self.project_root)
+                    .unwrap_or(&drag.absolute_path)
+                    .to_path_buf();
+                self.emit_event(
+                    cx,
+                    AppEvent::OpenTimeline {
+                        path: relative,
+                    },
+                );
+            }
+            FileTreeEntryKind::Video | FileTreeEntryKind::Audio | FileTreeEntryKind::Image => {
+                if let Err(error) =
+                    self.auto_create_timeline_and_insert_asset(&drag.absolute_path, cx)
+                {
+                    log::error!("Failed to create timeline from asset: {error:?}");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn handle_empty_timeline_external_drop(
+        &mut self,
+        paths: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        self.import_external_paths(paths, cx);
+
+        // Check if a .timeline file was dropped
+        if let Some(timeline_path) = paths.iter().find(|p| timeline_document::is_timeline_path(p))
+            && let Ok(relative) = timeline_path.strip_prefix(&self.project_root)
+        {
+            self.emit_event(
+                cx,
+                AppEvent::OpenTimeline {
+                    path: relative.to_path_buf(),
+                },
+            );
+            return;
+        }
+
+        // Find first media file to create timeline
+        let first_media = paths.iter().find(|path| {
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            matches!(
+                ext.as_str(),
+                "mp4"
+                    | "mov"
+                    | "m4v"
+                    | "mkv"
+                    | "avi"
+                    | "webm"
+                    | "mp3"
+                    | "wav"
+                    | "aac"
+                    | "flac"
+                    | "ogg"
+                    | "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "webp"
+            )
+        });
+
+        if let Some(media_path) = first_media
+            && let Err(error) = self.auto_create_timeline_and_insert_asset(media_path, cx)
+        {
+            log::error!("Failed to auto-create timeline from external media: {error:?}");
+        }
+    }
+
+    pub(crate) fn handle_timeline_tracks_external_drop(
+        &mut self,
+        paths: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        self.import_external_paths(paths, cx);
+
+        let Some(first_path) = paths.first() else {
+            return;
+        };
+        let canonical = first_path
+            .canonicalize()
+            .unwrap_or_else(|_| first_path.to_path_buf());
+
+        let asset = if let Some(cached) = self.explorer.media_metadata.get(&canonical) {
+            cached.clone()
+        } else {
+            match engine::media_asset::probe_media_asset(&canonical) {
+                Ok(mut probed) => {
+                    probed.set_id(Ulid::generate());
+                    self.explorer
+                        .media_metadata
+                        .insert(canonical.clone(), probed.clone());
+                    probed
+                }
+                Err(error) => {
+                    log::error!("Failed to probe dropped media: {error:?}");
+                    return;
+                }
+            }
+        };
+
+        let Some(timeline) = self.timeline.as_ref() else {
+            return;
+        };
+
+        let is_audio = asset.kind() == timeline::MediaKind::Audio;
+        let expected_kind = if is_audio {
+            TrackKind::Audio
+        } else {
+            TrackKind::Video
+        };
+
+        let playhead = timeline.playhead();
+        let duration = timeline
+            .editing_state
+            .nearest_time(asset.duration().unwrap_or(0.0))
+            .max(TimelineFrameIndex::ONE_FRAME);
+
+        let mut target_track_id = timeline
+            .editing_state
+            .tracks
+            .iter()
+            .filter(|t| t.kind == expected_kind && !t.locked)
+            .find(|t| {
+                crate::clip_placement::validate_clip_placement(
+                    &timeline.editing_state,
+                    t.id,
+                    asset.kind(),
+                    duration,
+                    playhead,
+                    &std::collections::HashSet::new(),
+                )
+                .is_ok()
+            })
+            .map(|t| t.id);
+
+        let start_pos = if target_track_id.is_some() {
+            playhead
+        } else {
+            let end_time = timeline.editing_state.content_duration();
+            target_track_id = timeline
+                .editing_state
+                .tracks
+                .iter()
+                .find(|t| t.kind == expected_kind && !t.locked)
+                .map(|t| t.id);
+            end_time
+        };
+
+        if let Some(track_id) = target_track_id
+            && let Err(error) =
+                self.place_explorer_asset(canonical, track_id, start_pos, asset, None, cx)
+        {
+            log::error!("Failed to place dropped external media: {error:?}");
+        }
+    }
 }

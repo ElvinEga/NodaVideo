@@ -6,7 +6,8 @@ use crate::explorer_drag::AssetBeingDragged;
 use crate::layout::{THIN_CLIP_WIDTH, TIMELINE_PADDING, TRACK_HEIGHT};
 use crate::srt::srt_text_clips;
 use crate::theme::{
-    ACCENT, BORDER, CLIP_BLUE, CLIP_OFFLINE, ERROR, MUTED, SURFACE, SURFACE_HOVER, TEXT,
+    ACCENT, BORDER, CLIP_AUDIO, CLIP_BLUE, CLIP_OFFLINE, CLIP_TEXT, ERROR, MUTED, SURFACE,
+    SURFACE_HOVER, TEXT,
 };
 use crate::timeline::{PreviewDropAsset, TimelineFrameIndex};
 use crate::timeline_clip::{Clip, text_clip_component};
@@ -45,8 +46,8 @@ impl Editor {
         let hidden = !track.visible;
         let badge_color = match track.kind {
             TrackKind::Video => CLIP_BLUE,
-            TrackKind::Audio => 0x24656b,
-            TrackKind::Text => 0x7251a3,
+            TrackKind::Audio => CLIP_AUDIO,
+            TrackKind::Text => CLIP_TEXT,
         };
         div()
             .id(("track-header", index))
@@ -512,7 +513,7 @@ impl Editor {
             })
             .child(timeline_clip_label(name, detail));
 
-        self.timeline_clip_frame(clip, 0x24656b, content.into_any_element(), cx)
+        self.timeline_clip_frame(clip, CLIP_AUDIO, content.into_any_element(), cx)
     }
 
     fn timeline_clip_frame(

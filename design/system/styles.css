@@ -20,6 +20,165 @@
   }
 }
 
+/* Design index drawer. A hidden checkbox drives the state and labels are the
+   controls. It is the only interactive chrome on the review pages, so it stays
+   plain CSS. */
+@layer components {
+  .design-nav-toggle {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .design-nav {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 40;
+    display: flex;
+    width: 248px;
+    flex-direction: column;
+    border-right: 1px solid var(--color-rule);
+    background: var(--color-sheet);
+    color: var(--color-ink);
+    transition: transform 180ms ease;
+  }
+
+  .design-nav-list {
+    min-height: 0;
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px 8px;
+  }
+
+  .design-nav-link {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px 5px 6px;
+    border-left: 2px solid transparent;
+    border-radius: 0 3px 3px 0;
+    font-size: 12px;
+    line-height: 18px;
+    color: color-mix(in srgb, var(--color-ink) 72%, transparent);
+  }
+
+  .design-nav-link:hover {
+    background: color-mix(in srgb, var(--color-ink) 5%, transparent);
+    color: var(--color-ink);
+  }
+
+  .design-nav-link-current,
+  .design-nav-link-current:hover {
+    border-left-color: var(--color-accent);
+    background: color-mix(in srgb, var(--color-accent) 9%, transparent);
+    color: var(--color-ink);
+    font-weight: 500;
+  }
+
+  .design-nav-close,
+  .design-nav-open {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--color-rule);
+    border-radius: 3px;
+    background: var(--color-sheet);
+    color: var(--color-ink);
+    cursor: pointer;
+  }
+
+  .design-nav-close {
+    width: 24px;
+    height: 24px;
+  }
+
+  .design-nav-close:hover,
+  .design-nav-open:hover {
+    background: color-mix(in srgb, var(--color-ink) 6%, var(--color-sheet));
+  }
+
+  .design-nav-open {
+    position: fixed;
+    bottom: 16px;
+    left: 16px;
+    z-index: 50;
+    display: none;
+    height: 32px;
+    gap: 6px;
+    padding: 0 10px;
+    font-size: 11px;
+    font-weight: 500;
+    box-shadow: 0 2px 10px rgb(0 0 0 / 10%);
+  }
+
+  .design-nav-scrim {
+    display: none;
+  }
+
+  .design-stage {
+    min-width: 0;
+    margin-left: 248px;
+    transition: margin-left 180ms ease;
+  }
+
+  /* Desktop: the index starts open; checking the box closes it. */
+  .design-nav-toggle:checked ~ .design-nav {
+    transform: translateX(-101%);
+  }
+
+  .design-nav-toggle:checked ~ .design-stage {
+    margin-left: 0;
+  }
+
+  .design-nav-toggle:checked ~ .design-nav-open {
+    display: inline-flex;
+  }
+
+  /* Small screens: the index starts closed and opens over the page. */
+  @media (max-width: 899px) {
+    .design-nav {
+      transform: translateX(-101%);
+      box-shadow: 0 8px 30px rgb(0 0 0 / 20%);
+    }
+
+    .design-nav-toggle:checked ~ .design-nav {
+      transform: translateX(0);
+    }
+
+    .design-nav-scrim {
+      position: fixed;
+      inset: 0;
+      z-index: 35;
+      display: none;
+      background: rgb(19 20 23 / 32%);
+      cursor: pointer;
+    }
+
+    .design-nav-toggle:checked ~ .design-nav-scrim {
+      display: block;
+    }
+
+    .design-stage,
+    .design-nav-toggle:checked ~ .design-stage {
+      margin-left: 0;
+    }
+
+    .design-nav-open {
+      display: inline-flex;
+    }
+
+    .design-nav-toggle:checked ~ .design-nav-open {
+      display: none;
+    }
+  }
+}
+
 /* Diagonal stripes, the same 8px tile the old drawings used. `--hx` and `--hy` shift the tile
    so stripes line up across neighbouring elements. */
 @layer components {

@@ -41,6 +41,8 @@ const glyphs = {
   expand: "M3 9V3h6m6 0h6v6M3 15v6h6m6 0h6v-6",
   check: "m4 12 5 5L20 6",
   sliders: "M6 3v7m0 4v7M12 3v12m0 4v2M18 3v3m0 4v11M3 10h6m0 5h6m0-9h6",
+  menu: "M4 7h16M4 12h16M4 17h16",
+  collapse: "M15 6l-6 6 6 6",
 } as const;
 
 type Glyph = keyof typeof glyphs;

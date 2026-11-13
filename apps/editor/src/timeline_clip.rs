@@ -1,5 +1,5 @@
 use crate::layout::{THIN_CLIP_WIDTH, TIMELINE_PADDING, TRACK_HEIGHT};
-use crate::theme::ACCENT;
+use crate::theme::{ACCENT, CLIP_TEXT};
 use crate::timeline::{FrameRate, TimelineFrameIndex};
 pub(crate) use ::timeline::{
     AudioClip, AudioClipProperties, Clip, TextClip, TextClipProperties, VideoClip,
@@ -83,13 +83,13 @@ pub(super) fn text_clip_component(
             this.rounded_md().border_1().border_color(rgb(if selected {
                 ACCENT
             } else {
-                0x8261b3
+                CLIP_TEXT + 0x101010
             }))
         })
         .bg(rgb(if thin && selected {
             ACCENT
         } else {
-            0x7251a3
+            CLIP_TEXT
         }))
         .opacity(if moving {
             0.3

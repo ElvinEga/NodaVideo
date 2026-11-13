@@ -3,6 +3,7 @@ use crate::asset::IconName;
 use crate::dialog_missing_media::missing_media_dialog_view;
 use crate::editor::{Editor, RightDockTab, WorkspaceTab};
 use crate::event_bus::{AppEvent, EventBus};
+use crate::keyboard_shortcuts::keyboard_shortcuts_view;
 use crate::layout::{
     MIN_MEDIA_PANEL_WIDTH, MIN_PREVIEW_WIDTH, MIN_PROPERTY_PANEL_WIDTH, MIN_TIMELINE_HEIGHT,
     MIN_UPPER_WORKSPACE_HEIGHT, TOPBAR_HEIGHT,
@@ -11,7 +12,7 @@ use crate::project_picker;
 use crate::property_panel::property_panel_view;
 use crate::settings::settings_modal_view;
 use crate::theme::{
-    ACCENT, BACKGROUND, BORDER, MUTED, PANEL, SURFACE, SURFACE_HOVER, TEXT,
+    ACCENT, BACKGROUND, BORDER, MUTED, PANEL, SUCCESS, SURFACE, SURFACE_HOVER, TEXT,
 };
 use crate::ui_components::cyberpunk_button::{
     button_cyberpunk_primary, button_cyberpunk_secondary,
@@ -55,6 +56,17 @@ impl Render for Editor {
                 .on_action(cx.listener(Self::action_toggle_fullscreen))
                 .on_action(cx.listener(Self::action_exit_fullscreen))
                 .on_action(cx.listener(Self::action_toggle_inspector))
+                .on_action(cx.listener(Self::action_new_project))
+                .on_action(cx.listener(Self::action_save_project))
+                .on_action(cx.listener(Self::action_close_window))
+                .on_action(cx.listener(Self::action_minimize_window))
+                .on_action(cx.listener(Self::action_zoom_window))
+                .on_action(cx.listener(Self::action_bring_all_to_front))
+                .on_action(cx.listener(Self::action_show_keyboard_shortcuts))
+                .on_action(cx.listener(Self::action_show_about))
+                .on_action(cx.listener(Self::action_mark_source_in))
+                .on_action(cx.listener(Self::action_mark_source_out))
+                .on_action(cx.listener(Self::action_insert_source_to_timeline))
                 .size_full()
                 .overflow_hidden()
                 .bg(rgb(0x000000))
@@ -141,6 +153,17 @@ impl Render for Editor {
             .on_action(cx.listener(Self::action_new_timeline))
             .on_action(cx.listener(Self::action_open_settings))
             .on_action(cx.listener(Self::action_import_media))
+            .on_action(cx.listener(Self::action_new_project))
+            .on_action(cx.listener(Self::action_save_project))
+            .on_action(cx.listener(Self::action_close_window))
+            .on_action(cx.listener(Self::action_minimize_window))
+            .on_action(cx.listener(Self::action_zoom_window))
+            .on_action(cx.listener(Self::action_bring_all_to_front))
+            .on_action(cx.listener(Self::action_show_keyboard_shortcuts))
+            .on_action(cx.listener(Self::action_show_about))
+            .on_action(cx.listener(Self::action_mark_source_in))
+            .on_action(cx.listener(Self::action_mark_source_out))
+            .on_action(cx.listener(Self::action_insert_source_to_timeline))
             .capture_any_mouse_down(cx.listener(|editor, event: &MouseDownEvent, window, cx| {
                 if event.button == MouseButton::Left {
                     editor.focus_handle.focus(window, cx);
@@ -171,6 +194,9 @@ impl Render for Editor {
             })
             .when_some(missing_media_dialog, |this, dialog| this.child(dialog))
             .when_some(settings_modal, |this, modal| this.child(modal))
+            .when(self.shortcuts_open, |this| {
+                this.child(keyboard_shortcuts_view(cx))
+            })
             .when(self.global_settings_input.is_some(), |this| {
                 this.child(self.global_settings_dialog(cx))
             })
@@ -369,7 +395,7 @@ impl Editor {
                                                 div()
                                                     .w(px(24.0))
                                                     .h_full()
-                                                    .bg(rgb(0x10b981))
+                                                    .bg(rgb(SUCCESS))
                                                     .opacity(0.35)
                                                     .rounded_sm(),
                                             )
@@ -1239,7 +1265,7 @@ fn audio_channel_strip(
                                 .w_full()
                                 .h(px(65.0))
                                 .rounded_full()
-                                .bg(rgb(0x10b981)),
+                                .bg(rgb(SUCCESS)),
                         ),
                 )
                 // Fader track & handle
@@ -1327,7 +1353,7 @@ fn audio_master_strip(name: &'static str, db: f32) -> gpui::AnyElement {
                                 .w_full()
                                 .h(px(72.0))
                                 .rounded_full()
-                                .bg(rgb(0x10b981)),
+                                .bg(rgb(SUCCESS)),
                         ),
                 )
                 .child(

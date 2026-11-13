@@ -1,14 +1,17 @@
 use crate::editor::Editor;
 use crate::event_bus::AppEvent;
+use crate::explorer::save_imported_media;
 use crate::explorer_file_entry::visible_tree;
 use crate::preview::{PreviewTarget, timeline_preview_target};
 use crate::project_settings::{load_project_local_settings, save_project_local_settings};
 use crate::timeline::TimelineRuntimeState;
-use ::timeline::TimelineSerialization;
-use anyhow::{Context as _, Result};
+use crate::timeline_document;
+use ::timeline::{MediaKind, TimelineFrameIndex, TimelineSerialization, TrackKind};
+use anyhow::{Context as _, Result, bail};
 use gpui::PathPromptOptions;
 use gpui::prelude::*;
 use std::path::{Path, PathBuf};
+use ulid::Ulid;
 
 impl Editor {
     pub(crate) fn open_project_folder(&mut self, cx: &mut Context<Self>) {
@@ -28,6 +31,37 @@ impl Editor {
                         file!(),
                         line!()
                     );
+                    return;
+                }
+            };
+            let Some(project_path) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = editor.update(cx, |editor, cx| {
+                editor.emit_event(cx, AppEvent::SwitchProject { project_path });
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn new_project_dialog(&mut self, cx: &mut Context<Self>) {
+        // 原生目录对话框允许在对话框内新建文件夹；选中的文件夹直接作为项目根目录。
+        let selection = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose a folder for the new project".into()),
+        });
+        cx.spawn(async move |editor, cx| {
+            let paths = match selection.await {
+                Ok(Ok(Some(paths))) => paths,
+                Ok(Ok(None)) => return,
+                Ok(Err(error)) => {
+                    log::error!("New project folder dialog failed: {error:?}");
+                    return;
+                }
+                Err(error) => {
+                    log::error!("New project folder dialog was dropped: {error:?}");
                     return;
                 }
             };
@@ -152,5 +186,120 @@ impl Editor {
             Ok(())
         })();
         res.context("activate_timeline failed")
+    }
+
+    /// Creates a new timeline with default tracks (V1, V2, A1, A2) and activates it.
+    /// If `stem` is provided, the timeline name will be cleanly derived from it.
+    pub(crate) fn create_and_activate_new_timeline(
+        &mut self,
+        stem: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Result<PathBuf> {
+        let relative_dir = PathBuf::new();
+        let name = match stem {
+            Some(s) if !s.trim().is_empty() => {
+                timeline_document::unique_timeline_name_from_stem(
+                    &self.project_root,
+                    &relative_dir,
+                    s,
+                )
+            }
+            _ => timeline_document::default_timeline_name(&self.project_root, &relative_dir),
+        };
+        let (relative_path, timeline) =
+            timeline_document::create(&self.project_root, &relative_dir, &name)?;
+        self.activate_created_timeline(relative_dir, relative_path.clone(), timeline, cx)?;
+        Ok(relative_path)
+    }
+
+    /// Automatically creates a new timeline named after `media_path` and inserts the media asset
+    /// at frame 0 on the appropriate track (Video 1 or Audio 1).
+    pub(crate) fn auto_create_timeline_and_insert_asset(
+        &mut self,
+        media_path: &Path,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let absolute_path = if media_path.is_absolute() {
+            media_path.to_path_buf()
+        } else {
+            self.project_root.join(media_path)
+        };
+        let canonical = absolute_path
+            .canonicalize()
+            .unwrap_or_else(|_| absolute_path.clone());
+
+        // Probe media asset if not cached
+        let asset = if let Some(cached) = self.explorer.media_metadata.get(&canonical) {
+            cached.clone()
+        } else {
+            let mut probed = engine::media_asset::probe_media_asset(&canonical)?;
+            probed.set_id(Ulid::generate());
+            self.explorer
+                .media_metadata
+                .insert(canonical.clone(), probed.clone());
+            probed
+        };
+
+        // Ensure asset is tracked in project's imported library
+        if !self.explorer.imported_paths.contains(&canonical) {
+            self.explorer.imported_paths.insert(canonical.clone());
+            self.explorer.rebuild_imported_media();
+            let assets: Vec<::timeline::Asset> = self
+                .explorer
+                .imported_paths
+                .iter()
+                .filter_map(|path| self.explorer.media_metadata.get(path))
+                .cloned()
+                .collect();
+            let _ = save_imported_media(&self.project_root, &assets);
+            self.schedule_project_waveforms(cx);
+        }
+
+        // Determine timeline name from file stem
+        let stem = canonical
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Timeline");
+
+        self.create_and_activate_new_timeline(Some(stem), cx)?;
+
+        let Some(timeline) = self.timeline.as_ref() else {
+            bail!("Timeline failed to activate");
+        };
+
+        let is_audio = asset.kind() == MediaKind::Audio;
+        let target_track_id = if is_audio {
+            timeline
+                .editing_state
+                .tracks
+                .iter()
+                .find(|t| t.kind == TrackKind::Audio)
+                .map(|t| t.id)
+        } else {
+            timeline
+                .editing_state
+                .tracks
+                .iter()
+                .find(|t| t.kind == TrackKind::Video)
+                .map(|t| t.id)
+        };
+
+        let Some(track_id) =
+            target_track_id.or_else(|| timeline.editing_state.tracks.first().map(|t| t.id))
+        else {
+            bail!("Timeline has no tracks");
+        };
+
+        self.place_explorer_asset(
+            canonical,
+            track_id,
+            TimelineFrameIndex::ZERO,
+            asset,
+            None,
+            cx,
+        )?;
+
+        cx.notify();
+        Ok(())
     }
 }

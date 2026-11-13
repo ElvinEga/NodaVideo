@@ -3,7 +3,7 @@ use crate::context_menu::ContextMenu;
 use crate::dialog_missing_media::MissingMediaDialog;
 use crate::editing::ClipClipboard;
 use crate::event_bus::{AppEvent, EventBus};
-use crate::explorer::ExplorerState;
+use crate::explorer::{ExplorerState, save_imported_media};
 use crate::explorer_drag::AssetBeingDragged;
 use crate::preview::{PreviewState, PreviewTarget};
 use crate::project_settings::load_project_local_settings;
@@ -11,7 +11,7 @@ use crate::property_panel::{PropertyPanel, PropertyPanelState, current_property_
 use crate::property_panel_transform::VideoTransformInputs;
 use crate::timeline::TimelineRuntimeState;
 use crate::ui_components::{HorizontalSplitState, TextInput, VerticalSplitState};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use gpui::prelude::*;
 use gpui::{Entity, FocusHandle, ScrollHandle};
 use std::collections::{HashMap, HashSet};
@@ -32,6 +32,7 @@ pub(crate) struct Editor {
     pub(super) property_panel_state: PropertyPanelState,
     pub(super) property_panel: PropertyPanel, // 点击文件或片段后由事件重建，render 只读它。
     pub(super) settings_open: bool,
+    pub(super) shortcuts_open: bool,
     pub(super) right_dock: RightDockTab,
     pub(super) assistant: AssistantState,
     pub(crate) workspace: WorkspaceTab,
@@ -75,6 +76,7 @@ impl Editor {
             target: PreviewTarget::None, // 实体创建后由调用方设置
             fullscreen: false,
             error_scroll: ScrollHandle::new(),
+            source_marks: None,
         };
 
         let property_panel_state = {
@@ -114,6 +116,7 @@ impl Editor {
             property_panel_state,
             property_panel: PropertyPanel::None,
             settings_open: false,
+            shortcuts_open: false,
             right_dock: RightDockTab::Inspector,
             assistant,
             workspace: WorkspaceTab::Edit,
@@ -131,6 +134,7 @@ impl Editor {
         if let Some(timeline) = editor.timeline.as_mut() {
             timeline.set_playhead(timeline.playhead());
         }
+        editor.schedule_media_metadata(cx);
         editor.property_panel = current_property_panel(&editor);
         editor
     }
@@ -173,88 +177,155 @@ impl Editor {
             multiple: true,
             prompt: Some("Import Media into NodaVideo".into()),
         });
-        let project_root = self.project_root.clone();
         cx.spawn(async move |editor, cx| {
-            if let Ok(Ok(Some(paths))) = receiver.await {
-                if paths.is_empty() {
+            let paths = match receiver.await {
+                Ok(Ok(Some(paths))) => paths,
+                Ok(Ok(None)) => return,
+                Ok(Err(error)) => {
+                    log::error!("Import dialog failed: {error:?}");
                     return;
                 }
-                let count = cx
-                    .background_executor()
-                    .spawn(async move { Self::copy_files_to_project_sync(&project_root, &paths) })
-                    .await;
-                if count > 0 {
-                    let _ = editor.update(cx, |editor, cx| {
-                        let _ = editor.explorer.refresh_file_tree(&editor.project_root);
-                        editor.schedule_project_waveforms(cx);
-                        cx.notify();
-                    });
+                Err(error) => {
+                    log::error!("Import dialog failed: {error:?}");
+                    return;
                 }
+            };
+            if paths.is_empty() {
+                return;
+            }
+            if let Err(error) = editor.update(cx, |editor, cx| {
+                editor.import_external_paths(&paths, cx);
+            }) {
+                log::debug!("editor released: {error:?}");
             }
         })
         .detach();
     }
 
+    /// References the original files; nothing is copied into the project.
     pub(crate) fn import_external_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        let project_root = self.project_root.clone();
-        let paths = paths.to_vec();
-        cx.spawn(async move |editor, cx| {
-            let count = cx
-                .background_executor()
-                .spawn(async move { Self::copy_files_to_project_sync(&project_root, &paths) })
-                .await;
-            if count > 0 {
-                let _ = editor.update(cx, |editor, cx| {
-                    let _ = editor.explorer.refresh_file_tree(&editor.project_root);
-                    editor.schedule_project_waveforms(cx);
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-    }
-
-    fn copy_files_to_project_sync(project_root: &Path, paths: &[PathBuf]) -> usize {
-        let mut count = 0;
         for path in paths {
-            if !path.is_file() {
-                continue;
-            }
-            let Some(file_name) = path.file_name() else {
-                continue;
-            };
-            if path.starts_with(project_root) {
-                count += 1;
-                continue;
-            }
-            let target = project_root.join(file_name);
-            let target = if target.exists() {
-                if let (Ok(m1), Ok(m2)) = (path.metadata(), target.metadata())
-                    && m1.len() == m2.len()
-                {
-                    count += 1;
-                    continue;
-                }
-                let stem = path.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
-                let ext = path
-                    .extension()
-                    .map(|s| format!(".{}", s.to_string_lossy()))
-                    .unwrap_or_default();
-                let mut candidate = project_root.join(format!("{stem}_imported{ext}"));
-                let mut idx = 1;
-                while candidate.exists() {
-                    candidate = project_root.join(format!("{stem}_imported_{idx}{ext}"));
-                    idx += 1;
-                }
-                candidate
-            } else {
-                target
-            };
-            if std::fs::copy(path, &target).is_ok() {
-                count += 1;
+            let already_queued = self
+                .explorer
+                .import_queue
+                .iter()
+                .any(|(queued, _)| queued == path);
+            if !already_queued {
+                self.explorer.import_queue.push_back((path.clone(), true));
             }
         }
-        count
+        self.start_media_import(cx);
+        cx.notify();
+    }
+
+    /// Probes project media that has no cached metadata yet, on the same bounded queue.
+    pub(crate) fn schedule_media_metadata(&mut self, cx: &mut Context<Self>) {
+        for entry in &self.explorer.file_tree {
+            let is_media = matches!(
+                entry.kind,
+                crate::explorer_file_entry::FileTreeEntryKind::Video
+                    | crate::explorer_file_entry::FileTreeEntryKind::Audio
+                    | crate::explorer_file_entry::FileTreeEntryKind::Image
+            );
+            if !is_media || self.explorer.media_metadata.contains_key(&entry.absolute_path) {
+                continue;
+            }
+            let already_queued = self
+                .explorer
+                .import_queue
+                .iter()
+                .any(|(queued, _)| queued == &entry.absolute_path);
+            if !already_queued {
+                self.explorer
+                    .import_queue
+                    .push_back((entry.absolute_path.clone(), false));
+            }
+        }
+        self.start_media_import(cx);
+    }
+
+    fn start_media_import(&mut self, cx: &mut Context<Self>) {
+        if self.explorer.import_task.is_some() || self.explorer.import_queue.is_empty() {
+            return;
+        }
+        let task = cx.spawn(async move |editor, cx| {
+            loop {
+                let next = editor.update(cx, |editor, _| editor.explorer.import_queue.pop_front());
+                let (path, add_to_library) = match next {
+                    Ok(Some(next)) => next,
+                    Ok(None) => break,
+                    Err(error) => {
+                        log::debug!("editor released: {error:?}");
+                        return;
+                    }
+                };
+                let probe_path = path.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let canonical = probe_path.canonicalize()?;
+                        if !canonical.is_file() {
+                            bail!("{} is not a file", probe_path.display());
+                        }
+                        let mut asset = engine::media_asset::probe_media_asset(&canonical)?;
+                        asset.set_id(ulid::Ulid::generate());
+                        Ok::<_, anyhow::Error>((canonical, asset))
+                    })
+                    .await;
+                let updated = editor.update(cx, |editor, cx| {
+                    match result {
+                        Ok((canonical, asset)) => {
+                            editor.explorer.media_errors.remove(&canonical);
+                            let already_known =
+                                editor.explorer.media_metadata.contains_key(&canonical);
+                            editor
+                                .explorer
+                                .media_metadata
+                                .insert(canonical.clone(), asset);
+                            if add_to_library && !already_known {
+                                editor.explorer.imported_paths.insert(canonical);
+                                editor.explorer.rebuild_imported_media();
+                                let assets: Vec<::timeline::Asset> = editor
+                                    .explorer
+                                    .imported_paths
+                                    .iter()
+                                    .filter_map(|path| editor.explorer.media_metadata.get(path))
+                                    .cloned()
+                                    .collect();
+                                if let Err(error) =
+                                    save_imported_media(&editor.project_root, &assets)
+                                {
+                                    log::error!("Could not save media library: {error:?}");
+                                    editor
+                                        .explorer
+                                        .import_errors
+                                        .push(format!("Could not save media library: {error:#}"));
+                                }
+                                editor.schedule_project_waveforms(cx);
+                            }
+                        }
+                        Err(error) => {
+                            log::error!("Could not import {}: {error:?}", path.display());
+                            editor
+                                .explorer
+                                .media_errors
+                                .insert(path, format!("{error:#}"));
+                        }
+                    }
+                    cx.notify();
+                });
+                if updated.is_err() {
+                    return;
+                }
+            }
+            if let Err(error) = editor.update(cx, |editor, cx| {
+                editor.explorer.import_task = None;
+                cx.notify();
+            }) {
+                log::debug!("editor released: {error:?}");
+            }
+        });
+        self.explorer.import_task = Some(task);
     }
 }
 

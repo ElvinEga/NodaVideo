@@ -1,12 +1,7 @@
 use super::*;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 fn temporary_project_root() -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("opencut-timelines-{unique}"))
+    std::env::temp_dir().join(format!("nodavideo-timelines-{}", Ulid::generate()))
 }
 
 #[test]
@@ -129,5 +124,59 @@ fn preferred_timeline_is_loaded() {
     assert!(TimelineSerialization::load(&root.join("missing.timeline.json")).is_err());
     assert!(TimelineSerialization::load(&second_path).is_err());
     assert_eq!(loaded.editing_state.settings.width, 1280);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn default_timeline_tracks_creates_four_tracks() {
+    let tracks = default_timeline_tracks();
+    assert_eq!(tracks.len(), 4);
+    assert_eq!(tracks[0].name, "Video 1");
+    assert_eq!(tracks[0].kind, TrackKind::Video);
+    assert!(tracks[0].visible);
+    assert!(!tracks[0].locked);
+
+    assert_eq!(tracks[1].name, "Video 2");
+    assert_eq!(tracks[1].kind, TrackKind::Video);
+
+    assert_eq!(tracks[2].name, "Audio 1");
+    assert_eq!(tracks[2].kind, TrackKind::Audio);
+
+    assert_eq!(tracks[3].name, "Audio 2");
+    assert_eq!(tracks[3].kind, TrackKind::Audio);
+}
+
+#[test]
+fn unique_timeline_name_from_stem_avoids_collisions() {
+    let root = temporary_project_root();
+    fs::create_dir_all(&root).unwrap();
+
+    let name1 = unique_timeline_name_from_stem(&root, Path::new(""), "Interview");
+    assert_eq!(name1, "Interview");
+    create(&root, Path::new(""), &name1).unwrap();
+
+    let name2 = unique_timeline_name_from_stem(&root, Path::new(""), "Interview");
+    assert_eq!(name2, "Interview 2");
+    create(&root, Path::new(""), &name2).unwrap();
+
+    let name3 = unique_timeline_name_from_stem(&root, Path::new(""), "Interview");
+    assert_eq!(name3, "Interview 3");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn created_timeline_has_default_tracks() {
+    let root = temporary_project_root();
+    fs::create_dir_all(&root).unwrap();
+
+    let (path, timeline) = create(&root, Path::new(""), "MyAutoTimeline").unwrap();
+    assert_eq!(timeline.editing_state.tracks.len(), 4);
+    assert_eq!(timeline.editing_state.tracks[0].name, "Video 1");
+    assert_eq!(timeline.editing_state.tracks[2].name, "Audio 1");
+
+    let loaded = TimelineSerialization::load(&root.join(path)).unwrap();
+    assert_eq!(loaded.editing_state.tracks.len(), 4);
+
     fs::remove_dir_all(root).unwrap();
 }

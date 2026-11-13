@@ -484,6 +484,15 @@ async fn handle_app_event(
                     Ok(())
                 })?;
             }
+            PreviewEvent::MarkSourceIn => {
+                editor.update(cx, |editor, cx| editor.mark_source_in(cx))?;
+            }
+            PreviewEvent::MarkSourceOut => {
+                editor.update(cx, |editor, cx| editor.mark_source_out(cx))?;
+            }
+            PreviewEvent::InsertSourceToTimeline => {
+                editor.update(cx, |editor, cx| editor.insert_source_to_timeline(cx))?;
+            }
         },
         AppEvent::RelinkMediaRequested => {
             editor.update(cx, |editor, cx| -> Result<()> {
@@ -873,6 +882,7 @@ async fn handle_app_event(
                             preview.track_id,
                             preview.start_time,
                             asset.metadata,
+                            None,
                             cx,
                         )?;
                     }
@@ -963,23 +973,35 @@ pub(crate) struct AssetDragMoveEvent {
 
 impl EventEmitter<AppEvent> for EventBus {}
 
-// Private APIs only
+// Private and internal APIs
 impl Editor {
-    fn place_explorer_asset(
+    pub(crate) fn place_explorer_asset(
         &mut self,
         media_path: PathBuf,
         track_id: Ulid,
         start: TimelineFrameIndex,
         mut asset: Asset,
+        source_range: Option<(TimelineFrameIndex, TimelineFrameIndex)>, // None 表示使用素材完整时长。
         cx: &mut Context<Self>,
     ) -> Result<()> {
         let Some(timeline) = self.timeline.as_ref() else {
             return Ok(());
         };
-        let duration = timeline
+        let full_duration = timeline
             .editing_state
             .nearest_time(asset.duration().unwrap_or(0.0))
             .max(TimelineFrameIndex::ONE_FRAME);
+        let (source_in, source_out) = match source_range {
+            Some((in_frame, out_frame)) => {
+                let out_frame = out_frame.min(full_duration);
+                if out_frame <= in_frame {
+                    bail!("The source out point must be after the in point");
+                }
+                (in_frame, out_frame)
+            }
+            None => (TimelineFrameIndex::ZERO, full_duration),
+        };
+        let duration = source_out - source_in;
         let track_kind = timeline
             .editing_state
             .tracks
@@ -1024,8 +1046,8 @@ impl Editor {
                 track_id,
                 asset_id,
                 start,
-                TimelineFrameIndex::ZERO,
-                duration,
+                source_in,
+                source_out,
                 VideoClipProperties::default(),
                 AudioClipProperties::default(),
             )),
@@ -1034,8 +1056,8 @@ impl Editor {
                 track_id,
                 asset_id,
                 start,
-                TimelineFrameIndex::ZERO,
-                duration,
+                source_in,
+                source_out,
                 AudioClipProperties::default(),
             )),
             _ => bail!("the drop target is not a media track"),

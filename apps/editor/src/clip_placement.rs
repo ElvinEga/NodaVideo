@@ -6,6 +6,9 @@ use anyhow::Result;
 use std::collections::HashSet;
 use ulid::Ulid;
 
+/// Still images have no source duration; placed clips default to this length.
+pub(crate) const DEFAULT_IMAGE_DURATION_SECONDS: f64 = 5.0;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ClipPlacementRejection {
     NoPlacements,

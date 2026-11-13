@@ -19,6 +19,7 @@ mod export_window;
 mod global_settings;
 mod global_settings_dialog;
 mod gpui_inspector;
+mod keyboard_shortcuts;
 mod layout;
 mod preview;
 mod preview_events;

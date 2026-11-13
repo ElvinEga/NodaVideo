@@ -139,6 +139,17 @@ impl VideoPlayer {
         self.video_backend.metadata.duration
     }
 
+    /// Current playback position: the displayed frame's PTS, or the full duration once ended.
+    pub fn position(&self) -> Result<Duration> {
+        if self.is_ended()? {
+            return Ok(self.duration());
+        }
+        Ok(match &self.displayed {
+            Some((_, pts, _)) => (*pts).min(self.duration()),
+            None => Duration::ZERO,
+        })
+    }
+
     pub(crate) fn is_ended(&self) -> Result<bool> {
         Ok(matches!(self.playback_state, PlaybackState::Paused)
             && self.video_backend.video.is_drained()
