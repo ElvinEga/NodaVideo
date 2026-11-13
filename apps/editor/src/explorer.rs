@@ -4,6 +4,7 @@ use crate::explorer_file_entry::{FileTreeEntry, FileTreeEntryKind, search_tree, 
 use crate::preview::{PreviewTarget, timeline_preview_target};
 use crate::theme::{ACCENT, BORDER, MUTED, PANEL, SURFACE, TEXT};
 use crate::timeline_document::{relative_asset_path, resolve_asset_path};
+use crate::title::{TextTitle, load_titles};
 use crate::ui_components::TextInput;
 use ::timeline::Asset;
 use anyhow::{Result, anyhow, bail};
@@ -20,6 +21,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use ulid::Ulid;
 
 pub(super) struct RenameDialogState {
     pub(crate) relative_path: PathBuf,
@@ -39,6 +41,7 @@ pub(crate) enum MediaCategoryFilter {
     Audio,
     Image,
     Captions,
+    Text,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -63,6 +66,8 @@ pub(crate) struct ExplorerState {
     pub(crate) trash_timeline_dialog_open: bool, // 确认把当前打开的时间线移到废纸篓。
     pub(crate) category: MediaCategoryFilter,
     pub(crate) view_mode: MediaViewMode,
+    pub(crate) titles: Vec<TextTitle>, // 项目内可复用标题；不是导入文件，无源路径或缩略图二进制。
+    pub(crate) selected_title: Option<Ulid>,
     pub(crate) imported_media: Vec<FileTreeEntry>, // 库中引用的素材；项目内的文件仍由 file_tree 展示。
     pub(crate) imported_paths: HashSet<PathBuf>,   // 媒体库成员；media_metadata 还包含仅探测的项目文件。
     pub(crate) media_metadata: HashMap<PathBuf, Asset>, // 键为规范化绝对路径。
@@ -134,6 +139,13 @@ impl ExplorerState {
             .filter(|entry: &&FileTreeEntry| !entry.absolute_path.is_file())
             .map(|entry| entry.absolute_path.clone())
             .collect();
+        let titles = match load_titles(project_root) {
+            Ok(titles) => titles,
+            Err(error) => {
+                log::error!("Could not load titles: {error:?}");
+                Vec::new()
+            }
+        };
         Self {
             file_tree,
             expanded_directories: expansion.expanded_directories,
@@ -149,6 +161,8 @@ impl ExplorerState {
             trash_timeline_dialog_open: false,
             category: MediaCategoryFilter::All,
             view_mode: MediaViewMode::List,
+            titles,
+            selected_title: None,
             imported_media,
             imported_paths,
             media_metadata,

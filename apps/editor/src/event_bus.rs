@@ -1,8 +1,11 @@
-use crate::clip_placement::{DEFAULT_IMAGE_DURATION_SECONDS, validate_clip_placement};
+use crate::clip_placement::{
+    DEFAULT_IMAGE_DURATION_SECONDS, validate_clip_placement, validate_text_clip_placement,
+};
 use crate::dialog_missing_media::missing_media_dialog;
 use crate::edit_action::{EditAction, edit_timeline};
 use crate::editing::{next_track, validate_clips_placements};
 use crate::editor::Editor;
+use crate::explorer::MediaCategoryFilter;
 use crate::explorer_drag::AssetBeingDragged;
 use crate::explorer_file_entry::select_preview_file;
 use crate::export_window::{ExportState, ExportWindow};
@@ -15,13 +18,16 @@ use ::timeline::{Asset, MediaKind, TimelineEditingState};
 use crate::project_settings::{ProjectLocalSettings, save_project_local_settings};
 use crate::property_panel::{PropertyPanel, current_property_panel};
 use crate::property_panel_srt_file::srt_file_panel;
-use crate::property_panel_text::text_clip_panel;
+use crate::property_panel_text::{
+    TextEditTarget, TextPropertyChange, apply_text_change, text_change_edit_action, text_clip_panel,
+};
 use crate::property_panel_video_clip::video_clip_panel;
 use crate::property_panel_video_file::VideoFilePanel;
 use crate::srt::{srt_text_clips, text_track_to_srt};
 use crate::timeline::{PreviewDropAsset, TimelineFrameIndex, TimelineRuntimeState};
-use crate::timeline_clip::{AudioClipProperties, Clip, VideoClip, VideoClipProperties};
+use crate::timeline_clip::{AudioClipProperties, Clip, TextClip, VideoClip, VideoClipProperties};
 use crate::timeline_document::{relative_asset_path, resolve_asset_path};
+use crate::title::{TextTitle, save_titles};
 use crate::track::TrackKind;
 use crate::transcription_window;
 use crate::transcription_window::{TranscriptionScope, TranscriptionStage, TranscriptionWindow};
@@ -101,6 +107,11 @@ pub(crate) enum AppEvent {
     HorizontalSplitResized(HorizontalSplitState),
     VerticalSplitResized(VerticalSplitState),
     Edit(EditAction),
+    /// A text property edit aimed at a timeline clip or a reusable pool title.
+    EditTextProperty {
+        target: TextEditTarget,
+        change: TextPropertyChange,
+    },
     DragStarted(AssetBeingDragged),
     DragMove(AssetDragMoveEvent),
     DragDrop,
@@ -123,6 +134,16 @@ pub(crate) enum AppEvent {
     },
     SrtFileSelected {
         path: PathBuf, // 相对于项目根目录
+    },
+    /// The user chose New Text: create a reusable pool title with default properties.
+    NewTextTitle,
+    /// The user selected a reusable pool title in the Media Pool.
+    SelectTitle {
+        title_id: Ulid,
+    },
+    /// The user chose Add to Timeline for a pool title: place it at the playhead.
+    AddTitleToTimeline {
+        title_id: Ulid,
     },
     /// The user sent a message from the AI assistant dock.
     AssistantMessageSubmitted {
@@ -690,6 +711,27 @@ async fn handle_app_event(
         AppEvent::Edit(edit_action) => {
             handle_app_event_edit(&editor, edit_action, cx)?;
         }
+        AppEvent::EditTextProperty { target, change } => match target {
+            TextEditTarget::Clip(clip_id) => {
+                handle_app_event_edit(&editor, text_change_edit_action(clip_id, change), cx)?;
+            }
+            TextEditTarget::Title(title_id) => {
+                editor.update(cx, |editor, cx| -> Result<()> {
+                    // 先在副本上改动并落盘，全部成功后再替换标题库，失败时保持原状。
+                    let mut new_titles = editor.explorer.titles.clone();
+                    let Some(title) = new_titles.iter_mut().find(|title| title.id == title_id)
+                    else {
+                        bail!("Title {title_id} no longer exists");
+                    };
+                    apply_text_change(&mut title.properties, &change)?;
+                    save_titles(&editor.project_root, &new_titles)?;
+                    editor.explorer.titles = new_titles;
+                    editor.property_panel = current_property_panel(editor);
+                    cx.notify();
+                    Ok(())
+                })?;
+            }
+        },
         AppEvent::DragStarted(asset) => {
             editor.update(cx, |editor, cx| {
                 editor.active_asset_drag = asset;
@@ -750,6 +792,42 @@ async fn handle_app_event(
                 cx.notify();
             });
         }
+        AppEvent::NewTextTitle => {
+            editor.update(cx, |editor, cx| -> Result<()> {
+                // 先在副本上追加并落盘，全部成功后再替换标题库，失败时保持原状。
+                let new_title = TextTitle::new_default();
+                let title_id = new_title.id;
+                let mut new_titles = editor.explorer.titles.clone();
+                new_titles.push(new_title);
+                save_titles(&editor.project_root, &new_titles)?;
+                editor.explorer.titles = new_titles;
+                editor.explorer.category = MediaCategoryFilter::Text;
+                select_title(editor, title_id);
+                cx.notify();
+                Ok(())
+            })?;
+        }
+        AppEvent::SelectTitle { title_id } => {
+            editor.update(cx, |editor, cx| -> Result<()> {
+                if !editor.explorer.titles.iter().any(|title| title.id == title_id) {
+                    bail!("Title {title_id} no longer exists");
+                }
+                select_title(editor, title_id);
+                cx.notify();
+                Ok(())
+            })?;
+        }
+        AppEvent::AddTitleToTimeline { title_id } => {
+            editor.update(cx, |editor, cx| -> Result<()> {
+                let Some(timeline) = editor.timeline.as_ref() else {
+                    bail!("Open a timeline before adding a title");
+                };
+                let start = timeline.playhead();
+                editor.place_title(title_id, None, start, cx)?;
+                cx.notify();
+                Ok(())
+            })?;
+        }
         AppEvent::DragMove(event) => {
             editor.update(cx, |editor, cx| {
                 let Some(timeline) = editor.timeline.as_mut() else {
@@ -796,6 +874,19 @@ async fn handle_app_event(
                                 )
                             }
                             AssetBeingDragged::Srt(_) => (raw_start, None),
+                            AssetBeingDragged::Title(title) => {
+                                let clip_length = timeline
+                                    .editing_state
+                                    .settings
+                                    .frame_rate
+                                    .frames_from_duration_nearest(title.duration)
+                                    .max(TimelineFrameIndex::ONE_FRAME);
+                                timeline.snap_clip_start_ignoring(
+                                    raw_start,
+                                    clip_length,
+                                    &HashSet::new(),
+                                )
+                            }
                             AssetBeingDragged::None => return (None, None),
                         };
                         let preview = PreviewDropAsset {
@@ -878,6 +969,14 @@ async fn handle_app_event(
                             preview.start_time,
                             asset.metadata,
                             None,
+                            cx,
+                        )?;
+                    }
+                    AssetBeingDragged::Title(title) => {
+                        editor.place_title(
+                            title.title_id,
+                            Some(preview.track_id),
+                            preview.start_time,
                             cx,
                         )?;
                     }
@@ -1114,6 +1213,113 @@ impl Editor {
         self.schedule_active_timeline_waveforms(cx);
         Ok(())
     }
+
+    /// Places a reusable pool title as an independent text clip. The title's properties
+    /// are copied, so editing the placed clip never changes the pool title. `track_id`
+    /// None finds the first unlocked Text track, creating one atomically if needed.
+    pub(crate) fn place_title(
+        &mut self,
+        title_id: Ulid,
+        track_id: Option<Ulid>,
+        start: TimelineFrameIndex,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let Some(title) = self.explorer.titles.iter().find(|title| title.id == title_id) else {
+            bail!("Title {title_id} no longer exists");
+        };
+        let properties = title.properties.clone();
+        let duration = title.duration;
+        let Some(timeline) = self.timeline.as_ref() else {
+            bail!("Open a timeline before adding a title");
+        };
+        let clip_length = timeline
+            .editing_state
+            .settings
+            .frame_rate
+            .frames_from_duration_nearest(duration)
+            .max(TimelineFrameIndex::ONE_FRAME);
+        let (track_id, new_track) = match track_id {
+            Some(track_id) => {
+                validate_text_clip_placement(
+                    &timeline.editing_state,
+                    track_id,
+                    clip_length,
+                    start,
+                    &HashSet::new(),
+                )?;
+                (track_id, None)
+            }
+            None => {
+                match timeline
+                    .editing_state
+                    .tracks
+                    .iter()
+                    .find(|track| track.kind == TrackKind::Text && !track.locked)
+                {
+                    Some(track) => {
+                        validate_text_clip_placement(
+                            &timeline.editing_state,
+                            track.id,
+                            clip_length,
+                            start,
+                            &HashSet::new(),
+                        )?;
+                        (track.id, None)
+                    }
+                    None => {
+                        let track = next_track(&timeline.editing_state.tracks, TrackKind::Text);
+                        (track.id, Some(track))
+                    }
+                }
+            }
+        };
+
+        let Some(timeline) = self.timeline.as_mut() else {
+            return Ok(());
+        };
+        let clip_id = Ulid::generate();
+        let text_clip = Clip::Text(TextClip::new(clip_id, track_id, start, duration, properties));
+        let should_save = match new_track {
+            Some(track) => edit_timeline(
+                timeline,
+                EditAction::AddTrackWithClips {
+                    track,
+                    clips: vec![text_clip],
+                    assets: Vec::new(),
+                },
+            )?,
+            None => edit_timeline(
+                timeline,
+                EditAction::AddClips {
+                    clips: vec![text_clip],
+                    assets: Vec::new(),
+                },
+            )?,
+        };
+
+        // 放置后选中的是时间线片段，不是池标题；预览切回时间线展示新片段。
+        self.explorer.selected_title = None;
+        self.select_only_clip(Some(clip_id));
+        let Some(timeline) = self.timeline.as_ref() else {
+            return Ok(());
+        };
+        if should_save {
+            timeline.save()?;
+            self.preview.target = timeline_preview_target(timeline, &self.project_root, cx)?;
+        }
+        self.property_panel = current_property_panel(self);
+        Ok(())
+    }
+}
+
+/// Selects a reusable pool title: clears clip and file selection, points the source
+/// monitor at the title and rebuilds the Inspector. Shared by New Text and pool clicks.
+fn select_title(editor: &mut Editor, title_id: Ulid) {
+    editor.select_only_clip(None);
+    editor.explorer.selected_file = None;
+    editor.explorer.selected_title = Some(title_id);
+    editor.preview.target = PreviewTarget::TextTitle(title_id);
+    editor.property_panel = current_property_panel(editor);
 }
 
 fn handle_app_event_edit(

@@ -4,6 +4,7 @@ use crate::event_bus::AppEvent;
 use crate::explorer_file_entry::FileTreeEntryKind;
 use crate::preview_events::PreviewEvent;
 use crate::preview_image::preview_image_file;
+use crate::preview_text::title_preview_view;
 use crate::theme::MUTED;
 use crate::time_format::{format_time, format_time_precise};
 use crate::timeline::{TimelineFrameIndex, TimelinePlayerExt, TimelineRuntimeState};
@@ -17,6 +18,7 @@ use player_ui::audio_player::AudioPlayer;
 use player_ui::timeline_player::TimelinePlayer;
 use player_ui::video_player::VideoPlayer;
 use std::path::{Path, PathBuf};
+use ulid::Ulid;
 
 pub(crate) enum PreviewTarget {
     None,
@@ -41,6 +43,9 @@ pub(crate) enum PreviewTarget {
         player: Entity<AudioPlayer>,
     },
     ImageFile(PathBuf),
+    /// A reusable pool title, rendered over black. The id indexes `explorer.titles`,
+    /// so edits to the title show here without rebuilding the preview target.
+    TextTitle(Ulid),
 }
 
 /// Builds a paused player snapshot at the timeline's playhead and observes it for redraws.
@@ -282,6 +287,16 @@ impl Editor {
             PreviewTarget::ImageFile(path) => {
                 preview_image_file(self.project_root.join(path), width, height)
             }
+            PreviewTarget::TextTitle(title_id) => {
+                match self.explorer.titles.iter().find(|title| title.id == *title_id) {
+                    Some(title) => div()
+                        .w(px(width))
+                        .h(px(height))
+                        .child(title_preview_view(&title.properties))
+                        .into_any_element(),
+                    None => div().w(px(width)).h(px(height)).into_any_element(),
+                }
+            }
         }
     }
 }
@@ -331,6 +346,14 @@ impl Editor {
                 let duration_sec = player.read(cx).duration().as_secs_f64();
                 let total_tc = format_time(duration_sec, true);
                 (current_tc, total_tc)
+            }
+            PreviewTarget::TextTitle(title_id) => {
+                let total_tc = match self.explorer.titles.iter().find(|title| title.id == *title_id)
+                {
+                    Some(title) => format_time(title.duration.as_secs_f64(), true),
+                    None => "00:00".to_string(),
+                };
+                ("00:00:00:00".to_string(), total_tc)
             }
             _ => ("00:00:00:00".to_string(), "24 fps".to_string()),
         }

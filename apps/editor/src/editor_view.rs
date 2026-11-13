@@ -12,7 +12,7 @@ use crate::project_picker;
 use crate::property_panel::property_panel_view;
 use crate::settings::settings_modal_view;
 use crate::theme::{
-    ACCENT, BACKGROUND, BORDER, MUTED, PANEL, SUCCESS, SURFACE, SURFACE_HOVER, TEXT,
+    ACCENT, ACCENT_HOVER, BACKGROUND, BORDER, MUTED, PANEL, SUCCESS, SURFACE, SURFACE_HOVER, TEXT,
 };
 use crate::ui_components::cyberpunk_button::{
     button_cyberpunk_primary, button_cyberpunk_secondary,
@@ -331,15 +331,44 @@ impl Editor {
             }
             PreviewTarget::None => ("Preview", "No Media".to_string()),
             PreviewTarget::Error { .. } => ("Preview", "Error".to_string()),
+            PreviewTarget::TextTitle(title_id) => {
+                let name = self
+                    .explorer
+                    .titles
+                    .iter()
+                    .find(|title| title.id == *title_id)
+                    .map(|title| title.name.clone())
+                    .unwrap_or_else(|| "Title".to_string());
+                ("Source", name)
+            }
         };
 
         let (current_tc, total_tc) = self.preview_timecode_and_duration(cx);
         let playing = self.is_preview_playing(cx);
         let is_empty = matches!(self.preview.target, PreviewTarget::None);
+        let title_id = match self.preview.target {
+            PreviewTarget::TextTitle(title_id) => Some(title_id),
+            PreviewTarget::None
+            | PreviewTarget::Error { .. }
+            | PreviewTarget::Timeline { .. }
+            | PreviewTarget::VideoFile { .. }
+            | PreviewTarget::AudioFile { .. }
+            | PreviewTarget::ImageFile(_) => None,
+        };
+        let title_font_label = match title_id {
+            Some(title_id) => {
+                match self.explorer.titles.iter().find(|title| title.id == title_id) {
+                    Some(title) => format!("Text · {}", title.properties.font),
+                    None => "Text".to_string(),
+                }
+            }
+            None => String::new(),
+        };
 
         let header_height = 36.0f32;
         let control_height = 40.0f32;
-        let screen_height = (height - header_height - control_height).max(60.0);
+        let footer_height = if title_id.is_some() { 40.0f32 } else { 0.0f32 };
+        let screen_height = (height - header_height - control_height - footer_height).max(60.0);
 
         div()
             .w(px(width))
@@ -550,6 +579,50 @@ impl Editor {
                             ),
                     ),
             )
+            // Title footer: font label + Add to Timeline (only for a pool title preview)
+            .when_some(title_id, move |this, title_id| {
+                this.child(
+                    div()
+                        .h(px(footer_height))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .border_t_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(PANEL))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(MUTED))
+                                .child(title_font_label),
+                        )
+                        .child(
+                            div()
+                                .id("monitor-add-title-to-timeline")
+                                .h(px(26.0))
+                                .px_3()
+                                .rounded(px(4.0))
+                                .bg(rgb(ACCENT))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(ACCENT_HOVER)))
+                                .on_click(cx.listener(move |editor, _, _, cx| {
+                                    editor.emit_event(cx, AppEvent::AddTitleToTimeline { title_id });
+                                    cx.notify();
+                                }))
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(0xffffff))
+                                        .child("Add to Timeline"),
+                                ),
+                        ),
+                )
+            })
             .into_any_element()
     }
 

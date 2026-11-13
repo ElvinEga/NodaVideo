@@ -91,9 +91,10 @@ impl Editor {
             PreviewTarget::Timeline { player, .. } => {
                 player.update(cx, |player, cx| player.toggle_playback(cx))
             }
-            PreviewTarget::None | PreviewTarget::Error { .. } | PreviewTarget::ImageFile(_) => {
-                Ok(())
-            }
+            PreviewTarget::None
+            | PreviewTarget::Error { .. }
+            | PreviewTarget::ImageFile(_)
+            | PreviewTarget::TextTitle(_) => Ok(()),
         }
     }
 }
@@ -162,7 +163,8 @@ impl Editor {
             PreviewTarget::None
             | PreviewTarget::Error { .. }
             | PreviewTarget::Timeline { .. }
-            | PreviewTarget::ImageFile(_) => return Ok(()), // 没有可插入的源文件。
+            | PreviewTarget::ImageFile(_)
+            | PreviewTarget::TextTitle(_) => return Ok(()), // 没有可插入的源文件。
         };
         let Some(timeline) = self.timeline.as_ref() else {
             bail!("Open a timeline before inserting source media");
@@ -248,7 +250,8 @@ impl Editor {
             PreviewTarget::None
             | PreviewTarget::Error { .. }
             | PreviewTarget::Timeline { .. }
-            | PreviewTarget::ImageFile(_) => Ok(None),
+            | PreviewTarget::ImageFile(_)
+            | PreviewTarget::TextTitle(_) => Ok(None),
         }
     }
 }

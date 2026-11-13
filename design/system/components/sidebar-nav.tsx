@@ -8,6 +8,7 @@ export const DESIGN_PAGES: DesignPage[] = [
   { file: "00-design-system", label: "Design system", group: "Foundation" },
   { file: "20-top-bar", label: "Desktop shell", group: "Workspace" },
   { file: "21-file-explorer", label: "Media browser", group: "Workspace" },
+  { file: "23-text-clips", label: "Text clips", group: "Workspace" },
   { file: "01-project-picker", label: "Project picker", group: "Workspace" },
   { file: "16-preview-panel", label: "Preview panel", group: "Panels" },
   { file: "15-property-panel", label: "Property panel", group: "Panels" },

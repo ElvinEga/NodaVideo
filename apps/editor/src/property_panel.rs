@@ -8,7 +8,9 @@ use crate::property_panel_audio_file::{AudioFilePanel, audio_file_view};
 use crate::property_panel_empty::empty_panel_view;
 use crate::property_panel_image_file::{ImageFilePanel, image_file_view};
 use crate::property_panel_srt_file::{SrtFilePanel, srt_file_panel, srt_file_view};
-use crate::property_panel_text::{TextClipPanel, text_clip_panel, text_clip_view};
+use crate::property_panel_text::{
+    TextClipPanel, TextTitlePanel, text_clip_panel, text_clip_view, text_title_panel, text_title_view,
+};
 use crate::property_panel_timeline::{TimelinePanel, timeline_panel, timeline_view};
 use crate::property_panel_transform::VideoTransformInputs;
 use crate::property_panel_video_clip::{VideoClipPanel, video_clip_panel, video_clip_view};
@@ -38,6 +40,7 @@ pub(crate) enum PropertyPanel {
     VideoClip(VideoClipPanel),
     AudioClip(AudioClipPanel),
     TextClip(TextClipPanel),
+    TextTitle(TextTitlePanel),
     Timeline(TimelinePanel),
     None,
 }
@@ -122,6 +125,28 @@ pub(crate) fn current_property_panel(editor: &Editor) -> PropertyPanel {
         return PropertyPanel::None;
     }
 
+    if let Some(title_id) = editor.explorer.selected_title {
+        let frame_rate = editor
+            .timeline
+            .as_ref()
+            .map(|timeline| timeline.editing_state.settings.frame_rate)
+            .unwrap_or_default();
+        return match editor
+            .explorer
+            .titles
+            .iter()
+            .find(|title| title.id == title_id)
+        {
+            Some(title) => PropertyPanel::TextTitle(text_title_panel(
+                title,
+                frame_rate,
+                editor.event_bus.clone(),
+                editor.focus_handle.clone(),
+            )),
+            None => PropertyPanel::None,
+        };
+    }
+
     let Some(timeline) = editor.timeline.as_ref() else {
         return PropertyPanel::None;
     };
@@ -131,6 +156,7 @@ pub(crate) fn current_property_panel(editor: &Editor) -> PropertyPanel {
 pub(super) fn property_panel_view(panel: &PropertyPanel) -> gpui::AnyElement {
     match panel {
         PropertyPanel::TextClip(panel) => text_clip_view(panel),
+        PropertyPanel::TextTitle(panel) => text_title_view(panel),
         PropertyPanel::VideoClip(panel) => video_clip_view(panel),
         PropertyPanel::AudioClip(panel) => audio_clip_view(panel),
         PropertyPanel::VideoFile(panel) => video_file_view(panel),

@@ -15,6 +15,7 @@ use player_ui::timeline_player::TimelinePlayer;
 use player_ui::timeline_player_view::TIMELINE_CONTROLS_HEIGHT;
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 use timeline::Clip;
+use timeline::TextClipProperties;
 use ulid::Ulid;
 
 pub(crate) struct PreviewTextDrag {
@@ -311,4 +312,56 @@ impl Editor {
             }),
         );
     }
+}
+
+/// Renders a title over black, filling its parent and honoring its normalized position.
+/// Shared by Media Pool cards and the source monitor; the text is drawn directly,
+/// with no decode queue, so it never blocks input. The caller sizes the container.
+pub(crate) fn title_preview_view(properties: &TextClipProperties) -> gpui::AnyElement {
+    let properties = properties.clone();
+    div()
+        .size_full()
+        .bg(rgb(0x000000))
+        .overflow_hidden()
+        .child(
+            canvas(
+                move |bounds, window, cx| {
+                    // 名义画布 1920×1080，等比缩放进预览框；位置与时间线渲染一致。
+                    let scale = (f32::from(bounds.size.width) / 1920.0)
+                        .min(f32::from(bounds.size.height) / 1080.0);
+                    let mut text = if scale.is_finite() && scale > 0.0 {
+                        text_layer_element(&properties, scale)
+                    } else {
+                        div().into_any_element()
+                    };
+                    let canvas_width = px(1920.0 * scale);
+                    let canvas_height = px(1080.0 * scale);
+                    let origin = point(
+                        bounds.origin.x + (bounds.size.width - canvas_width) / 2.0,
+                        bounds.origin.y + (bounds.size.height - canvas_height) / 2.0,
+                    );
+                    let text_size = text.layout_as_root(
+                        size(AvailableSpace::MinContent, AvailableSpace::MinContent),
+                        window,
+                        cx,
+                    );
+                    let text_origin = point(
+                        origin.x + canvas_width * properties.position.x as f32
+                            - text_size.width / 2.0,
+                        origin.y + canvas_height * properties.position.y as f32
+                            - text_size.height / 2.0,
+                    );
+                    text.prepaint_as_root(
+                        text_origin,
+                        size(AvailableSpace::MinContent, AvailableSpace::MinContent),
+                        window,
+                        cx,
+                    );
+                    text
+                },
+                |_, mut text, window, cx| text.paint(window, cx),
+            )
+            .size_full(),
+        )
+        .into_any_element()
 }

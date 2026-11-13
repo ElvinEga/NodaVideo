@@ -1099,6 +1099,24 @@ fn preview_drop_asset(
                 invalid_reason.as_deref(),
             ))
         }
+        AssetBeingDragged::Title(title) => {
+            let left =
+                TIMELINE_PADDING + timeline.seconds(preview.start_time) as f32 * pixels_per_second;
+            let clip_length = timeline
+                .settings
+                .frame_rate
+                .frames_from_duration_nearest(title.duration)
+                .max(TimelineFrameIndex::ONE_FRAME);
+            let width = (timeline.seconds(clip_length) as f32 * pixels_per_second).max(1.0);
+            Some(clip_placement_preview_view(
+                "title-placement",
+                SharedString::from(title.name.clone()),
+                PlacementKind::Text,
+                left,
+                width,
+                invalid_reason.as_deref(),
+            ))
+        }
     }
 }
 

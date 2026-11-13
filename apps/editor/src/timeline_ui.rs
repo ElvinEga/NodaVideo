@@ -12,6 +12,7 @@ use crate::layout::{
 };
 use crate::preview::PreviewTarget;
 use crate::theme::{ACCENT, BORDER, ERROR, MUTED, SURFACE, SURFACE_HOVER, TEXT};
+use crate::title::TextTitle;
 use crate::timeline::TimelineFrameIndex;
 use crate::timeline_document;
 use crate::timeline_interactions::{MarqueeSelection, TimelineTool};
@@ -251,6 +252,23 @@ impl Editor {
                                     ))
                                     .on_drop(cx.listener(
                                         move |editor, _drag: &FileTreeEntry, _, cx| {
+                                            editor.emit_event(cx, AppEvent::DragDrop);
+                                        },
+                                    ))
+                                    .on_drag_move::<TextTitle>(cx.listener(
+                                        move |editor,
+                                              event: &DragMoveEvent<TextTitle>,
+                                              _,
+                                              cx| {
+                                            let event = AssetDragMoveEvent {
+                                                event: event.event.clone(),
+                                                bounds: event.bounds,
+                                            };
+                                            editor.emit_event(cx, AppEvent::DragMove(event));
+                                        },
+                                    ))
+                                    .on_drop(cx.listener(
+                                        move |editor, _drag: &TextTitle, _, cx| {
                                             editor.emit_event(cx, AppEvent::DragDrop);
                                         },
                                     ))

@@ -502,6 +502,7 @@ pub(crate) async fn select_preview_file(
     let (project_root, previous) = editor.update(cx, |editor, cx| {
         editor.select_only_clip(None);
         editor.explorer.selected_file = Some(relative_path.clone());
+        editor.explorer.selected_title = None;
 
         let previous = if is_image || is_video || is_audio {
             // The timeline remains loaded when a file is selected; file backends

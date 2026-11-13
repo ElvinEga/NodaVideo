@@ -57,6 +57,7 @@ mod timeline_persistence;
 mod timeline_track_menu;
 mod timeline_trim;
 mod timeline_ui;
+mod title;
 mod tooltip;
 mod track;
 mod track_ui;

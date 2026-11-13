@@ -2,12 +2,14 @@ use crate::context_menu::ContextMenu;
 use crate::editor::Editor;
 use crate::event_bus::AppEvent;
 use crate::explorer::{MediaCategoryFilter, MediaViewMode, explorer_file_badge};
-use crate::explorer_drag::{AssetBeingDragged, ExplorerDragView};
+use crate::explorer_drag::{AssetBeingDragged, DraggedTitle, ExplorerDragView};
 use crate::explorer_file_entry::{FileTreeEntry, FileTreeEntryKind};
 use crate::preview_events::PreviewEvent;
+use crate::preview_text::title_preview_view;
 use crate::theme::{
-    ACCENT, ACCENT_HOVER, BORDER, MUTED, PANEL, SURFACE, SURFACE_HOVER, TEXT, WARNING,
+    ACCENT, ACCENT_HOVER, BORDER, CLIP_TEXT, MUTED, PANEL, SURFACE, SURFACE_HOVER, TEXT, WARNING,
 };
+use crate::title::TextTitle;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AppContext, Context, CursorStyle, ExternalPaths, FontWeight, InteractiveElement, IntoElement,
@@ -15,6 +17,7 @@ use gpui::{
     div, px, rgb,
 };
 use std::path::PathBuf;
+use std::time::Duration;
 
 impl Editor {
     pub(super) fn explorer_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -37,23 +40,46 @@ impl Editor {
             visible_entries.push(entry.clone());
         }
 
-        // Compute counts per category
-        let mut count_all = 0;
-        let mut count_video = 0;
-        let mut count_audio = 0;
-        let mut count_image = 0;
-        let mut count_captions = 0;
+        // 标题是项目内数据，不是文件；All 与 Text 分类展示，可按名称或正文搜索。
+        let show_titles = matches!(
+            self.explorer.category,
+            MediaCategoryFilter::All | MediaCategoryFilter::Text
+        );
+        let visible_titles: Vec<TextTitle> = if show_titles {
+            self.explorer
+                .titles
+                .iter()
+                .filter(|title| {
+                    filter.is_empty()
+                        || title.name.to_lowercase().contains(&filter)
+                        || title.properties.text.to_lowercase().contains(&filter)
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
 
+        // Compute counts per category
+        let mut counts = CategoryCounts {
+            all: 0,
+            video: 0,
+            audio: 0,
+            image: 0,
+            captions: 0,
+            text: 0,
+        };
         for entry in &visible_entries {
-            count_all += 1;
             match entry.kind {
-                FileTreeEntryKind::Video => count_video += 1,
-                FileTreeEntryKind::Audio => count_audio += 1,
-                FileTreeEntryKind::Image => count_image += 1,
-                FileTreeEntryKind::Srt => count_captions += 1,
+                FileTreeEntryKind::Video => counts.video += 1,
+                FileTreeEntryKind::Audio => counts.audio += 1,
+                FileTreeEntryKind::Image => counts.image += 1,
+                FileTreeEntryKind::Srt => counts.captions += 1,
                 _ => {}
             }
         }
+        counts.text = visible_titles.len();
+        counts.all = visible_entries.len() + counts.text;
 
         let filtered_entries: Vec<(usize, &FileTreeEntry)> = visible_entries
             .iter()
@@ -64,6 +90,7 @@ impl Editor {
                 MediaCategoryFilter::Audio => matches!(entry.kind, FileTreeEntryKind::Audio),
                 MediaCategoryFilter::Image => matches!(entry.kind, FileTreeEntryKind::Image),
                 MediaCategoryFilter::Captions => matches!(entry.kind, FileTreeEntryKind::Srt),
+                MediaCategoryFilter::Text => false, // 标题单独渲染，不是文件条目。
             })
             .collect();
 
@@ -74,22 +101,20 @@ impl Editor {
             .cloned()
             .or_else(|| self.explorer.media_errors.values().next().cloned());
 
-        let header = self.media_browser_header(count_all, cx);
-        let category_bar = self.media_category_bar(
-            count_all,
-            count_video,
-            count_audio,
-            count_image,
-            count_captions,
-            cx,
-        );
+        let header = self.media_browser_header(cx);
+        let category_bar = self.media_category_bar(counts, cx);
 
-        let content = if filtered_entries.is_empty() {
+        let content = if self.explorer.category == MediaCategoryFilter::Text
+            && visible_titles.is_empty()
+            && filter.is_empty()
+        {
+            self.text_empty_state(cx)
+        } else if filtered_entries.is_empty() && visible_titles.is_empty() {
             self.media_empty_state(&filter_query, cx)
         } else if self.explorer.view_mode == MediaViewMode::Grid {
-            self.media_grid_view(&filtered_entries, cx)
+            self.media_grid_view(&filtered_entries, &visible_titles, cx)
         } else {
-            self.media_list_view(&filtered_entries, show_root_contents, cx)
+            self.media_list_view(&filtered_entries, show_root_contents, &visible_titles, cx)
         };
 
         div()
@@ -153,10 +178,9 @@ impl Editor {
             .into_any_element()
     }
 
-    fn media_browser_header(&self, item_count: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn media_browser_header(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let is_list = self.explorer.view_mode == MediaViewMode::List;
         let is_grid = self.explorer.view_mode == MediaViewMode::Grid;
-        let importing = self.explorer.import_task.is_some();
 
         div()
             .h(px(38.0))
@@ -169,41 +193,18 @@ impl Editor {
             .border_color(rgb(BORDER))
             .bg(rgb(PANEL))
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(TEXT))
-                            .child("MEDIA POOL"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .px_1p5()
-                            .py_0p5()
-                            .rounded(px(3.0))
-                            .bg(rgb(SURFACE))
-                            .text_color(rgb(MUTED))
-                            .child(format!("{item_count} items")),
-                    )
-                    .when(importing, |this| {
-                        this.child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(rgb(ACCENT))
-                                .child("Importing…"),
-                        )
-                    }),
+                div().flex().items_center().child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(TEXT))
+                        .child("MEDIA"),
+                ),
             )
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_1p5()
                     // View Mode Toggle (List / Grid)
                     .child(
                         div()
@@ -282,6 +283,32 @@ impl Editor {
                                 editor.import_media_dialog(cx);
                             }))
                             .child("+ Import"),
+                    )
+                    // + Text Button: create a reusable pool title
+                    .child(
+                        div()
+                            .id("new-text-button")
+                            .h(px(26.0))
+                            .px_2p5()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap_1()
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .bg(rgb(SURFACE))
+                            .hover(|s| s.bg(rgb(SURFACE_HOVER)).border_color(rgb(CLIP_TEXT)))
+                            .active(|s| s.bg(rgb(CLIP_TEXT)).text_color(rgb(0xe3d4ff)))
+                            .cursor_pointer()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(TEXT))
+                            .on_click(cx.listener(|editor, _, _, cx| {
+                                editor.emit_event(cx, AppEvent::NewTextTitle);
+                                cx.notify();
+                            }))
+                            .child("+ Text"),
                     ),
             )
             .into_any_element()
@@ -289,11 +316,7 @@ impl Editor {
 
     fn media_category_bar(
         &self,
-        count_all: usize,
-        count_video: usize,
-        count_audio: usize,
-        count_image: usize,
-        count_captions: usize,
+        counts: CategoryCounts,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let current = self.explorer.category;
@@ -310,7 +333,7 @@ impl Editor {
             .child(self.category_chip(
                 "cat-all",
                 "All",
-                count_all,
+                counts.all,
                 current == MediaCategoryFilter::All,
                 MediaCategoryFilter::All,
                 cx,
@@ -318,7 +341,7 @@ impl Editor {
             .child(self.category_chip(
                 "cat-video",
                 "Video",
-                count_video,
+                counts.video,
                 current == MediaCategoryFilter::Video,
                 MediaCategoryFilter::Video,
                 cx,
@@ -326,7 +349,7 @@ impl Editor {
             .child(self.category_chip(
                 "cat-audio",
                 "Audio",
-                count_audio,
+                counts.audio,
                 current == MediaCategoryFilter::Audio,
                 MediaCategoryFilter::Audio,
                 cx,
@@ -334,7 +357,7 @@ impl Editor {
             .child(self.category_chip(
                 "cat-image",
                 "Graphics",
-                count_image,
+                counts.image,
                 current == MediaCategoryFilter::Image,
                 MediaCategoryFilter::Image,
                 cx,
@@ -342,9 +365,17 @@ impl Editor {
             .child(self.category_chip(
                 "cat-captions",
                 "Captions",
-                count_captions,
+                counts.captions,
                 current == MediaCategoryFilter::Captions,
                 MediaCategoryFilter::Captions,
+                cx,
+            ))
+            .child(self.category_chip(
+                "cat-text",
+                "Text",
+                counts.text,
+                current == MediaCategoryFilter::Text,
+                MediaCategoryFilter::Text,
                 cx,
             ))
             .into_any_element()
@@ -485,6 +516,7 @@ impl Editor {
         &self,
         filtered_entries: &[(usize, &FileTreeEntry)],
         show_root_contents: bool,
+        titles: &[TextTitle],
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let project_name = self
@@ -551,6 +583,11 @@ impl Editor {
             .map(|(index, entry)| self.explorer_file_entry(*index, entry, cx))
             .collect::<Vec<_>>();
 
+        let title_rows = titles
+            .iter()
+            .map(|title| self.media_list_title_row(title, cx))
+            .collect::<Vec<_>>();
+
         div()
             .id("editor-media-scroll")
             .size_full()
@@ -565,20 +602,31 @@ impl Editor {
                     editor.show_file_context_menu(PathBuf::new(), true, event, cx);
                 }),
             )
-            .child(root_row)
+            // Text 分类只列标题，不展示项目文件夹树。
+            .when(
+                self.explorer.category != MediaCategoryFilter::Text,
+                |this| this.child(root_row),
+            )
             .children(entry_elements)
+            .children(title_rows)
             .into_any_element()
     }
 
     fn media_grid_view(
         &self,
         filtered_entries: &[(usize, &FileTreeEntry)],
+        titles: &[TextTitle],
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let cards = filtered_entries
+        let mut cards = filtered_entries
             .iter()
             .map(|(index, entry)| self.media_grid_card(*index, entry, cx))
             .collect::<Vec<_>>();
+        cards.extend(
+            titles
+                .iter()
+                .map(|title| self.media_grid_title_card(title, cx)),
+        );
 
         div()
             .id("editor-media-grid-scroll")
@@ -601,10 +649,8 @@ impl Editor {
         entry: &FileTreeEntry,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let path = crate::timeline_document::relative_asset_path(
-            &self.project_root,
-            &entry.absolute_path,
-        );
+        let path =
+            crate::timeline_document::relative_asset_path(&self.project_root, &entry.absolute_path);
 
         let selected = self.explorer.selected_file.as_ref() == Some(&path);
         let active_timeline = matches!(entry.kind, FileTreeEntryKind::Timeline)
@@ -721,7 +767,9 @@ impl Editor {
                     match entry.kind {
                         FileTreeEntryKind::Directory { .. } => {
                             let project_root = editor.project_root.clone();
-                            let _ = editor.explorer.toggle_directory(&project_root, path.clone());
+                            let _ = editor
+                                .explorer
+                                .toggle_directory(&project_root, path.clone());
                         }
                         FileTreeEntryKind::Timeline => {
                             editor.emit_event(cx, AppEvent::OpenTimeline { path: path.clone() });
@@ -859,6 +907,301 @@ impl Editor {
             )
             .into_any_element()
     }
+
+    fn media_grid_title_card(&self, title: &TextTitle, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let title_id = title.id;
+        let selected = self.explorer.selected_title == Some(title_id);
+        let duration = format_title_duration(title.duration);
+        let event_bus = self.event_bus.clone();
+        let drag_editor = cx.entity().downgrade();
+        div()
+            .id(gpui::SharedString::from(format!("title-card-{title_id}")))
+            .w(px(136.0))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_1p5()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(if selected {
+                ACCENT
+            } else {
+                BORDER
+            }))
+            .bg(rgb(if selected {
+                SURFACE_HOVER
+            } else {
+                SURFACE
+            }))
+            .hover(|s| s.bg(rgb(SURFACE_HOVER)).border_color(rgb(ACCENT)))
+            .cursor(CursorStyle::OpenHand)
+            .on_drag(title.clone(), move |title, _, _, app_cx| {
+                let asset = AssetBeingDragged::Title(DraggedTitle {
+                    title_id: title.id,
+                    name: title.name.clone(),
+                    duration: title.duration,
+                });
+                event_bus.update(app_cx, |_, cx| {
+                    cx.emit(AppEvent::DragStarted(asset.clone()));
+                });
+                app_cx.new(|_| ExplorerDragView {
+                    asset,
+                    editor: drag_editor.clone(),
+                })
+            })
+            .on_click(cx.listener(move |editor, _, _, cx| {
+                editor.emit_event(cx, AppEvent::SelectTitle { title_id });
+                cx.notify();
+            }))
+            // Rendered preview: the title itself over black, no decoded thumbnail.
+            .child(
+                div()
+                    .w_full()
+                    .h(px(76.0))
+                    .rounded(px(4.0))
+                    .relative()
+                    .overflow_hidden()
+                    .child(title_preview_view(&title.properties))
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(4.0))
+                            .left(px(4.0))
+                            .size(px(16.0))
+                            .rounded(px(2.0))
+                            .bg(rgb(CLIP_TEXT))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(9.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0xe3d4ff))
+                            .child("T"),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom(px(4.0))
+                            .right(px(4.0))
+                            .px(px(4.0))
+                            .py(px(1.0))
+                            .rounded(px(3.0))
+                            .bg(gpui::rgba(0x000000cc))
+                            .font_family("monospace")
+                            .text_size(px(9.0))
+                            .text_color(rgb(0xd4d4d8))
+                            .child(duration),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_ellipsis()
+                    .text_color(rgb(TEXT))
+                    .child(title.name.clone()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_1()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .text_size(px(10.0))
+                            .text_color(rgb(MUTED))
+                            .text_ellipsis()
+                            .child(format!("Text · {}", title.properties.font)),
+                    )
+                    .child(
+                        div()
+                            .size(px(10.0))
+                            .flex_shrink_0()
+                            .rounded(px(2.0))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .bg(rgb(title.properties.color & 0xFFFFFF)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn media_list_title_row(&self, title: &TextTitle, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let title_id = title.id;
+        let selected = self.explorer.selected_title == Some(title_id);
+        let duration = format_title_duration(title.duration);
+        let event_bus = self.event_bus.clone();
+        let drag_editor = cx.entity().downgrade();
+        div()
+            .id(gpui::SharedString::from(format!("title-row-{title_id}")))
+            .h(px(38.0))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .rounded(px(4.0))
+            .when(selected, |this| this.bg(rgb(SURFACE_HOVER)))
+            .hover(|s| s.bg(rgb(SURFACE_HOVER)))
+            .cursor(CursorStyle::OpenHand)
+            .on_drag(title.clone(), move |title, _, _, app_cx| {
+                let asset = AssetBeingDragged::Title(DraggedTitle {
+                    title_id: title.id,
+                    name: title.name.clone(),
+                    duration: title.duration,
+                });
+                event_bus.update(app_cx, |_, cx| {
+                    cx.emit(AppEvent::DragStarted(asset.clone()));
+                });
+                app_cx.new(|_| ExplorerDragView {
+                    asset,
+                    editor: drag_editor.clone(),
+                })
+            })
+            .on_click(cx.listener(move |editor, _, _, cx| {
+                editor.emit_event(cx, AppEvent::SelectTitle { title_id });
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .w(px(56.0))
+                    .h(px(32.0))
+                    .flex_shrink_0()
+                    .rounded(px(3.0))
+                    .overflow_hidden()
+                    .child(title_preview_view(&title.properties)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_ellipsis()
+                            .text_color(rgb(TEXT))
+                            .child(title.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(rgb(MUTED))
+                            .text_ellipsis()
+                            .child(format!("Text · {}", title.properties.font)),
+                    ),
+            )
+            .child(
+                div()
+                    .size(px(10.0))
+                    .flex_shrink_0()
+                    .rounded(px(2.0))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(title.properties.color & 0xFFFFFF)),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .font_family("monospace")
+                    .text_size(px(10.0))
+                    .text_color(rgb(MUTED))
+                    .child(duration),
+            )
+            .into_any_element()
+    }
+
+    fn text_empty_state(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .p_6()
+            .gap_3()
+            .text_center()
+            .child(
+                div()
+                    .size(px(56.0))
+                    .rounded(px(10.0))
+                    .bg(rgb(CLIP_TEXT))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(24.0))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0xe3d4ff))
+                    .child("T"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(TEXT))
+                    .child("Create your first title"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .max_w(px(240.0))
+                    .child(
+                        "Titles are made in your project, not imported. Add one, then drag it to a Text track.",
+                    ),
+            )
+            .child(
+                div()
+                    .id("empty-new-text-button")
+                    .h(px(32.0))
+                    .px_4()
+                    .mt_2()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1p5()
+                    .rounded(px(6.0))
+                    .bg(rgb(ACCENT))
+                    .hover(|s| s.bg(rgb(ACCENT_HOVER)))
+                    .cursor_pointer()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0x131417))
+                    .on_click(cx.listener(|editor, _, _, cx| {
+                        editor.emit_event(cx, AppEvent::NewTextTitle);
+                        cx.notify();
+                    }))
+                    .child("+ New Text"),
+            )
+            .into_any_element()
+    }
+}
+
+fn format_title_duration(duration: Duration) -> String {
+    let tenths = (duration.as_secs_f64() * 10.0).round() as u64;
+    format!(
+        "{:02}:{:02}.{}",
+        tenths / 600,
+        (tenths / 10) % 60,
+        tenths % 10
+    )
+}
+
+#[derive(Clone, Copy)]
+struct CategoryCounts {
+    all: usize,
+    video: usize,
+    audio: usize,
+    image: usize,
+    captions: usize,
+    text: usize,
 }
 
 fn format_card_duration(duration: f64) -> String {

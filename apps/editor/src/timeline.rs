@@ -1,5 +1,6 @@
 use crate::clip_placement::{
     ClipPlacementRejection, DEFAULT_IMAGE_DURATION_SECONDS, validate_clip_placement,
+    validate_text_clip_placement,
 };
 use crate::editing::validate_clips_placements;
 use crate::explorer_drag::AssetBeingDragged;
@@ -121,6 +122,20 @@ impl PreviewDropAsset {
                     })
                     .collect::<Vec<_>>();
                 validate_clips_placements(timeline, &clips)
+            }
+            AssetBeingDragged::Title(title) => {
+                let clip_length = timeline
+                    .settings
+                    .frame_rate
+                    .frames_from_duration_nearest(title.duration)
+                    .max(TimelineFrameIndex::ONE_FRAME);
+                validate_text_clip_placement(
+                    timeline,
+                    self.track_id,
+                    clip_length,
+                    self.start_time,
+                    &HashSet::new(),
+                )
             }
         }
     }

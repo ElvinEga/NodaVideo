@@ -11,11 +11,14 @@ use gpui::{
 };
 use std::fs::read_to_string;
 use std::path::PathBuf;
+use std::time::Duration;
+use ulid::Ulid;
 
 #[derive(Clone, Debug)]
 pub(crate) enum AssetBeingDragged {
     Media(DraggedMedia),
     Srt(DraggedSRT),
+    Title(DraggedTitle),
     None,
 }
 
@@ -77,6 +80,15 @@ impl DraggedSRT {
     }
 }
 
+/// A pool title dragged to the timeline. The id places the current title; name and
+/// duration are a snapshot for the drag ghost and drop validation.
+#[derive(Clone, Debug)]
+pub(crate) struct DraggedTitle {
+    pub(crate) title_id: Ulid,
+    pub(crate) name: String,
+    pub(crate) duration: Duration,
+}
+
 pub(super) struct ExplorerDragView {
     pub(super) asset: AssetBeingDragged,
     pub(super) editor: WeakEntity<Editor>,
@@ -87,6 +99,7 @@ impl Render for ExplorerDragView {
         let (kind, name) = match &self.asset {
             AssetBeingDragged::Media(asset) => (asset.metadata.kind().label(), asset.name()),
             AssetBeingDragged::Srt(asset) => ("SRT", asset.name()),
+            AssetBeingDragged::Title(title) => ("Text", SharedString::from(title.name.clone())),
             AssetBeingDragged::None => return gpui::Empty.into_any_element(),
         };
 

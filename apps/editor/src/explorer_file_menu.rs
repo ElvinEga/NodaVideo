@@ -180,7 +180,7 @@ impl Editor {
                     *path = new_path;
                 }
             }
-            PreviewTarget::None | PreviewTarget::Timeline { .. } => {}
+            PreviewTarget::None | PreviewTarget::Timeline { .. } | PreviewTarget::TextTitle(_) => {}
         }
 
         let renamed_active_timeline = self.timeline.as_ref().and_then(|timeline| {

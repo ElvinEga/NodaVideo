@@ -27,6 +27,7 @@ fn debug_state(editor: &Editor) -> Result<String> {
         PreviewTarget::VideoFile { .. } => "VideoFile",
         PreviewTarget::AudioFile { .. } => "AudioFile",
         PreviewTarget::ImageFile(_) => "ImageFile",
+        PreviewTarget::TextTitle(_) => "TextTitle",
     };
     // Deliberately select fields rather than serializing the application/global settings.
     let mut report = json!({
