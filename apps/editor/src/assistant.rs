@@ -19,12 +19,12 @@ use nodavideo_agent_runtime::{
     AgentConfig, AgentEvent, AgentRuntime, MockAgentProvider, SessionId,
 };
 use nodavideo_hyperframes_bridge::{CompositionAsset, load_compositions};
-use nodavideo_mcp_server::{McpError, McpExecutor, McpToolDefinition};
+use nodavideo_mcp_server::{McpError, McpExecutor};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use timeline::TimelineEditingState;
+use timeline::{Asset, TimelineEditingState};
 use ulid::Ulid;
 
 pub(crate) struct AssistantState {
@@ -391,9 +391,19 @@ impl Editor {
         cx.notify();
 
         let seed = self.timeline.as_ref().map(|timeline| {
+            let mut media_library: Vec<Asset> = self
+                .explorer
+                .media_metadata
+                .iter()
+                .filter(|(path, _)| self.explorer.imported_paths.contains(*path))
+                .map(|(_, asset)| asset.clone())
+                .collect();
+            media_library.sort_by(|left, right| left.path().cmp(right.path()));
             (
                 timeline.editing_state.clone(),
                 timeline.interaction.selected_clip_ids.clone(),
+                timeline.revision,
+                media_library,
             )
         });
         let project_root = self.project_root.clone();
@@ -743,10 +753,10 @@ fn assistant_failed(editor: &WeakEntity<Editor>, cx: &mut AsyncApp, message: Str
 fn run_assistant_tool_background(
     tool_name: String,
     arguments: &Value,
-    seed: Option<(TimelineEditingState, HashSet<Ulid>)>,
+    seed: Option<(TimelineEditingState, HashSet<Ulid>, u64, Vec<Asset>)>,
     project_root: &Path,
 ) -> AssistantToolOutcome {
-    let Some((editing_state, selected_clips)) = seed else {
+    let Some((editing_state, selected_clips, revision, media_library)) = seed else {
         return AssistantToolOutcome {
             result: Err(McpError::Unsupported {
                 tool: tool_name,
@@ -759,13 +769,13 @@ fn run_assistant_tool_background(
 
     let mut executor = McpExecutor::new(editing_state)
         .with_project_root(project_root.to_path_buf())
-        .with_selection(selected_clips);
+        .with_selection(selected_clips)
+        .with_revision(revision)
+        .with_media_library(media_library);
     let result = executor.execute(&tool_name, arguments, true);
 
-    let is_mutation = McpToolDefinition::all_tools()
-        .iter()
-        .any(|definition| definition.name == tool_name && definition.is_mutation);
-    let mutated_timeline = if result.is_ok() && is_mutation {
+    // 仅当时间线真正提交（revision 前进）才回写；合成磁盘工具不改时间线，避免空撤销与 revision 漂移。
+    let mutated_timeline = if result.is_ok() && executor.revision() > revision {
         Some(executor.into_timeline())
     } else {
         None

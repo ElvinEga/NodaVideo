@@ -37,6 +37,7 @@ pub(crate) struct TimelineRuntimeState {
     /// Absolute path of the timeline file.
     pub(crate) path: PathBuf,
     pub(crate) editing_state: TimelineEditingState,
+    pub(crate) revision: u64, // 单调递增的提交计数；不进入撤销快照，撤销/重做不回退。
     pub(crate) text_drag: Option<PreviewTextDrag>,
     playhead: TimelineFrameIndex, // 编辑区自己的播放头；与预览播放器互不同步。
     pub(crate) h_scroll: ScrollHandle,
@@ -400,6 +401,7 @@ impl TimelineRuntimeState {
             clip_trim_drag: None,
             path,
             editing_state,
+            revision: 0,
             playhead: TimelineFrameIndex::ZERO,
             h_scroll: ScrollHandle::new(),
             v_scroll: ScrollHandle::new(),
@@ -469,6 +471,12 @@ impl TimelineRuntimeState {
             self.undo_stack.remove(0);
         }
         self.redo_stack.clear();
+    }
+
+    /// Commit a new editing state and advance the monotonic project revision.
+    pub(super) fn commit_editing_state(&mut self, new_state: TimelineEditingState) {
+        self.editing_state = new_state;
+        self.revision += 1;
     }
 }
 pub(crate) trait FrameRateLabel {

@@ -322,7 +322,7 @@ pub(crate) fn edit_timeline(
                         timeline.record_editing_history();
                         timeline.clip_trim_drag.as_mut().unwrap().history_recorded = true;
                     }
-                    timeline.editing_state = data;
+                    timeline.commit_editing_state(data);
                 }
                 if finished {
                     let completed = timeline.clip_trim_drag.take().unwrap();
@@ -535,7 +535,7 @@ pub(crate) fn edit_timeline(
                     false => previous.rescale_nearest(timeline.playhead(), frame_rate),
                 };
                 timeline.record_editing_history();
-                timeline.editing_state = new_state;
+                timeline.commit_editing_state(new_state);
                 timeline.set_playhead(new_playhead); // 在新 editing state 生效后设置，按新长度 clamp。
                 return Ok(true);
             }
@@ -555,7 +555,7 @@ pub(crate) fn edit_timeline(
         timeline.record_editing_history();
     }
     timeline.offline_asset_ids = new_offline_asset_ids;
-    timeline.editing_state = outcome.new_state;
+    timeline.commit_editing_state(outcome.new_state);
     timeline.set_playhead(timeline.playhead());
     Ok(outcome.should_save)
 }
