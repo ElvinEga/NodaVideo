@@ -152,12 +152,22 @@ pub(crate) enum AppEvent {
     AssistantMessageSubmitted {
         message: String,
     },
-    /// The user switched the AI assistant provider.
-    AssistantProviderCycled,
+    /// The user chose a provider from the AI assistant dock's model selector.
+    AssistantProviderSelected {
+        index: usize,
+    },
     /// The user approved or rejected the pending assistant action.
     AssistantApprovalDecided {
         approved: bool,
     },
+    /// The user stopped the running assistant turn from the composer.
+    AssistantStopped,
+    /// The user chose a production skill from the composer's skill picker.
+    AssistantSkillSelected {
+        id: String,
+    },
+    /// The user started a fresh assistant session from the window's New chat control.
+    AssistantNewChat,
     WaveformsGeneration {
         paths: Vec<PathBuf>, // 素材的绝对路径
     },
@@ -679,13 +689,22 @@ async fn handle_app_event(
         AppEvent::AssistantMessageSubmitted { message } => {
             editor.update(cx, |editor, cx| editor.send_assistant_message(message, cx));
         }
-        AppEvent::AssistantProviderCycled => {
-            editor.update(cx, |editor, cx| editor.cycle_assistant_provider(cx));
+        AppEvent::AssistantProviderSelected { index } => {
+            editor.update(cx, |editor, cx| editor.select_assistant_provider(index, cx));
         }
         AppEvent::AssistantApprovalDecided { approved } => {
             editor.update(cx, |editor, cx| {
                 editor.submit_assistant_approval(approved, cx)
             });
+        }
+        AppEvent::AssistantStopped => {
+            editor.update(cx, |editor, cx| editor.stop_assistant(cx));
+        }
+        AppEvent::AssistantSkillSelected { id } => {
+            editor.update(cx, |editor, cx| editor.select_assistant_skill(id, cx));
+        }
+        AppEvent::AssistantNewChat => {
+            editor.update(cx, |editor, cx| editor.new_assistant_chat(cx));
         }
         AppEvent::HorizontalSplitResized(state) => {
             editor.update(cx, |editor, cx| -> Result<()> {

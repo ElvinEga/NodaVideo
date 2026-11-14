@@ -1480,6 +1480,7 @@ dependencies = [
  "nodavideo-agent-runtime",
  "nodavideo-hyperframes-bridge",
  "nodavideo-mcp-server",
+ "nodavideo-skill-registry",
  "notify",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",

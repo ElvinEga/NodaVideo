@@ -7,6 +7,7 @@ pub(crate) const TEXT: u32 = 0xf1f3f9;
 pub(crate) const MUTED: u32 = 0x8a90a2;
 pub(crate) const ACCENT: u32 = 0x6366f1;
 pub(crate) const ACCENT_HOVER: u32 = 0x4f46e5;
+pub(crate) const ACCENT_BACKGROUND: u32 = 0x252544;
 pub(crate) const ERROR: u32 = 0xef4444;
 pub(crate) const SUCCESS: u32 = 0x10b981;
 pub(crate) const WARNING: u32 = 0xf59e0b;

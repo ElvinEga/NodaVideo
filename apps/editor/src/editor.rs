@@ -35,7 +35,6 @@ pub(crate) struct Editor {
     pub(super) property_panel: PropertyPanel, // 点击文件或片段后由事件重建，render 只读它。
     pub(super) settings_open: bool,
     pub(super) shortcuts_open: bool,
-    pub(super) right_dock: RightDockTab,
     pub(super) assistant: AssistantState,
     pub(crate) workspace: WorkspaceTab,
     pub(crate) show_media_browser: bool,
@@ -120,7 +119,6 @@ impl Editor {
             property_panel: PropertyPanel::None,
             settings_open: false,
             shortcuts_open: false,
-            right_dock: RightDockTab::Inspector,
             assistant,
             workspace: WorkspaceTab::Edit,
             show_media_browser: true,
@@ -138,6 +136,7 @@ impl Editor {
             timeline.set_playhead(timeline.playhead());
         }
         editor.schedule_media_metadata(cx);
+        editor.load_assistant_skills(cx);
         editor.property_panel = current_property_panel(&editor);
         editor
     }
@@ -145,13 +144,6 @@ impl Editor {
     pub(crate) fn emit_event(&mut self, cx: &mut Context<Self>, event: AppEvent) {
         self.event_bus.update(cx, |_, cx| cx.emit(event));
     }
-}
-
-/// Which panel occupies the right dock of the upper workspace.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RightDockTab {
-    Inspector,
-    Assistant,
 }
 
 /// Active top-level workspace mode in NodaVideo.

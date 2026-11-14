@@ -1,7 +1,7 @@
 use crate::actions::EDITOR_KEY_CONTEXT;
 use crate::asset::IconName;
 use crate::dialog_missing_media::missing_media_dialog_view;
-use crate::editor::{Editor, RightDockTab, WorkspaceTab};
+use crate::editor::{Editor, WorkspaceTab};
 use crate::event_bus::{AppEvent, EventBus};
 use crate::keyboard_shortcuts::keyboard_shortcuts_view;
 use crate::layout::{
@@ -145,7 +145,6 @@ impl Render for Editor {
             .on_action(cx.listener(Self::action_toggle_fullscreen))
             .on_action(cx.listener(Self::action_exit_fullscreen))
             .on_action(cx.listener(Self::action_toggle_inspector))
-            .on_action(cx.listener(Self::action_toggle_assistant))
             .on_action(cx.listener(Self::action_reveal_in_finder))
             .on_action(cx.listener(Self::action_open_in_default_app))
             .on_action(cx.listener(Self::action_switch_to_edit_workspace))
@@ -249,7 +248,7 @@ impl Editor {
             WorkspaceTab::Edit => self.edit_workspace(width, preview_height, window, cx),
             WorkspaceTab::Color => self.color_workspace(width, preview_height, window, cx),
             WorkspaceTab::Audio => self.audio_workspace(width, preview_height, cx),
-            WorkspaceTab::AiStudio => self.ai_studio_workspace(width, preview_height, window, cx),
+            WorkspaceTab::AiStudio => self.assistant_window_view(window, cx),
         }
     }
 
@@ -257,7 +256,7 @@ impl Editor {
         &self,
         width: f32,
         preview_height: f32,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         if self.show_media_browser && self.show_inspector {
@@ -275,7 +274,7 @@ impl Editor {
                 constraints,
                 self.explorer_panel(cx),
                 self.monitor_panel(widths.center, preview_height, cx),
-                self.right_dock_view(window, cx),
+                property_panel_view(&self.property_panel),
             )
             .into_any_element()
         } else if self.show_media_browser {
@@ -303,7 +302,7 @@ impl Editor {
                     div()
                         .w(px(right_width))
                         .h_full()
-                        .child(self.right_dock_view(window, cx)),
+                        .child(property_panel_view(&self.property_panel)),
                 )
                 .into_any_element()
         } else {
@@ -977,192 +976,6 @@ impl Editor {
             .into_any_element()
     }
 
-    fn ai_studio_workspace(
-        &self,
-        width: f32,
-        _preview_height: f32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let left_width = 300.0f32;
-        let right_width = 360.0f32;
-        let center_width = (width - left_width - right_width).max(320.0);
-
-        div()
-            .size_full()
-            .flex()
-            .bg(rgb(BACKGROUND))
-            // Left: Shot Director & Prompt Tools
-            .child(
-                div()
-                    .w(px(left_width))
-                    .h_full()
-                    .border_r_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(PANEL))
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .h(px(36.0))
-                            .px_3()
-                            .border_b_1()
-                            .border_color(rgb(BORDER))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(TEXT))
-                                    .child("AI SHOT DIRECTOR"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.0))
-                                    .px_1p5()
-                                    .rounded(px(3.0))
-                                    .bg(rgb(0x23243a))
-                                    .text_color(rgb(ACCENT))
-                                    .child("Active"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .p_3()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .child(ai_tool_card("Smart Scene Cuts", "Detect shot boundaries and cut silence automatically.", "Detect Cuts"))
-                            .child(ai_tool_card("Auto Captions", "Transcribe audio speech tracks into styled timeline captions.", "Generate Captions"))
-                            .child(ai_tool_card("B-Roll Finder", "Match script keywords with media bin footage and suggest inserts.", "Find B-Roll"))
-                            .child(ai_tool_card("Style Color Match", "Analyze a reference image and apply consistent grade across clips.", "Color Match")),
-                    ),
-            )
-            // Center: Storyboard & Shot Canvas
-            .child(
-                div()
-                    .w(px(center_width))
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .bg(rgb(BACKGROUND))
-                    .child(
-                        div()
-                            .h(px(36.0))
-                            .px_3()
-                            .border_b_1()
-                            .border_color(rgb(BORDER))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(TEXT))
-                                    .child("STORYBOARD & SCENE PROMPTS"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(MUTED))
-                                    .child("4 Scenes · 12 Shots Planned"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .p_4()
-                            .flex()
-                            .flex_wrap()
-                            .gap_3()
-                            .child(storyboard_scene_card("Scene 1: Introduction", "Wide establishing shot of city morning with title fade-in.", "00:00 - 00:08"))
-                            .child(storyboard_scene_card("Scene 2: Interview", "Medium close-up speaker dialogue with clean voiceover track.", "00:08 - 00:32"))
-                            .child(storyboard_scene_card("Scene 3: Product Demo", "Overhead macro shots of device with smooth kinetic transitions.", "00:32 - 01:15"))
-                            .child(storyboard_scene_card("Scene 4: Outro & Call to Action", "Hero shot with logo reveal, background music swell, and end card.", "01:15 - 01:30")),
-                    ),
-            )
-            // Right: AI Assistant Dock
-            .child(
-                div()
-                    .w(px(right_width))
-                    .h_full()
-                    .border_l_1()
-                    .border_color(rgb(BORDER))
-                    .child(self.assistant_panel_view(window, cx)),
-            )
-            .into_any_element()
-    }
-
-    /// The right dock: a tab strip over the inspector or the AI assistant.
-    fn right_dock_view(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let content = match self.right_dock {
-            RightDockTab::Inspector => property_panel_view(&self.property_panel),
-            RightDockTab::Assistant => self.assistant_panel_view(window, cx),
-        };
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .bg(rgb(PANEL))
-            .child(
-                div()
-                    .h(px(36.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(PANEL))
-                    .child(self.right_dock_tab_view(RightDockTab::Inspector, cx))
-                    .child(self.right_dock_tab_view(RightDockTab::Assistant, cx)),
-            )
-            .child(div().flex_1().min_h_0().overflow_hidden().child(content))
-            .into_any_element()
-    }
-
-    fn right_dock_tab_view(&self, tab: RightDockTab, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let selected = self.right_dock == tab;
-        let (element_id, label) = match tab {
-            RightDockTab::Inspector => ("right-dock-tab-inspector", "Inspector"),
-            RightDockTab::Assistant => ("right-dock-tab-assistant", "AI Studio"),
-        };
-        div()
-            .id(element_id)
-            .h(px(26.0))
-            .px_3()
-            .flex()
-            .items_center()
-            .rounded(px(4.0))
-            .cursor(CursorStyle::PointingHand)
-            .text_size(px(11.0))
-            .font_weight(FontWeight::SEMIBOLD)
-            .when(selected, |this| {
-                this.bg(rgb(0x23243a))
-                    .border_1()
-                    .border_color(rgb(ACCENT))
-                    .text_color(rgb(TEXT))
-            })
-            .when(!selected, |this| {
-                this.text_color(rgb(MUTED))
-                    .hover(|style| style.bg(rgb(SURFACE)).text_color(rgb(ACCENT)))
-            })
-            .on_click(cx.listener(move |editor, _, _, cx| {
-                editor.right_dock = tab;
-                cx.notify();
-            }))
-            .child(label)
-            .into_any_element()
-    }
-
     fn topbar(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let project_name = self
             .project_root
@@ -1367,40 +1180,27 @@ impl Editor {
                             .cursor_pointer()
                             .text_size(px(11.0))
                             .font_weight(FontWeight::MEDIUM)
-                            .when(
-                                self.show_inspector && self.right_dock == RightDockTab::Inspector,
-                                |this| {
-                                    this.border_color(rgb(ACCENT))
-                                        .bg(rgb(0x23243a))
-                                        .text_color(rgb(TEXT))
-                                },
-                            )
-                            .when(
-                                !self.show_inspector || self.right_dock != RightDockTab::Inspector,
-                                |this| {
-                                    this.border_color(rgb(BORDER))
-                                        .bg(rgb(SURFACE))
-                                        .text_color(rgb(MUTED))
-                                        .hover(|s| s.text_color(rgb(TEXT)))
-                                },
-                            )
+                            .when(self.show_inspector, |this| {
+                                this.border_color(rgb(ACCENT))
+                                    .bg(rgb(0x23243a))
+                                    .text_color(rgb(TEXT))
+                            })
+                            .when(!self.show_inspector, |this| {
+                                this.border_color(rgb(BORDER))
+                                    .bg(rgb(SURFACE))
+                                    .text_color(rgb(MUTED))
+                                    .hover(|s| s.text_color(rgb(TEXT)))
+                            })
                             .on_click(cx.listener(|editor, _, _, cx| {
-                                if editor.show_inspector
-                                    && editor.right_dock == RightDockTab::Inspector
-                                {
-                                    editor.show_inspector = false;
-                                } else {
-                                    editor.show_inspector = true;
-                                    editor.right_dock = RightDockTab::Inspector;
-                                }
+                                editor.show_inspector = !editor.show_inspector;
                                 cx.notify();
                             }))
                             .child("Inspector"),
                     )
-                    // AI Assistant Toggle
+                    // AI Assistant: opens the full-window AI Studio workspace
                     .child(
                         div()
-                            .id("toggle-assistant-btn")
+                            .id("open-assistant-btn")
                             .h(px(28.0))
                             .px_2()
                             .flex()
@@ -1411,32 +1211,19 @@ impl Editor {
                             .cursor_pointer()
                             .text_size(px(11.0))
                             .font_weight(FontWeight::MEDIUM)
-                            .when(
-                                self.show_inspector && self.right_dock == RightDockTab::Assistant,
-                                |this| {
-                                    this.border_color(rgb(ACCENT))
-                                        .bg(rgb(0x23243a))
-                                        .text_color(rgb(TEXT))
-                                },
-                            )
-                            .when(
-                                !self.show_inspector || self.right_dock != RightDockTab::Assistant,
-                                |this| {
-                                    this.border_color(rgb(BORDER))
-                                        .bg(rgb(SURFACE))
-                                        .text_color(rgb(MUTED))
-                                        .hover(|s| s.text_color(rgb(TEXT)))
-                                },
-                            )
+                            .when(self.workspace == WorkspaceTab::AiStudio, |this| {
+                                this.border_color(rgb(ACCENT))
+                                    .bg(rgb(0x23243a))
+                                    .text_color(rgb(TEXT))
+                            })
+                            .when(self.workspace != WorkspaceTab::AiStudio, |this| {
+                                this.border_color(rgb(BORDER))
+                                    .bg(rgb(SURFACE))
+                                    .text_color(rgb(MUTED))
+                                    .hover(|s| s.text_color(rgb(TEXT)))
+                            })
                             .on_click(cx.listener(|editor, _, _, cx| {
-                                if editor.show_inspector
-                                    && editor.right_dock == RightDockTab::Assistant
-                                {
-                                    editor.show_inspector = false;
-                                } else {
-                                    editor.show_inspector = true;
-                                    editor.right_dock = RightDockTab::Assistant;
-                                }
+                                editor.workspace = WorkspaceTab::AiStudio;
                                 cx.notify();
                             }))
                             .child("AI"),
@@ -1793,107 +1580,6 @@ fn eq_band_node(label: &'static str, gain: &'static str) -> gpui::AnyElement {
                 .font_weight(FontWeight::BOLD)
                 .text_color(rgb(TEXT))
                 .child(gain),
-        )
-        .into_any_element()
-}
-
-fn ai_tool_card(title: &'static str, desc: &'static str, btn: &'static str) -> gpui::AnyElement {
-    div()
-        .p_3()
-        .rounded(px(6.0))
-        .bg(rgb(SURFACE))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .flex()
-        .flex_col()
-        .gap_1p5()
-        .child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(TEXT))
-                .child(title),
-        )
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(rgb(MUTED))
-                .line_height(px(16.0))
-                .child(desc),
-        )
-        .child(
-            div()
-                .h(px(24.0))
-                .mt_1()
-                .px_2p5()
-                .self_start()
-                .rounded(px(4.0))
-                .bg(rgb(0x23243a))
-                .border_1()
-                .border_color(rgb(ACCENT))
-                .text_color(rgb(0x818cf8))
-                .text_size(px(10.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(ACCENT)).text_color(rgb(0x131417)))
-                .child(btn),
-        )
-        .into_any_element()
-}
-
-fn storyboard_scene_card(
-    title: &'static str,
-    desc: &'static str,
-    duration: &'static str,
-) -> gpui::AnyElement {
-    div()
-        .w(px(220.0))
-        .p_3()
-        .rounded(px(6.0))
-        .bg(rgb(SURFACE))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .hover(|s| s.border_color(rgb(ACCENT)))
-        .flex()
-        .flex_col()
-        .gap_2()
-        // Thumbnail box
-        .child(
-            div()
-                .w_full()
-                .h(px(90.0))
-                .rounded(px(4.0))
-                .bg(rgb(0x0c0d10))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(24.0))
-                .opacity(0.3)
-                .child("🎬"),
-        )
-        .child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(TEXT))
-                .child(title),
-        )
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(rgb(MUTED))
-                .line_height(px(15.0))
-                .child(desc),
-        )
-        .child(
-            div()
-                .text_size(px(10.0))
-                .font_family("monospace")
-                .text_color(rgb(ACCENT))
-                .child(duration),
         )
         .into_any_element()
 }

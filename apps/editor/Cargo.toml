@@ -20,6 +20,7 @@ nodavideo-agent-codex.workspace = true
 nodavideo-agent-runtime.workspace = true
 nodavideo-hyperframes-bridge.workspace = true
 nodavideo-mcp-server.workspace = true
+nodavideo-skill-registry.workspace = true
 anyhow.workspace = true
 env_logger.workspace = true
 futures.workspace = true

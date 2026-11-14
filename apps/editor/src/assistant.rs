@@ -1,9 +1,13 @@
-//! AI assistant dock: provider cycling, streamed conversation, and approval cards.
+//! AI assistant window: provider cycling, streamed conversation, and approval cards.
 
+use crate::asset::IconName;
 use crate::edit_action::EditAction;
 use crate::editor::Editor;
 use crate::event_bus::AppEvent;
-use crate::theme::{ACCENT, BORDER, ERROR, LINK, MUTED, PANEL, SURFACE, SURFACE_HOVER, TEXT};
+use crate::theme::{
+    ACCENT, ACCENT_BACKGROUND, BACKGROUND, BORDER, ERROR, LINK, MUTED, PANEL, SUCCESS, SURFACE,
+    SURFACE_HOVER, TEXT, WARNING,
+};
 use crate::ui_components::TextInput;
 use crate::ui_components::cyberpunk_button::{
     button_cyberpunk_primary, button_cyberpunk_secondary,
@@ -11,7 +15,10 @@ use crate::ui_components::cyberpunk_button::{
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::prelude::*;
-use gpui::{AsyncApp, Context, Entity, FontWeight, ScrollHandle, WeakEntity, Window, div, px, rgb};
+use gpui::{
+    AsyncApp, Context, CursorStyle, Entity, FontWeight, ScrollHandle, Stateful, WeakEntity, Window,
+    div, px, rgb, svg,
+};
 use nodavideo_agent_acp::AcpAgentProvider;
 use nodavideo_agent_claude::ClaudeAgentProvider;
 use nodavideo_agent_codex::CodexAgentProvider;
@@ -20,6 +27,7 @@ use nodavideo_agent_runtime::{
 };
 use nodavideo_hyperframes_bridge::{CompositionAsset, load_compositions};
 use nodavideo_mcp_server::{ExplorerChange, McpError, McpExecutor};
+use nodavideo_skill_registry::{SkillPackage, SkillRegistry};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::Path;
@@ -38,6 +46,13 @@ pub(crate) struct AssistantState {
     input: Entity<TextInput>,
     scroll: ScrollHandle,
     busy: bool,
+    provider_menu_open: bool,
+    /// Per-provider readiness probe: None until `is_available` answers. 与 entries 无关，可跨会话缓存。
+    provider_readiness: Vec<Option<bool>>,
+    /// Production skills discovered from `skills/`; the enabled set is the source of truth
+    /// for the active skill, so the composer button never stores a duplicate copy.
+    skills: SkillRegistry,
+    skill_menu_open: bool,
 }
 
 pub(crate) fn register_assistant_providers(runtime: &AgentRuntime, cx: &mut Context<Editor>) {
@@ -75,6 +90,10 @@ impl AssistantState {
             input,
             scroll: ScrollHandle::new(),
             busy: false,
+            provider_menu_open: false,
+            provider_readiness: vec![None; ASSISTANT_PROVIDERS.len()],
+            skills: SkillRegistry::new(),
+            skill_menu_open: false,
         }
     }
 
@@ -85,58 +104,58 @@ impl AssistantState {
 
 // Public APIs only
 impl Editor {
-    pub(super) fn assistant_panel_view(
+    pub(super) fn assistant_window_view(
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let assistant = &self.assistant;
-        let mut header = div()
-            .h(px(64.0))
+        let provider = assistant.provider();
+
+        let tab_label = match assistant.session {
+            Some(_) => provider.display_name,
+            None => "New chat",
+        };
+        let tab_bar = div()
+            .h(px(40.0))
             .flex_shrink_0()
             .flex()
             .items_center()
-            .justify_between()
             .gap_2()
-            .px(px(16.0))
+            .px(px(12.0))
             .border_b_1()
             .border_color(rgb(BORDER))
             .child(
                 div()
-                    .min_w_0()
-                    .flex_1()
+                    .h(px(26.0))
+                    .px(px(10.0))
                     .flex()
-                    .flex_col()
+                    .items_center()
+                    .gap(px(6.0))
+                    .rounded(px(4.0))
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .child(assistant_dot(provider.hue, 7.0))
                     .child(
                         div()
-                            .text_size(px(14.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("AI Assistant"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(MUTED))
-                            .text_ellipsis()
-                            .child(assistant.provider_display_name()),
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(TEXT))
+                            .child(tab_label),
                     ),
-            );
-        if assistant.busy {
-            header = header.child(
-                div()
-                    .flex_shrink_0()
-                    .font_family("monospace")
-                    .text_size(px(11.0))
-                    .text_color(rgb(ACCENT))
-                    .child("WORKING…"),
-            );
-        }
-        header = header.child(
-            button_cyberpunk_secondary("assistant-cycle-provider", "Switch", true, window, cx)
-                .on_click(cx.listener(|editor, _, _, cx| {
-                    editor.emit_event(cx, AppEvent::AssistantProviderCycled);
-                })),
-        );
+            )
+            .child(assistant_new_chat_button_view("assistant-tab-new", cx))
+            .child(div().flex_1())
+            .when(assistant.busy, |this| {
+                this.child(
+                    div()
+                        .font_family("monospace")
+                        .text_size(px(11.0))
+                        .text_color(rgb(ACCENT))
+                        .child("WORKING…"),
+                )
+            });
 
         let messages = div()
             .id("assistant-messages")
@@ -151,59 +170,162 @@ impl Editor {
             .when(assistant.entries.is_empty(), |this| {
                 this.child(
                     div()
-                        .text_size(px(12.0))
-                        .line_height(px(18.0))
-                        .text_color(rgb(MUTED))
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
                         .child(
-                            "Ask the assistant to inspect the timeline, propose an edit, or \
-                             explain a clip. Edits that need approval appear here as cards.",
+                            div()
+                                .text_size(px(16.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(TEXT))
+                                .child("What are you making?"),
+                        )
+                        .child(
+                            div()
+                                .max_w(px(420.0))
+                                .text_size(px(12.0))
+                                .line_height(px(18.0))
+                                .text_color(rgb(MUTED))
+                                .child(
+                                    "Ask the assistant to inspect the timeline, propose an edit, or \
+                                     explain a clip. Edits that need approval appear here as cards.",
+                                ),
                         ),
                 )
             })
-            .children(assistant.entries.iter().map(assistant_entry_view));
+            .children(assistant.entries.iter().enumerate().map(|(index, entry)| {
+                let show_header = assistant_entry_is_prose(entry)
+                    && (index == 0 || !assistant_entry_is_prose(&assistant.entries[index - 1]));
+                assistant_entry_view(entry, show_header, provider)
+            }));
 
         let approval = assistant
             .pending_approval
             .as_ref()
             .map(|approval| assistant_approval_card_view(approval, window, cx));
 
-        let input_row = div()
+        let input_empty = assistant.input.read(cx).text().trim().is_empty();
+        let composer = div()
             .flex_shrink_0()
-            .border_t_1()
+            .mx_3()
+            .mt_2()
+            .rounded(px(6.0))
+            .border_1()
             .border_color(rgb(BORDER))
-            .p_2()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(div().flex_1().min_w_0().child(assistant.input.clone()))
-            .child(
-                button_cyberpunk_primary("assistant-send", "Send", true, window, cx).on_click(
-                    cx.listener(|editor, _, _, cx| {
-                        let message = editor.assistant.input.read(cx).text().trim().to_string();
-                        if message.is_empty() {
-                            return;
-                        }
-                        editor
-                            .assistant
-                            .input
-                            .update(cx, |input, cx| input.clear(cx));
-                        editor.emit_event(cx, AppEvent::AssistantMessageSubmitted { message });
-                    }),
-                ),
-            );
-
-        div()
-            .id("editor-assistant-panel")
-            .size_full()
+            .bg(rgb(BACKGROUND))
             .flex()
             .flex_col()
+            .child(
+                div()
+                    .px(px(10.0))
+                    .pt(px(10.0))
+                    .child(assistant.input.clone()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px(px(8.0))
+                    .py(px(8.0))
+                    .child(assistant_skill_button_view(assistant, cx))
+                    .child(assistant_model_button_view(assistant, cx))
+                    .child(div().flex_1())
+                    .child(if assistant.busy {
+                        button_cyberpunk_secondary("assistant-stop", "Stop", true, window, cx)
+                            .on_click(cx.listener(|editor, _, _, cx| {
+                                editor.emit_event(cx, AppEvent::AssistantStopped);
+                            }))
+                    } else {
+                        button_cyberpunk_primary(
+                            "assistant-send",
+                            "Send",
+                            !input_empty,
+                            window,
+                            cx,
+                        )
+                        .on_click(cx.listener(|editor, _, _, cx| {
+                            let message =
+                                editor.assistant.input.read(cx).text().trim().to_string();
+                            if message.is_empty() {
+                                return;
+                            }
+                            editor
+                                .assistant
+                                .input
+                                .update(cx, |input, cx| input.clear(cx));
+                            editor.emit_event(cx, AppEvent::AssistantMessageSubmitted { message });
+                        }))
+                    }),
+            );
+
+        let project_name = self
+            .project_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Project".to_string());
+        let state_label = if assistant.busy { "Working…" } else { "Ready" };
+        let context_line = div()
+            .flex_shrink_0()
+            .px(px(12.0))
+            .py(px(6.0))
+            .text_size(px(10.0))
+            .text_color(rgb(MUTED))
+            .child(format!("{project_name} · {state_label}"));
+
+        let (approval_label, approval_color) = match assistant.pending_approval {
+            Some(_) => ("1 approval pending", WARNING),
+            None => ("No pending approvals", MUTED),
+        };
+        let status_bar = div()
+            .h(px(28.0))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(12.0))
+            .border_t_1()
+            .border_color(rgb(BORDER))
+            .text_size(px(10.0))
+            .child(
+                div()
+                    .text_color(rgb(MUTED))
+                    .child(format!("{} · {}", provider.transport, provider.model)),
+            )
+            .child(div().text_color(rgb(approval_color)).child(approval_label));
+
+        div()
+            .id("editor-assistant-window")
+            .relative()
+            .size_full()
+            .flex()
             .overflow_hidden()
             .bg(rgb(PANEL))
             .text_color(rgb(TEXT))
-            .child(header)
-            .child(messages)
-            .when_some(approval, |this, approval| this.child(approval))
-            .child(input_row)
+            .child(assistant_sessions_sidebar_view(assistant, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(tab_bar)
+                    .child(messages)
+                    .when_some(approval, |this, approval| this.child(approval))
+                    .child(composer)
+                    .child(context_line)
+                    .child(status_bar),
+            )
+            .when(assistant.provider_menu_open, |this| {
+                this.child(assistant_provider_menu_view(assistant, cx))
+            })
+            .when(assistant.skill_menu_open, |this| {
+                this.child(assistant_skill_menu_view(assistant, cx))
+            })
             .into_any_element()
     }
 
@@ -222,6 +344,16 @@ impl Editor {
         let existing_session = self.assistant.session;
         let generation = self.assistant.session_generation;
         let working_dir = self.project_root.clone();
+
+        // Providers deliver only the message string, so the active skill's instructions ride
+        // along on the first message of a session. A reused session already carries them; a
+        // skill change resets the session, so this never disagrees with the composer button.
+        let instructions = self.assistant.skills.build_combined_instructions();
+        let outgoing_message = if existing_session.is_none() && !instructions.is_empty() {
+            format!("{}\n\n{}", instructions.trim_end(), message)
+        } else {
+            message
+        };
 
         cx.spawn(async move |editor, cx| {
             let session = match existing_session {
@@ -306,7 +438,7 @@ impl Editor {
 
             let sent = gpui_tokio::Tokio::spawn(cx, {
                 let runtime = runtime.clone();
-                async move { runtime.send_message(session, message).await }
+                async move { runtime.send_message(session, outgoing_message).await }
             })
             .await;
             match sent {
@@ -351,8 +483,16 @@ impl Editor {
         .detach();
     }
 
-    pub(super) fn cycle_assistant_provider(&mut self, cx: &mut Context<Self>) {
-        let previous_session = self.assistant.cycle_provider();
+    pub(super) fn select_assistant_provider(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= ASSISTANT_PROVIDERS.len() {
+            return;
+        }
+        if index == self.assistant.provider_index {
+            self.assistant.provider_menu_open = false;
+            cx.notify();
+            return;
+        }
+        let previous_session = self.assistant.select_provider(index);
         let runtime = self.assistant.runtime.clone();
         if let Some(session) = previous_session {
             gpui_tokio::Tokio::spawn(cx, async move {
@@ -369,10 +509,114 @@ impl Editor {
         self.assistant.scroll.scroll_to_bottom();
         cx.notify();
     }
+
+    /// Discovers the production skills shipped in `skills/` off the UI thread, using the
+    /// same compile-time resource path the motion templates use. A missing or empty dir
+    /// leaves the registry empty and the composer shows no skills.
+    pub(super) fn load_assistant_skills(&mut self, cx: &mut Context<Self>) {
+        let skills_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
+        cx.spawn(async move |editor, cx| {
+            let discovered = gpui_tokio::Tokio::spawn(cx, async move {
+                let mut registry = SkillRegistry::new();
+                if let Err(error) = registry.discover_from_dir(&skills_dir) {
+                    log::debug!("Could not discover assistant skills: {error:?}");
+                }
+                registry
+            })
+            .await;
+            let Ok(registry) = discovered else {
+                return;
+            };
+            let _ = editor.update(cx, |editor, cx| {
+                editor.assistant.skills = registry;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn stop_assistant(&mut self, cx: &mut Context<Self>) {
+        if !self.assistant.busy {
+            return;
+        }
+        let previous_session = self.assistant.reset_session();
+        self.assistant
+            .push_entry(AssistantEntry::Info("Stopped.".to_string()));
+        self.assistant.scroll.scroll_to_bottom();
+        cx.notify();
+        if let Some(session) = previous_session {
+            let runtime = self.assistant.runtime.clone();
+            gpui_tokio::Tokio::spawn(cx, async move {
+                if let Err(error) = runtime.cancel(session).await {
+                    log::debug!("Could not cancel the assistant session: {error:?}");
+                }
+            })
+            .detach();
+        }
+    }
+
+    pub(super) fn new_assistant_chat(&mut self, cx: &mut Context<Self>) {
+        let previous_session = self.assistant.reset_session();
+        self.assistant.entries.clear();
+        self.assistant.provider_menu_open = false;
+        self.assistant.skill_menu_open = false;
+        cx.notify();
+        if let Some(session) = previous_session {
+            let runtime = self.assistant.runtime.clone();
+            gpui_tokio::Tokio::spawn(cx, async move {
+                if let Err(error) = runtime.cancel(session).await {
+                    log::debug!("Could not cancel the assistant session: {error:?}");
+                }
+            })
+            .detach();
+        }
+    }
+
+    pub(super) fn select_assistant_skill(&mut self, id: String, cx: &mut Context<Self>) {
+        let previous_session = self.assistant.select_skill(&id);
+        cx.notify();
+        if let Some(session) = previous_session {
+            let runtime = self.assistant.runtime.clone();
+            gpui_tokio::Tokio::spawn(cx, async move {
+                if let Err(error) = runtime.cancel(session).await {
+                    log::debug!("Could not cancel the previous agent session: {error:?}");
+                }
+            })
+            .detach();
+        }
+    }
 }
 
 // Private APIs only
 impl Editor {
+    /// Probes each provider's real readiness via `is_available`, off the UI thread.
+    /// Results cache across sessions; an unanswered probe stays `None` and retries next open.
+    fn probe_assistant_providers(&mut self, cx: &mut Context<Self>) {
+        for (index, provider) in ASSISTANT_PROVIDERS.iter().enumerate() {
+            if self.assistant.provider_readiness[index].is_some() {
+                continue;
+            }
+            let runtime = self.assistant.runtime.clone();
+            let provider_id = provider.id;
+            cx.spawn(async move |editor, cx| {
+                let probed = gpui_tokio::Tokio::spawn(cx, async move {
+                    match runtime.get_provider(provider_id).await {
+                        Some(provider) => provider.is_available().await,
+                        None => false,
+                    }
+                })
+                .await;
+                if let Ok(available) = probed {
+                    let _ = editor.update(cx, |editor, cx| {
+                        editor.assistant.provider_readiness[index] = Some(available);
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        }
+    }
+
     /// Runs an in-process provider's tool call off the UI thread, then applies the result.
     /// Approval-required tools were already gated by the provider's ApprovalRequested card,
     /// so execution here is approved; the executor still validates before committing.
@@ -383,9 +627,12 @@ impl Editor {
         arguments: Value,
         cx: &mut Context<Self>,
     ) {
-        self.assistant.push_entry(AssistantEntry::ToolCall {
+        self.assistant.push_entry(AssistantEntry::Tool {
+            call_id: call_id.clone(),
             tool_name: tool_name.clone(),
             arguments: arguments.to_string(),
+            status: ToolStatus::Running,
+            result: None,
         });
         self.assistant.scroll.scroll_to_bottom();
         cx.notify();
@@ -467,11 +714,8 @@ impl Editor {
             Ok(result) => (result, false),
             Err(error) => (json!({ "error": error.to_string() }), true),
         };
-        self.assistant.push_entry(AssistantEntry::ToolResult {
-            tool_name,
-            result: result.to_string(),
-            is_error,
-        });
+        self.assistant
+            .complete_tool_call(&call_id, &tool_name, result.to_string(), is_error);
         self.assistant.scroll.scroll_to_bottom();
         cx.notify();
 
@@ -509,8 +753,36 @@ impl AssistantState {
         self.provider().executes_in_process
     }
 
-    fn cycle_provider(&mut self) -> Option<SessionId> {
-        self.provider_index = (self.provider_index + 1) % ASSISTANT_PROVIDERS.len();
+    fn select_provider(&mut self, index: usize) -> Option<SessionId> {
+        self.provider_index = index;
+        self.provider_menu_open = false;
+        self.reset_session()
+    }
+
+    /// Single-active skill toggle: choosing the active skill clears it, choosing another
+    /// replaces it. The session resets so the next message carries the new instructions —
+    /// the button never claims a skill the running agent hasn't been given.
+    fn select_skill(&mut self, id: &str) -> Option<SessionId> {
+        self.skill_menu_open = false;
+        let was_active = self.skills.is_enabled(id);
+        for enabled_id in self.skills.enabled_skills().to_vec() {
+            self.skills.set_enabled(&enabled_id, false);
+        }
+        if !was_active {
+            self.skills.set_enabled(id, true);
+        }
+        self.reset_session()
+    }
+
+    fn active_skill(&self) -> Option<&SkillPackage> {
+        let id = self.skills.enabled_skills().first()?;
+        self.skills.get(id)
+    }
+
+    /// Drops the live session so a stale event pump stops applying events. Returns the old
+    /// session for the caller to cancel off-thread. Shared by provider switch, skill change
+    /// and Stop.
+    fn reset_session(&mut self) -> Option<SessionId> {
         self.session_generation += 1;
         self.pending_approval = None;
         self.busy = false;
@@ -525,6 +797,47 @@ impl AssistantState {
         self.entries.push(entry);
     }
 
+    /// Fills in the result on the matching tool card. If the request was never shown
+    /// (e.g. a result arrived after a provider switch), append a completed card so the
+    /// outcome is still visible rather than dropped.
+    fn complete_tool_call(
+        &mut self,
+        call_id: &str,
+        tool_name: &str,
+        result: String,
+        is_error: bool,
+    ) {
+        let status = if is_error {
+            ToolStatus::Failed
+        } else {
+            ToolStatus::Done
+        };
+        for entry in self.entries.iter_mut().rev() {
+            let AssistantEntry::Tool {
+                call_id: id,
+                status: slot,
+                result: slot_result,
+                ..
+            } = entry
+            else {
+                continue;
+            };
+            if id != call_id {
+                continue;
+            }
+            *slot = status;
+            *slot_result = Some(result);
+            return;
+        }
+        self.push_entry(AssistantEntry::Tool {
+            call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            arguments: String::new(),
+            status,
+            result: Some(result),
+        });
+    }
+
     fn apply_agent_event(&mut self, event: AgentEvent, cx: &mut Context<Editor>) {
         match event {
             AgentEvent::MessageChunk(chunk) => {
@@ -535,8 +848,7 @@ impl AssistantState {
                     }
                     Some(AssistantEntry::Thought(_))
                     | Some(AssistantEntry::User(_))
-                    | Some(AssistantEntry::ToolCall { .. })
-                    | Some(AssistantEntry::ToolResult { .. })
+                    | Some(AssistantEntry::Tool { .. })
                     | Some(AssistantEntry::Info(_))
                     | Some(AssistantEntry::Error(_))
                     | None => false,
@@ -553,8 +865,7 @@ impl AssistantState {
                     }
                     Some(AssistantEntry::Message(_))
                     | Some(AssistantEntry::User(_))
-                    | Some(AssistantEntry::ToolCall { .. })
-                    | Some(AssistantEntry::ToolResult { .. })
+                    | Some(AssistantEntry::Tool { .. })
                     | Some(AssistantEntry::Info(_))
                     | Some(AssistantEntry::Error(_))
                     | None => false,
@@ -564,28 +875,27 @@ impl AssistantState {
                 }
             }
             AgentEvent::ToolCallRequested {
+                call_id,
                 tool_name,
                 arguments,
-                ..
             } => {
-                self.push_entry(AssistantEntry::ToolCall {
+                self.push_entry(AssistantEntry::Tool {
+                    call_id,
                     tool_name,
                     arguments: arguments.to_string(),
+                    status: ToolStatus::Running,
+                    result: None,
                 });
             }
             AgentEvent::ToolCallResult {
+                call_id,
                 tool_name,
                 result,
                 is_error,
-                ..
             } => {
                 // 进程内执行的提供方由编辑器回填真实结果，忽略其自带的占位结果。
                 if !self.provider_executes_in_process() {
-                    self.push_entry(AssistantEntry::ToolResult {
-                        tool_name,
-                        result: result.to_string(),
-                        is_error,
-                    });
+                    self.complete_tool_call(&call_id, &tool_name, result.to_string(), is_error);
                 }
             }
             AgentEvent::ApprovalRequested {
@@ -644,17 +954,24 @@ enum AssistantEntry {
     User(String),
     Message(String),
     Thought(String),
-    ToolCall {
+    /// One MCP tool call, from request through result. `call_id` ties the streamed
+    /// result back to this card so it updates in place instead of appending a second block.
+    Tool {
+        call_id: String,
         tool_name: String,
         arguments: String,
-    },
-    ToolResult {
-        tool_name: String,
-        result: String,
-        is_error: bool,
+        status: ToolStatus,
+        result: Option<String>,
     },
     Info(String),
     Error(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolStatus {
+    Running,
+    Done,
+    Failed,
 }
 
 struct AssistantApproval {
@@ -681,6 +998,12 @@ struct AssistantToolOutcome {
 struct AssistantProvider {
     id: &'static str,
     display_name: &'static str,
+    /// How the adapter talks to the agent: a CLI, an app-server, ACP, or in-process.
+    transport: &'static str,
+    /// The model this provider runs by default; shown beside its name in the chooser.
+    model: &'static str,
+    /// Brand dot hue; identifies the agent without tinting the chrome.
+    hue: u32,
     /// True when the editor executes the provider's tool calls in-process (offline Mock).
     /// Self-executing providers (ACP/Codex/Claude) run their own tools and only stream results.
     executes_in_process: bool,
@@ -690,26 +1013,41 @@ const ASSISTANT_PROVIDERS: [AssistantProvider; 5] = [
     AssistantProvider {
         id: "mock",
         display_name: "Mock Assistant (Offline)",
+        transport: "Offline",
+        model: "Demo loop",
+        hue: 0x8a90a2,
         executes_in_process: true,
     },
     AssistantProvider {
         id: "acp-antigravity",
         display_name: "Antigravity (ACP)",
+        transport: "ACP",
+        model: "Gemini 3 Pro",
+        hue: 0xa5b4fc,
         executes_in_process: false,
     },
     AssistantProvider {
         id: "acp-gemini",
         display_name: "Gemini CLI (ACP)",
+        transport: "ACP",
+        model: "2.5 Pro",
+        hue: 0x4285f4,
         executes_in_process: false,
     },
     AssistantProvider {
         id: "codex-app-server",
         display_name: "Codex (App-Server)",
+        transport: "App-Server",
+        model: "GPT-5.4",
+        hue: 0x10a37f,
         executes_in_process: false,
     },
     AssistantProvider {
         id: "claude-cli",
         display_name: "Claude Code (CLI)",
+        transport: "CLI",
+        model: "Sonnet 4.5",
+        hue: 0xd97757,
         executes_in_process: false,
     },
 ];
@@ -835,65 +1173,69 @@ fn run_assistant_tool_background(
     }
 }
 
-fn assistant_entry_view(entry: &AssistantEntry) -> gpui::AnyElement {
-    match entry {
+fn assistant_entry_view(
+    entry: &AssistantEntry,
+    show_header: bool,
+    provider: &AssistantProvider,
+) -> gpui::AnyElement {
+    let content = match entry {
         AssistantEntry::User(message) => div()
             .flex()
             .justify_end()
             .child(
                 div()
+                    .min_w_0()
                     .max_w(px(340.0))
                     .rounded(px(8.0))
-                    .bg(rgb(SURFACE_HOVER))
-                    .p_2()
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
+                    .rounded_br(px(2.0))
+                    .bg(rgb(ACCENT_BACKGROUND))
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .text_size(px(11.0))
+                    .line_height(px(20.0))
+                    .text_color(rgb(TEXT))
                     .child(message.clone()),
             )
             .into_any_element(),
         AssistantEntry::Message(message) => div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(assistant_entry_label("ASSISTANT", ACCENT))
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
-                    .child(message.clone()),
-            )
+            .text_size(px(11.0))
+            .line_height(px(20.0))
+            .text_color(rgb(TEXT))
+            .child(message.clone())
             .into_any_element(),
         AssistantEntry::Thought(thought) => div()
+            .rounded(px(5.0))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(BACKGROUND))
+            .px(px(8.0))
+            .py(px(6.0))
             .flex()
             .flex_col()
             .gap_1()
-            .child(assistant_entry_label("THOUGHT", MUTED))
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .line_height(px(17.0))
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(MUTED))
+                    .child("Thinking"),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .line_height(px(16.0))
                     .text_color(rgb(MUTED))
                     .child(thought.clone()),
             )
             .into_any_element(),
-        AssistantEntry::ToolCall {
+        AssistantEntry::Tool {
             tool_name,
             arguments,
-        } => assistant_monospace_block_view("TOOL CALL", tool_name, arguments, LINK)
-            .into_any_element(),
-        AssistantEntry::ToolResult {
-            tool_name,
+            status,
             result,
-            is_error,
-        } => {
-            let color = if *is_error {
-                ERROR
-            } else {
-                MUTED
-            };
-            assistant_monospace_block_view("TOOL RESULT", tool_name, result, color)
-                .into_any_element()
-        }
+            ..
+        } => assistant_tool_card_view(tool_name, arguments, *status, result.as_deref())
+            .into_any_element(),
         AssistantEntry::Info(info) => div()
             .text_size(px(11.0))
             .line_height(px(16.0))
@@ -901,14 +1243,173 @@ fn assistant_entry_view(entry: &AssistantEntry) -> gpui::AnyElement {
             .child(info.clone())
             .into_any_element(),
         AssistantEntry::Error(error) => div()
-            .rounded(px(6.0))
+            .rounded(px(5.0))
+            .border_1()
+            .border_color(rgb(ERROR))
             .bg(rgb(SURFACE))
-            .p_2()
-            .text_size(px(12.0))
-            .line_height(px(18.0))
-            .text_color(rgb(ERROR))
-            .child(error.clone())
+            .p(px(10.0))
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                svg()
+                    .path(IconName::Warning.path())
+                    .size(px(13.0))
+                    .text_color(rgb(ERROR)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .text_size(px(11.0))
+                    .line_height(px(16.0))
+                    .text_color(rgb(ERROR))
+                    .child(error.clone()),
+            )
             .into_any_element(),
+    };
+    if show_header {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(assistant_speaker_header_view(provider))
+            .child(content)
+            .into_any_element()
+    } else {
+        content
+    }
+}
+
+/// Assistant-generated content that belongs to one speaker turn. User and Info entries
+/// break the turn, so the next assistant block gets a fresh speaker header.
+fn assistant_entry_is_prose(entry: &AssistantEntry) -> bool {
+    matches!(
+        entry,
+        AssistantEntry::Message(_)
+            | AssistantEntry::Thought(_)
+            | AssistantEntry::Tool { .. }
+            | AssistantEntry::Error(_)
+    )
+}
+
+fn assistant_speaker_header_view(provider: &AssistantProvider) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .child(assistant_dot(provider.hue, 6.0))
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(MUTED))
+                .child(provider.display_name),
+        )
+}
+
+fn assistant_tool_card_view(
+    tool_name: &str,
+    arguments: &str,
+    status: ToolStatus,
+    result: Option<&str>,
+) -> gpui::Div {
+    let result_color = if status == ToolStatus::Failed {
+        ERROR
+    } else {
+        MUTED
+    };
+    div()
+        .overflow_hidden()
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(BACKGROUND))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(32.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px(px(10.0))
+                .border_b_1()
+                .border_color(rgb(BORDER))
+                .child(
+                    svg()
+                        .path(IconName::Plug.path())
+                        .size(px(12.0))
+                        .text_color(rgb(MUTED)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .font_family("monospace")
+                        .text_size(px(10.0))
+                        .text_color(rgb(TEXT))
+                        .text_ellipsis()
+                        .child(tool_name.to_string()),
+                )
+                .child(assistant_status_pill_view(status)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .px(px(10.0))
+                .py(px(8.0))
+                .when(!arguments.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .font_family("monospace")
+                            .text_size(px(9.0))
+                            .line_height(px(16.0))
+                            .text_color(rgb(MUTED))
+                            .child(arguments.to_string()),
+                    )
+                })
+                .when_some(result, |this, result| {
+                    this.child(
+                        div()
+                            .text_size(px(10.0))
+                            .line_height(px(16.0))
+                            .text_color(rgb(result_color))
+                            .child(result.to_string()),
+                    )
+                }),
+        )
+}
+
+fn assistant_status_pill_view(status: ToolStatus) -> gpui::Div {
+    let (label, color) = assistant_tool_status_label(status);
+    div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .rounded(px(3.0))
+        .bg(rgb(SURFACE))
+        .px(px(6.0))
+        .py(px(2.0))
+        .child(assistant_dot(color, 5.0))
+        .child(
+            div()
+                .text_size(px(9.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(color))
+                .child(label),
+        )
+}
+
+fn assistant_tool_status_label(status: ToolStatus) -> (&'static str, u32) {
+    match status {
+        ToolStatus::Running => ("Running", WARNING),
+        ToolStatus::Done => ("Done", SUCCESS),
+        ToolStatus::Failed => ("Failed", ERROR),
     }
 }
 
@@ -919,106 +1420,647 @@ fn assistant_approval_card_view(
 ) -> gpui::AnyElement {
     div()
         .flex_shrink_0()
-        .m_3()
-        .p_3()
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(rgb(ACCENT))
-        .bg(rgb(SURFACE))
+        .mx_3()
+        .mb_3()
         .flex()
-        .flex_col()
-        .gap_2()
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(BACKGROUND))
+        .overflow_hidden()
+        .child(div().w(px(2.0)).flex_shrink_0().bg(rgb(ACCENT)))
         .child(
             div()
-                .text_size(px(13.0))
-                .font_weight(FontWeight::BOLD)
-                .text_color(rgb(ACCENT))
-                .child(approval.title.clone()),
-        )
-        .child(
-            div()
-                .text_size(px(12.0))
-                .line_height(px(18.0))
-                .child(approval.description.clone()),
-        )
-        .child(
-            div()
-                .font_family("monospace")
-                .text_size(px(11.0))
-                .text_color(rgb(MUTED))
-                .child(format!(
-                    "{} · {}",
-                    approval.tool_name, approval.command_summary
-                )),
-        )
-        .child(
-            div()
+                .flex_1()
+                .min_w_0()
+                .p(px(10.0))
                 .flex()
+                .flex_col()
                 .gap_2()
                 .child(
-                    button_cyberpunk_primary("assistant-approve", "Approve", true, window, cx)
-                        .on_click(cx.listener(|editor, _, _, cx| {
-                            editor.emit_event(
-                                cx,
-                                AppEvent::AssistantApprovalDecided { approved: true },
-                            );
-                        })),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            svg()
+                                .path(IconName::Shield.path())
+                                .size(px(13.0))
+                                .text_color(rgb(ACCENT)),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(TEXT))
+                                .text_ellipsis()
+                                .child(approval.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .font_family("monospace")
+                                .text_size(px(9.0))
+                                .text_color(rgb(MUTED))
+                                .child(approval.tool_name.clone()),
+                        ),
                 )
                 .child(
-                    button_cyberpunk_secondary("assistant-reject", "Reject", true, window, cx)
-                        .on_click(cx.listener(|editor, _, _, cx| {
-                            editor.emit_event(
+                    div()
+                        .text_size(px(10.0))
+                        .line_height(px(16.0))
+                        .text_color(rgb(MUTED))
+                        .child(approval.description.clone()),
+                )
+                .when(!approval.command_summary.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .rounded(px(4.0))
+                            .bg(rgb(SURFACE))
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .font_family("monospace")
+                            .text_size(px(10.0))
+                            .line_height(px(16.0))
+                            .text_color(rgb(LINK))
+                            .child(approval.command_summary.clone()),
+                    )
+                })
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            button_cyberpunk_primary(
+                                "assistant-approve",
+                                "Approve",
+                                true,
+                                window,
                                 cx,
-                                AppEvent::AssistantApprovalDecided { approved: false },
-                            );
-                        })),
+                            )
+                            .on_click(cx.listener(|editor, _, _, cx| {
+                                editor.emit_event(
+                                    cx,
+                                    AppEvent::AssistantApprovalDecided { approved: true },
+                                );
+                            })),
+                        )
+                        .child(
+                            button_cyberpunk_secondary(
+                                "assistant-reject",
+                                "Reject",
+                                true,
+                                window,
+                                cx,
+                            )
+                            .on_click(cx.listener(|editor, _, _, cx| {
+                                editor.emit_event(
+                                    cx,
+                                    AppEvent::AssistantApprovalDecided { approved: false },
+                                );
+                            })),
+                        ),
                 ),
         )
         .into_any_element()
 }
 
-fn assistant_monospace_block_view(
-    label: &'static str,
-    tool_name: &str,
-    body: &str,
-    label_color: u32,
-) -> gpui::Div {
+/// The header's model/provider chooser: brand dot, name, model, chevron. Opening it probes
+/// real readiness. One AgentProvider abstraction backs every entry, with the same tools.
+/// The composer's model picker: provider dot, name, chevron. Opens the same provider
+/// dropdown the old dock selector used, with real readiness per row.
+fn assistant_model_button_view(
+    assistant: &AssistantState,
+    cx: &mut Context<Editor>,
+) -> Stateful<gpui::Div> {
+    let provider = assistant.provider();
     div()
+        .id("assistant-model-button")
+        .h(px(28.0))
+        .flex_shrink_0()
         .flex()
-        .flex_col()
-        .gap_1()
+        .items_center()
+        .gap(px(6.0))
+        .rounded(px(3.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .px(px(8.0))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+        .on_click(cx.listener(|editor, _, _, cx| {
+            let opening = !editor.assistant.provider_menu_open;
+            editor.assistant.provider_menu_open = opening;
+            if opening {
+                editor.probe_assistant_providers(cx);
+            }
+            cx.notify();
+        }))
+        .child(assistant_dot(provider.hue, 7.0))
         .child(
             div()
+                .text_size(px(11.0))
+                .text_color(rgb(TEXT))
+                .child(provider.display_name),
+        )
+        .child(
+            svg()
+                .path(IconName::ArrowDown.path())
+                .size(px(11.0))
+                .text_color(rgb(MUTED)),
+        )
+}
+
+/// The window's left rail: one honest row per live session. History is not persisted
+/// yet, so an idle window says so instead of inventing past conversations.
+fn assistant_sessions_sidebar_view(
+    assistant: &AssistantState,
+    cx: &mut Context<Editor>,
+) -> gpui::Div {
+    let provider = assistant.provider();
+    let has_session = assistant.session.is_some();
+    div()
+        .w(px(240.0))
+        .h_full()
+        .flex_shrink_0()
+        .flex()
+        .flex_col()
+        .border_r_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(PANEL))
+        .child(
+            div()
+                .h(px(40.0))
+                .flex_shrink_0()
                 .flex()
                 .items_center()
-                .gap_2()
-                .child(assistant_entry_label(label, label_color))
+                .justify_between()
+                .px(px(12.0))
+                .border_b_1()
+                .border_color(rgb(BORDER))
                 .child(
                     div()
-                        .font_family("monospace")
                         .text_size(px(11.0))
-                        .text_color(rgb(LINK))
-                        .child(tool_name.to_string()),
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(TEXT))
+                        .child("Sessions"),
+                )
+                .child(assistant_new_chat_button_view("assistant-sidebar-new", cx)),
+        )
+        .child(
+            div()
+                .id("assistant-sessions")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .p(px(8.0))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .when(has_session, |this| {
+                    this.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .rounded(px(6.0))
+                            .px(px(10.0))
+                            .py(px(8.0))
+                            .bg(rgb(SURFACE))
+                            .border_1()
+                            .border_color(rgb(ACCENT))
+                            .child(assistant_dot(provider.hue, 7.0))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(rgb(TEXT))
+                                            .text_ellipsis()
+                                            .child("Current session"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .text_color(rgb(MUTED))
+                                            .text_ellipsis()
+                                            .child(format!(
+                                                "{} · {} messages",
+                                                provider.display_name,
+                                                assistant.entries.len()
+                                            )),
+                                    ),
+                            ),
+                    )
+                })
+                .when(!has_session, |this| {
+                    this.child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap_1()
+                            .px(px(12.0))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(MUTED))
+                                    .child("No sessions yet"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(MUTED))
+                                    .child("Send a message to start one."),
+                            ),
+                    )
+                }),
+        )
+}
+
+/// New chat: drops the live session and clears the thread. Shared by the sidebar
+/// header and the tab bar so both start a fresh conversation the same way.
+fn assistant_new_chat_button_view(
+    id: &'static str,
+    cx: &mut Context<Editor>,
+) -> Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h(px(24.0))
+        .w(px(24.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+        .on_click(cx.listener(|editor, _, _, cx| {
+            editor.emit_event(cx, AppEvent::AssistantNewChat);
+        }))
+        .child(
+            svg()
+                .path(IconName::Plus.path())
+                .size(px(12.0))
+                .text_color(rgb(TEXT)),
+        )
+}
+
+/// The provider dropdown: a click-away backdrop plus every registered agent with its
+/// transport, model and real readiness. Choosing a row emits one AssistantProviderSelected.
+fn assistant_provider_menu_view(
+    assistant: &AssistantState,
+    cx: &mut Context<Editor>,
+) -> gpui::Div {
+    let menu = div()
+        .absolute()
+        .bottom(px(96.0))
+        .left(px(252.0))
+        .right(px(12.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .p(px(3.0))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px(px(12.0))
+                .pt(px(8.0))
+                .pb(px(4.0))
+                .text_size(px(10.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(MUTED))
+                .child("PROVIDER"),
+        )
+        .children(
+            ASSISTANT_PROVIDERS
+                .iter()
+                .enumerate()
+                .map(|(index, provider)| {
+                    assistant_provider_row_view(assistant, index, provider, cx)
+                }),
+        );
+
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            div()
+                .id("assistant-provider-backdrop")
+                .absolute()
+                .inset_0()
+                .on_click(cx.listener(|editor, _, _, cx| {
+                    editor.assistant.provider_menu_open = false;
+                    cx.notify();
+                })),
+        )
+        .child(menu)
+}
+
+fn assistant_provider_row_view(
+    assistant: &AssistantState,
+    index: usize,
+    provider: &AssistantProvider,
+    cx: &mut Context<Editor>,
+) -> Stateful<gpui::Div> {
+    let selected = index == assistant.provider_index;
+    let readiness = assistant.provider_readiness[index];
+    let unavailable = readiness == Some(false);
+    let (readiness_label, readiness_color) = assistant_readiness_label(readiness);
+    let name_color = if unavailable {
+        MUTED
+    } else {
+        TEXT
+    };
+    div()
+        .id(("assistant-provider", index))
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .rounded(px(6.0))
+        .px(px(12.0))
+        .py(px(8.0))
+        .when(selected, |this| this.bg(rgb(SURFACE_HOVER)))
+        .when(!unavailable, |this| {
+            this.cursor(CursorStyle::PointingHand)
+                .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                .on_click(cx.listener(move |editor, _, _, cx| {
+                    editor.emit_event(cx, AppEvent::AssistantProviderSelected { index });
+                }))
+        })
+        .child(assistant_dot(provider.hue, 8.0))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_size(px(12.0))
+                                .text_color(rgb(name_color))
+                                .text_ellipsis()
+                                .child(provider.display_name),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .rounded(px(3.0))
+                                .bg(rgb(BACKGROUND))
+                                .px(px(4.0))
+                                .font_family("monospace")
+                                .text_size(px(8.0))
+                                .text_color(rgb(MUTED))
+                                .child(provider.transport),
+                        ),
+                )
+                .child(
+                    div()
+                        .mt(px(2.0))
+                        .text_size(px(10.0))
+                        .text_color(rgb(MUTED))
+                        .text_ellipsis()
+                        .child(provider.model),
                 ),
         )
         .child(
             div()
-                .rounded(px(6.0))
-                .bg(rgb(SURFACE))
-                .p_2()
-                .font_family("monospace")
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(assistant_dot(readiness_color, 5.0))
+                .child(
+                    div()
+                        .text_size(px(9.0))
+                        .text_color(rgb(readiness_color))
+                        .child(readiness_label),
+                ),
+        )
+        .when(selected, |this| {
+            this.child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(13.0))
+                    .text_color(rgb(LINK))
+                    .child("✓"),
+            )
+        })
+}
+
+fn assistant_dot(hue: u32, size: f32) -> gpui::Div {
+    div()
+        .flex_shrink_0()
+        .w(px(size))
+        .h(px(size))
+        .rounded_full()
+        .bg(rgb(hue))
+}
+
+fn assistant_readiness_label(readiness: Option<bool>) -> (&'static str, u32) {
+    match readiness {
+        Some(true) => ("Ready", SUCCESS),
+        Some(false) => ("Unavailable", MUTED),
+        None => ("Checking…", MUTED),
+    }
+}
+
+/// The composer's skill picker: sparkle, the active skill's name (or "Skills"), chevron.
+/// Tinted with the accent when a skill is active so the applied capability is visible.
+fn assistant_skill_button_view(
+    assistant: &AssistantState,
+    cx: &mut Context<Editor>,
+) -> Stateful<gpui::Div> {
+    let active = assistant.active_skill();
+    let (label, background, border, foreground) = match active {
+        Some(skill) => (skill.name.clone(), ACCENT_BACKGROUND, ACCENT, LINK),
+        None => ("Skills".to_string(), SURFACE, BORDER, TEXT),
+    };
+    div()
+        .id("assistant-skill-button")
+        .h(px(28.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .rounded(px(3.0))
+        .border_1()
+        .border_color(rgb(border))
+        .bg(rgb(background))
+        .px(px(8.0))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+        .on_click(cx.listener(|editor, _, _, cx| {
+            editor.assistant.skill_menu_open = !editor.assistant.skill_menu_open;
+            cx.notify();
+        }))
+        .child(
+            svg()
+                .path(IconName::Sparkle.path())
+                .size(px(13.0))
+                .text_color(rgb(foreground)),
+        )
+        .child(
+            div()
                 .text_size(px(11.0))
-                .line_height(px(16.0))
-                .text_color(rgb(TEXT))
-                .child(body.to_string()),
+                .text_color(rgb(foreground))
+                .child(label),
+        )
+        .child(
+            svg()
+                .path(IconName::ArrowDown.path())
+                .size(px(11.0))
+                .text_color(rgb(MUTED)),
         )
 }
 
-fn assistant_entry_label(label: &'static str, color: u32) -> gpui::Div {
+/// The skill dropdown: a click-away backdrop plus every discovered production skill with
+/// its real description. Choosing a row emits one AssistantSkillSelected.
+fn assistant_skill_menu_view(
+    assistant: &AssistantState,
+    cx: &mut Context<Editor>,
+) -> gpui::Div {
+    let mut skills = assistant.skills.list();
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    let empty = skills.is_empty();
+    let menu = div()
+        .absolute()
+        .bottom(px(96.0))
+        .left(px(252.0))
+        .right(px(12.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .p(px(3.0))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px(px(12.0))
+                .pt(px(8.0))
+                .pb(px(4.0))
+                .text_size(px(10.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(MUTED))
+                .child("SKILLS"),
+        )
+        .when(empty, |this| {
+            this.child(
+                div()
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .text_size(px(11.0))
+                    .text_color(rgb(MUTED))
+                    .child("No skills found."),
+            )
+        })
+        .children(
+            skills
+                .into_iter()
+                .enumerate()
+                .map(|(index, skill)| assistant_skill_row_view(assistant, index, skill, cx)),
+        );
+
     div()
-        .font_family("monospace")
-        .text_size(px(10.0))
-        .font_weight(FontWeight::BOLD)
-        .text_color(rgb(color))
-        .child(label)
+        .absolute()
+        .inset_0()
+        .child(
+            div()
+                .id("assistant-skill-backdrop")
+                .absolute()
+                .inset_0()
+                .on_click(cx.listener(|editor, _, _, cx| {
+                    editor.assistant.skill_menu_open = false;
+                    cx.notify();
+                })),
+        )
+        .child(menu)
+}
+
+fn assistant_skill_row_view(
+    assistant: &AssistantState,
+    index: usize,
+    skill: &SkillPackage,
+    cx: &mut Context<Editor>,
+) -> Stateful<gpui::Div> {
+    let active = assistant.skills.is_enabled(&skill.id);
+    let id = skill.id.clone();
+    let icon_color = if active {
+        LINK
+    } else {
+        MUTED
+    };
+    div()
+        .id(("assistant-skill", index))
+        .flex()
+        .items_start()
+        .gap(px(10.0))
+        .rounded(px(6.0))
+        .px(px(12.0))
+        .py(px(8.0))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+        .when(active, |this| this.bg(rgb(SURFACE_HOVER)))
+        .on_click(cx.listener(move |editor, _, _, cx| {
+            editor.emit_event(
+                cx,
+                AppEvent::AssistantSkillSelected { id: id.clone() },
+            );
+        }))
+        .child(
+            svg()
+                .path(IconName::Sparkle.path())
+                .size(px(14.0))
+                .text_color(rgb(icon_color)),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(TEXT))
+                        .child(skill.name.clone()),
+                )
+                .child(
+                    div()
+                        .mt(px(2.0))
+                        .text_size(px(10.0))
+                        .line_height(px(16.0))
+                        .text_color(rgb(MUTED))
+                        .child(skill.description.clone()),
+                ),
+        )
+        .when(active, |this| {
+            this.child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(13.0))
+                    .text_color(rgb(LINK))
+                    .child("✓"),
+            )
+        })
 }

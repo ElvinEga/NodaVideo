@@ -1,6 +1,6 @@
 use crate::edit_action::EditAction;
 use crate::editing::ClipClipboard;
-use crate::editor::{Editor, RightDockTab, WorkspaceTab};
+use crate::editor::{Editor, WorkspaceTab};
 use crate::event_bus::{AppEvent, EventBus};
 use crate::preview_events::PreviewEvent;
 use crate::timeline_interactions::TimelineTool;
@@ -34,7 +34,6 @@ actions!(
         ToggleFullscreen,
         ExitFullscreen,
         ToggleInspector,
-        ToggleAssistant,
         RevealInFinder,
         OpenInDefaultApp,
         QuitApp,
@@ -112,7 +111,7 @@ pub(crate) fn set_app_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Toggle Media Browser", ToggleMediaBrowser),
             MenuItem::action("Toggle Inspector", ToggleInspector),
-            MenuItem::action("Toggle AI Assistant", ToggleAssistant),
+            MenuItem::action("Open AI Assistant", SwitchToAiStudioWorkspace),
             MenuItem::separator(),
             MenuItem::action("Edit Workspace", SwitchToEditWorkspace),
             MenuItem::action("Color Workspace", SwitchToColorWorkspace),
@@ -196,8 +195,8 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-f", ToggleFullscreen, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("escape", ExitFullscreen, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("cmd-alt-i", ToggleDebugInspector, None),
-        KeyBinding::new("cmd-shift-a", ToggleAssistant, None),
-        KeyBinding::new("cmd-alt-a", ToggleAssistant, None),
+        KeyBinding::new("cmd-shift-a", SwitchToAiStudioWorkspace, None),
+        KeyBinding::new("cmd-alt-a", SwitchToAiStudioWorkspace, None),
         KeyBinding::new("cmd-i", ImportMedia, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("cmd-1", ToggleMediaBrowser, None),
         KeyBinding::new("cmd-2", ToggleInspector, None),
@@ -591,27 +590,7 @@ impl Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.show_inspector && self.right_dock == RightDockTab::Inspector {
-            self.show_inspector = false;
-        } else {
-            self.show_inspector = true;
-            self.right_dock = RightDockTab::Inspector;
-        }
-        cx.notify();
-    }
-
-    pub(crate) fn action_toggle_assistant(
-        &mut self,
-        _: &ToggleAssistant,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.show_inspector && self.right_dock == RightDockTab::Assistant {
-            self.show_inspector = false;
-        } else {
-            self.show_inspector = true;
-            self.right_dock = RightDockTab::Assistant;
-        }
+        self.show_inspector = !self.show_inspector;
         cx.notify();
     }
 
