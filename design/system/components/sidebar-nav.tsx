@@ -15,6 +15,7 @@ export const DESIGN_PAGES: DesignPage[] = [
     label: "Motion Graphics Editor",
     group: "Motion graphics",
   },
+  { file: "26-ai-assistant", label: "AI Assistant", group: "AI assistant" },
   { file: "01-project-picker", label: "Project picker", group: "Workspace" },
   { file: "16-preview-panel", label: "Preview panel", group: "Panels" },
   { file: "15-property-panel", label: "Property panel", group: "Panels" },

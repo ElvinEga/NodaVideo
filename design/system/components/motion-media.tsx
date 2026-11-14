@@ -15,7 +15,7 @@ import {
 // Motion graphics identity: a warm amber, distinct from purple text, blue video and teal
 // audio. A composition is a video-layer clip (it composites with alpha over lower tracks),
 // so its track stays "V" while the clip body reads as motion graphics.
-const MOTION = {
+export const MOTION = {
   fill: "#8a5a1e",
   border: "#a86e2c",
   badge: "#f0c987",
