@@ -24,7 +24,7 @@ pub struct McpToolDefinition {
 impl McpToolDefinition {
     /// Return the list of canonical editor tools supported by NodaVideo.
     pub fn all_tools() -> Vec<Self> {
-        vec![
+        let mut tools = vec![
             // Query Tools
             Self {
                 name: "get_project".into(),
@@ -51,6 +51,17 @@ impl McpToolDefinition {
             Self {
                 name: "get_selected_clips".into(),
                 description: "Get currently selected clips on the timeline.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+                is_mutation: false,
+                requires_approval: false,
+            },
+            Self {
+                name: "get_media_items".into(),
+                description: "List the imported media library (explorer media bin): id, name, kind, path, dimensions and duration. Independent of what is placed on the timeline.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {},
@@ -413,6 +424,25 @@ impl McpToolDefinition {
                 is_mutation: true,
                 requires_approval: false,
             },
-        ]
+        ];
+        for tool in &mut tools {
+            if tool.is_mutation {
+                if let Some(properties) = tool
+                    .input_schema
+                    .get_mut("properties")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    properties.insert(
+                        "expected_revision".into(),
+                        serde_json::json!({
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Optional project_revision from a previous result. The call is rejected as stale if the project has changed since, so the agent never overwrites newer user edits."
+                        }),
+                    );
+                }
+            }
+        }
+        tools
     }
 }

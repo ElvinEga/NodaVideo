@@ -21,6 +21,12 @@ pub enum McpError {
     #[error("User approval required for '{tool}': {reason}")]
     ApprovalRequired { tool: String, reason: String },
 
+    /// The project changed since the revision the caller expected.
+    #[error(
+        "Stale project revision: expected {expected} but the project is at {actual}; re-read state before retrying"
+    )]
+    StaleRevision { expected: u64, actual: u64 },
+
     /// Tool is recognized but cannot run in this process.
     #[error("Tool '{tool}' is unavailable: {reason}")]
     Unsupported { tool: String, reason: String },

@@ -23,6 +23,8 @@ pub struct McpExecutor {
     timeline: TimelineEditingState,
     selected_clips: HashSet<Ulid>,
     project_root: Option<PathBuf>,
+    revision: u64, // 种子状态的项目提交计数；commit 成功后自增，与编辑器保持一致。
+    media_library: Vec<Asset>, // 资源管理器媒体库快照；只读观察用，非时间线 assets。
 }
 
 // Public APIs only
@@ -32,6 +34,8 @@ impl McpExecutor {
             timeline,
             selected_clips: HashSet::new(),
             project_root: None,
+            revision: 0,
+            media_library: Vec::new(),
         }
     }
 
@@ -48,12 +52,31 @@ impl McpExecutor {
         self
     }
 
+    /// Seed the project revision the caller believes is current, for stale-state checks.
+    #[must_use]
+    pub fn with_revision(mut self, revision: u64) -> Self {
+        self.revision = revision;
+        self
+    }
+
+    /// Seed the explorer media library snapshot so read tools can observe imported media.
+    #[must_use]
+    pub fn with_media_library(mut self, media_library: Vec<Asset>) -> Self {
+        self.media_library = media_library;
+        self
+    }
+
     pub fn timeline(&self) -> &TimelineEditingState {
         &self.timeline
     }
 
     pub fn into_timeline(self) -> TimelineEditingState {
         self.timeline
+    }
+
+    /// The current project revision; advances only when a timeline edit commits.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Execute one MCP tool call.
@@ -79,10 +102,31 @@ impl McpExecutor {
             });
         }
 
-        match tool_name {
+        if def.is_mutation {
+            match args.get("expected_revision") {
+                None | Some(Value::Null) => {}
+                Some(value) => {
+                    let Some(expected) = value.as_u64() else {
+                        return Err(invalid(
+                            tool_name,
+                            "expected_revision must be a non-negative integer",
+                        ));
+                    };
+                    if expected != self.revision {
+                        return Err(McpError::StaleRevision {
+                            expected,
+                            actual: self.revision,
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut result = match tool_name {
             "get_project" => Ok(self.project_summary()),
             "get_timeline" => Ok(self.timeline_summary()),
             "get_selected_clips" => Ok(self.selected_clips_summary()),
+            "get_media_items" => Ok(self.media_library_summary()),
             "search_media" => self.search_media(args),
             "add_clip" => self.add_clip(args),
             "move_clip" => self.move_clip(args),
@@ -110,7 +154,11 @@ impl McpExecutor {
                         .to_string(),
             }),
             other => Err(McpError::ToolNotFound(other.to_string())),
+        }?;
+        if let Some(object) = result.as_object_mut() {
+            object.insert("project_revision".into(), json!(self.revision));
         }
+        Ok(result)
     }
 }
 
@@ -122,6 +170,17 @@ impl McpExecutor {
             "assets": self
                 .timeline
                 .assets
+                .iter()
+                .map(asset_json)
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn media_library_summary(&self) -> Value {
+        json!({
+            "count": self.media_library.len(),
+            "assets": self
+                .media_library
                 .iter()
                 .map(asset_json)
                 .collect::<Vec<_>>(),
@@ -705,6 +764,7 @@ impl McpExecutor {
         self.timeline = new_timeline;
         self.selected_clips
             .retain(|clip_id| self.timeline.clip(*clip_id).is_some());
+        self.revision += 1;
         Ok(())
     }
 
