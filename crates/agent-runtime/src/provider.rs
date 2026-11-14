@@ -20,6 +20,9 @@ pub struct AgentConfig {
     /// Optional specific model name requested for the session.
     pub model: Option<String>,
 
+    /// Optional reasoning-effort variant requested for the session (e.g. "low", "high", "max").
+    pub effort: Option<String>,
+
     /// Optional custom system instructions or context.
     pub system_prompt: Option<String>,
 
@@ -38,12 +41,36 @@ impl Default for AgentConfig {
         Self {
             provider_id: "mock".into(),
             model: None,
+            effort: None,
             system_prompt: None,
             skills: Vec::new(),
             environment: HashMap::new(),
             working_dir: None,
         }
     }
+}
+
+/// One model a provider can run, as reported by the provider itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentModel {
+    /// Identifier passed back as `AgentConfig::model` (e.g. "gpt-6-luna", "claude-sonnet-4-6").
+    pub id: String,
+
+    /// Human-friendly label for the picker.
+    pub display_name: String,
+
+    /// Optional one-line description from the provider catalog.
+    pub description: Option<String>,
+
+    /// Reasoning-effort variants this model supports, in provider order; empty when the
+    /// model has no effort dimension.
+    pub efforts: Vec<String>,
+
+    /// The effort used when `AgentConfig::effort` is None.
+    pub default_effort: Option<String>,
+
+    /// True when the provider marks this model as its default.
+    pub is_default: bool,
 }
 
 /// Pluggable interface that every agent provider adapter must implement.
@@ -61,6 +88,12 @@ pub trait AgentProvider: Send + Sync {
 
     /// Probe whether the underlying CLI tool or service is installed and available locally.
     async fn is_available(&self) -> bool;
+
+    /// List the models this provider can actually run, queried from the provider itself.
+    /// The default is an empty catalog for providers that expose no model listing.
+    async fn list_models(&self) -> Result<Vec<AgentModel>, AgentRuntimeError> {
+        Ok(Vec::new())
+    }
 
     /// Start a new conversation or task session with the provider.
     async fn start_session(&self, config: AgentConfig) -> Result<SessionId, AgentRuntimeError>;

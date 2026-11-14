@@ -11,6 +11,12 @@ use ulid::Ulid;
 pub(crate) struct AssistantSession {
     pub(crate) id: Ulid,
     pub(crate) provider_id: String,
+    /// Model id the transcript ran with; None means the provider default.
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    /// Reasoning-effort variant the transcript ran with; None means the model default.
+    #[serde(default)]
+    pub(crate) effort: Option<String>,
     pub(crate) created_at_ms: u64,
     pub(crate) updated_at_ms: u64,
     pub(crate) title: String,

@@ -9,7 +9,7 @@ use tokio::sync::broadcast;
 use crate::error::AgentRuntimeError;
 use crate::event::AgentEvent;
 use crate::id::SessionId;
-use crate::provider::{AgentConfig, AgentProvider};
+use crate::provider::{AgentConfig, AgentModel, AgentProvider};
 
 struct SessionState {
     _config: AgentConfig,
@@ -59,6 +59,17 @@ impl AgentProvider for MockAgentProvider {
 
     async fn is_available(&self) -> bool {
         true
+    }
+
+    async fn list_models(&self) -> Result<Vec<AgentModel>, AgentRuntimeError> {
+        Ok(vec![AgentModel {
+            id: "demo-loop".into(),
+            display_name: "Demo loop".into(),
+            description: Some("Scripted offline responses; no external model.".into()),
+            efforts: Vec::new(),
+            default_effort: None,
+            is_default: true,
+        }])
     }
 
     async fn start_session(&self, config: AgentConfig) -> Result<SessionId, AgentRuntimeError> {

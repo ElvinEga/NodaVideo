@@ -42,3 +42,21 @@ pub struct CodexRpcNotification {
     #[serde(default)]
     pub params: Option<serde_json::Value>,
 }
+
+/// JSON-RPC 2.0 success response sent back to a server-initiated request (e.g. approvals).
+#[derive(Debug, Clone, Serialize)]
+pub struct CodexRpcResultResponse {
+    pub jsonrpc: String,
+    pub id: u64,
+    pub result: serde_json::Value,
+}
+
+impl CodexRpcResultResponse {
+    pub fn new(id: u64, result: serde_json::Value) -> Self {
+        Self {
+            jsonrpc: "2.0".into(),
+            id,
+            result,
+        }
+    }
+}

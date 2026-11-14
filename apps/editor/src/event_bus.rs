@@ -156,6 +156,16 @@ pub(crate) enum AppEvent {
     AssistantProviderSelected {
         index: usize,
     },
+    /// The user chose a model for the active provider; None restores the provider default.
+    AssistantModelSelected {
+        model: Option<String>,
+    },
+    /// The user chose a reasoning-effort variant; None restores the model default.
+    AssistantEffortSelected {
+        effort: Option<String>,
+    },
+    /// The user asked to retry loading the active provider's model catalog.
+    AssistantModelsRefresh,
     /// The user approved or rejected the pending assistant action.
     AssistantApprovalDecided {
         approved: bool,
@@ -697,6 +707,15 @@ async fn handle_app_event(
         }
         AppEvent::AssistantProviderSelected { index } => {
             editor.update(cx, |editor, cx| editor.select_assistant_provider(index, cx));
+        }
+        AppEvent::AssistantModelSelected { model } => {
+            editor.update(cx, |editor, cx| editor.select_assistant_model(model, cx));
+        }
+        AppEvent::AssistantEffortSelected { effort } => {
+            editor.update(cx, |editor, cx| editor.select_assistant_effort(effort, cx));
+        }
+        AppEvent::AssistantModelsRefresh => {
+            editor.update(cx, |editor, cx| editor.refresh_assistant_models(cx));
         }
         AppEvent::AssistantApprovalDecided { approved } => {
             editor.update(cx, |editor, cx| {

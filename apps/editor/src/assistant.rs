@@ -28,7 +28,7 @@ use nodavideo_agent_acp::AcpAgentProvider;
 use nodavideo_agent_claude::ClaudeAgentProvider;
 use nodavideo_agent_codex::CodexAgentProvider;
 use nodavideo_agent_runtime::{
-    AgentConfig, AgentEvent, AgentRuntime, MockAgentProvider, SessionId,
+    AgentConfig, AgentEvent, AgentModel, AgentRuntime, MockAgentProvider, SessionId,
 };
 use nodavideo_hyperframes_bridge::{CompositionAsset, load_compositions};
 use nodavideo_mcp_server::{ExplorerChange, McpError, McpExecutor};
@@ -56,6 +56,14 @@ pub(crate) struct AssistantState {
     provider_menu_open: bool,
     /// Per-provider readiness probe: None until `is_available` answers. 与 entries 无关，可跨会话缓存。
     provider_readiness: Vec<Option<bool>>,
+    /// Per-provider model catalog, queried from the provider itself; cached across sessions.
+    model_catalogs: Vec<ModelCatalog>,
+    /// Per-provider chosen model id; None means the provider's default model.
+    model_choices: Vec<Option<String>>,
+    /// Per-provider chosen reasoning effort; None means the active model's default.
+    effort_choices: Vec<Option<String>>,
+    model_menu_open: bool,
+    effort_menu_open: bool,
     /// Production skills discovered from `skills/`; the enabled set is the source of truth
     /// for the active skill, so the composer button never stores a duplicate copy.
     skills: SkillRegistry,
@@ -114,6 +122,11 @@ impl AssistantState {
             busy: false,
             provider_menu_open: false,
             provider_readiness: vec![None; ASSISTANT_PROVIDERS.len()],
+            model_catalogs: vec![ModelCatalog::NotProbed; ASSISTANT_PROVIDERS.len()],
+            model_choices: vec![None; ASSISTANT_PROVIDERS.len()],
+            effort_choices: vec![None; ASSISTANT_PROVIDERS.len()],
+            model_menu_open: false,
+            effort_menu_open: false,
             skills: SkillRegistry::new(),
             skill_menu_open: false,
             sessions_sidebar_open: true,
@@ -362,6 +375,10 @@ impl Editor {
                     .py(px(8.0))
                     .child(assistant_skill_button_view(assistant, cx))
                     .child(assistant_model_button_view(assistant, cx))
+                    .child(assistant_model_picker_view(assistant, cx))
+                    .when(!assistant.effort_options().is_empty(), |this| {
+                        this.child(assistant_effort_picker_view(assistant, cx))
+                    })
                     .child(div().flex_1())
                     .child(if assistant.busy {
                         button_cyberpunk_secondary("assistant-stop", "Stop", true, window, cx)
@@ -419,6 +436,25 @@ impl Editor {
             Some(revision) => format!("MCP gateway · rev {revision}"),
             None => "MCP gateway · no timeline open".to_string(),
         };
+        let model_status = match viewing {
+            Some(session) => {
+                let model_label = match &session.model {
+                    Some(model) => model.clone(),
+                    None => "Default model".to_string(),
+                };
+                match &session.effort {
+                    Some(effort) => format!("{model_label} · {}", effort_display_name(effort)),
+                    None => model_label,
+                }
+            }
+            None => {
+                if assistant.effort_options().is_empty() {
+                    assistant.model_label()
+                } else {
+                    format!("{} · {}", assistant.model_label(), assistant.effort_label())
+                }
+            }
+        };
         let status_bar = div()
             .h(px(28.0))
             .flex_shrink_0()
@@ -451,7 +487,7 @@ impl Editor {
                     .child(
                         div()
                             .text_color(rgb(MUTED))
-                            .child(format!("{} · {}", provider.transport, provider.model)),
+                            .child(format!("{} · {}", thread_provider.transport, model_status)),
                     )
                     .child(div().text_color(rgb(approval_color)).child(approval_label)),
             );
@@ -487,6 +523,12 @@ impl Editor {
             .when(assistant.skill_menu_open, |this| {
                 this.child(assistant_skill_menu_view(assistant, cx))
             })
+            .when(assistant.model_menu_open, |this| {
+                this.child(assistant_model_menu_view(assistant, cx))
+            })
+            .when(assistant.effort_menu_open, |this| {
+                this.child(assistant_effort_menu_view(assistant, cx))
+            })
             .into_any_element()
     }
 
@@ -511,6 +553,8 @@ impl Editor {
         let existing_session = self.assistant.session;
         let generation = self.assistant.session_generation;
         let working_dir = self.project_root.clone();
+        let model = self.assistant.active_model().map(|model| model.id.clone());
+        let effort = self.assistant.active_effort().map(str::to_string);
 
         // Providers deliver only the message string, so the active skill's instructions ride
         // along on the first message of a session. A reused session already carries them; a
@@ -528,6 +572,8 @@ impl Editor {
                 None => {
                     let config = AgentConfig {
                         provider_id,
+                        model,
+                        effort,
                         working_dir: Some(working_dir),
                         ..AgentConfig::default()
                     };
@@ -675,7 +721,89 @@ impl Editor {
         )));
         self.assistant.scroll.scroll_to_bottom();
         self.persist_assistant_transcript(cx);
+        self.probe_assistant_models(cx);
         cx.notify();
+    }
+
+    /// Choosing a model resets the live session so the next message starts the agent
+    /// with the new model; an effort the new model does not offer is dropped.
+    pub(super) fn select_assistant_model(&mut self, model: Option<String>, cx: &mut Context<Self>) {
+        self.assistant.model_menu_open = false;
+        let index = self.assistant.provider_index;
+        if self.assistant.model_choices[index] == model {
+            cx.notify();
+            return;
+        }
+        self.assistant.model_choices[index] = model.clone();
+        let supported = match self.assistant.active_model() {
+            Some(active) => active.efforts.clone(),
+            None => Vec::new(),
+        };
+        if let Some(effort) = &self.assistant.effort_choices[index]
+            && !supported.contains(effort)
+        {
+            self.assistant.effort_choices[index] = None;
+        }
+        let previous_session = self.assistant.reset_session();
+        let label = match model {
+            Some(_) => self.assistant.model_label(),
+            None => format!("{} (default)", self.assistant.model_label()),
+        };
+        self.assistant
+            .push_entry(AssistantEntry::Info(format!("Model: {label}")));
+        self.assistant.scroll.scroll_to_bottom();
+        self.persist_assistant_transcript(cx);
+        cx.notify();
+        if let Some(session) = previous_session {
+            let runtime = self.assistant.runtime.clone();
+            gpui_tokio::Tokio::spawn(cx, async move {
+                if let Err(error) = runtime.cancel(session).await {
+                    log::debug!("Could not cancel the previous agent session: {error:?}");
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// Choosing an effort resets the live session so the next turn runs with it.
+    pub(super) fn select_assistant_effort(
+        &mut self,
+        effort: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.assistant.effort_menu_open = false;
+        let index = self.assistant.provider_index;
+        if self.assistant.effort_choices[index] == effort {
+            cx.notify();
+            return;
+        }
+        self.assistant.effort_choices[index] = effort.clone();
+        let previous_session = self.assistant.reset_session();
+        let label = match effort {
+            Some(effort) => effort_display_name(&effort),
+            None => format!("{} (default)", self.assistant.effort_label()),
+        };
+        self.assistant
+            .push_entry(AssistantEntry::Info(format!("Reasoning effort: {label}")));
+        self.assistant.scroll.scroll_to_bottom();
+        self.persist_assistant_transcript(cx);
+        cx.notify();
+        if let Some(session) = previous_session {
+            let runtime = self.assistant.runtime.clone();
+            gpui_tokio::Tokio::spawn(cx, async move {
+                if let Err(error) = runtime.cancel(session).await {
+                    log::debug!("Could not cancel the previous agent session: {error:?}");
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// Retries a failed model catalog probe for the active provider.
+    pub(super) fn refresh_assistant_models(&mut self, cx: &mut Context<Self>) {
+        let index = self.assistant.provider_index;
+        self.assistant.model_catalogs[index] = ModelCatalog::NotProbed;
+        self.probe_assistant_models(cx);
     }
 
     /// Discovers the production skills shipped in `skills/` off the UI thread, using the
@@ -735,6 +863,8 @@ impl Editor {
         self.assistant.transcript_id = None;
         self.assistant.provider_menu_open = false;
         self.assistant.skill_menu_open = false;
+        self.assistant.model_menu_open = false;
+        self.assistant.effort_menu_open = false;
         cx.notify();
         if let Some(session) = previous_session {
             let runtime = self.assistant.runtime.clone();
@@ -777,6 +907,8 @@ impl Editor {
         let session = AssistantSession {
             id,
             provider_id: self.assistant.provider_id().to_string(),
+            model: self.assistant.model_choices[self.assistant.provider_index].clone(),
+            effort: self.assistant.effort_choices[self.assistant.provider_index].clone(),
             created_at_ms: self.assistant.transcript_created_at_ms,
             updated_at_ms: now_ms(),
             title: session_title(&self.assistant.entries),
@@ -883,6 +1015,55 @@ impl Editor {
             })
             .detach();
         }
+    }
+
+    /// Queries the active provider's real model catalog off the UI thread. Results cache
+    /// across sessions; a failed probe stays failed until the user retries from the menu.
+    fn probe_assistant_models(&mut self, cx: &mut Context<Self>) {
+        let index = self.assistant.provider_index;
+        match &self.assistant.model_catalogs[index] {
+            ModelCatalog::Loading | ModelCatalog::Loaded(_) => return,
+            ModelCatalog::NotProbed | ModelCatalog::Failed(_) => {}
+        }
+        self.assistant.model_catalogs[index] = ModelCatalog::Loading;
+        cx.notify();
+        let runtime = self.assistant.runtime.clone();
+        let provider_id = self.assistant.provider_id().to_string();
+        cx.spawn(async move |editor, cx| {
+            let listed = gpui_tokio::Tokio::spawn(cx, async move {
+                match runtime.get_provider(&provider_id).await {
+                    Some(provider) => provider.list_models().await,
+                    None => Err(
+                        nodavideo_agent_runtime::AgentRuntimeError::ProviderUnavailable(
+                            provider_id.clone(),
+                            "the provider is not registered".into(),
+                        ),
+                    ),
+                }
+            })
+            .await;
+            let catalog = match listed {
+                Ok(Ok(models)) => ModelCatalog::Loaded(models),
+                Ok(Err(error)) => ModelCatalog::Failed(error.to_string()),
+                Err(error) => ModelCatalog::Failed(error.to_string()),
+            };
+            let _ = editor.update(cx, |editor, cx| {
+                editor.assistant.model_catalogs[index] = catalog;
+                if index == editor.assistant.provider_index {
+                    let supported = match editor.assistant.active_model() {
+                        Some(model) => model.efforts.clone(),
+                        None => Vec::new(),
+                    };
+                    if let Some(effort) = &editor.assistant.effort_choices[index]
+                        && !supported.contains(effort)
+                    {
+                        editor.assistant.effort_choices[index] = None;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Runs an in-process provider's tool call off the UI thread, then applies the result.
@@ -1021,9 +1202,88 @@ impl AssistantState {
         self.provider().executes_in_process
     }
 
+    fn catalog(&self) -> &ModelCatalog {
+        &self.model_catalogs[self.provider_index]
+    }
+
+    fn catalog_models(&self) -> &[AgentModel] {
+        match self.catalog() {
+            ModelCatalog::Loaded(models) => models,
+            ModelCatalog::NotProbed | ModelCatalog::Loading | ModelCatalog::Failed(_) => &[],
+        }
+    }
+
+    /// The model that will actually run: the explicit choice, else the catalog default.
+    fn active_model(&self) -> Option<&AgentModel> {
+        let models = self.catalog_models();
+        if let Some(choice) = &self.model_choices[self.provider_index]
+            && let Some(model) = models.iter().find(|model| &model.id == choice)
+        {
+            return Some(model);
+        }
+        match models.iter().find(|model| model.is_default) {
+            Some(model) => Some(model),
+            None => models.first(),
+        }
+    }
+
+    fn model_label(&self) -> String {
+        match self.active_model() {
+            Some(model) => model.display_name.clone(),
+            None => match self.catalog() {
+                ModelCatalog::Loading => "Loading models…".to_string(),
+                ModelCatalog::Failed(_) => "Model list unavailable".to_string(),
+                ModelCatalog::Loaded(_) => "No models reported".to_string(),
+                ModelCatalog::NotProbed => "Default model".to_string(),
+            },
+        }
+    }
+
+    /// Model label for a provider menu row, which may not be the active provider.
+    fn provider_model_label(&self, index: usize) -> String {
+        if let Some(choice) = &self.model_choices[index] {
+            if let ModelCatalog::Loaded(models) = &self.model_catalogs[index]
+                && let Some(model) = models.iter().find(|model| &model.id == choice)
+            {
+                return model.display_name.clone();
+            }
+            return choice.clone();
+        }
+        "Default model".to_string()
+    }
+
+    fn effort_options(&self) -> &[String] {
+        match self.active_model() {
+            Some(model) => &model.efforts,
+            None => &[],
+        }
+    }
+
+    /// The effort that will actually run; a choice the active model does not offer
+    /// falls back to the model default instead of reaching the backend.
+    fn active_effort(&self) -> Option<&str> {
+        let options = self.effort_options();
+        if let Some(choice) = self.effort_choices[self.provider_index].as_deref()
+            && options.iter().any(|effort| effort == choice)
+        {
+            return Some(choice);
+        }
+        self.active_model()
+            .and_then(|model| model.default_effort.as_deref())
+    }
+
+    fn effort_label(&self) -> String {
+        match self.active_effort() {
+            Some(effort) => effort_display_name(effort),
+            None => "Default".to_string(),
+        }
+    }
+
     fn select_provider(&mut self, index: usize) -> Option<SessionId> {
         self.provider_index = index;
         self.provider_menu_open = false;
+        self.model_menu_open = false;
+        self.effort_menu_open = false;
         self.reset_session()
     }
 
@@ -1274,14 +1534,21 @@ struct AssistantToolOutcome {
     explorer_change: Option<ExplorerChange>,
 }
 
+/// Lifecycle of one provider's model catalog probe.
+#[derive(Clone)]
+enum ModelCatalog {
+    NotProbed,
+    Loading,
+    Loaded(Vec<AgentModel>),
+    Failed(String),
+}
+
 #[derive(Clone, Copy)]
 struct AssistantProvider {
     id: &'static str,
     display_name: &'static str,
     /// How the adapter talks to the agent: a CLI, an app-server, ACP, or in-process.
     transport: &'static str,
-    /// The model this provider runs by default; shown beside its name in the chooser.
-    model: &'static str,
     /// Brand dot hue; identifies the agent without tinting the chrome.
     hue: u32,
     /// True when the editor executes the provider's tool calls in-process (offline Mock).
@@ -1294,7 +1561,6 @@ const ASSISTANT_PROVIDERS: [AssistantProvider; 5] = [
         id: "mock",
         display_name: "Mock Assistant (Offline)",
         transport: "Offline",
-        model: "Demo loop",
         hue: 0x8a90a2,
         executes_in_process: true,
     },
@@ -1302,7 +1568,6 @@ const ASSISTANT_PROVIDERS: [AssistantProvider; 5] = [
         id: "acp-antigravity",
         display_name: "Antigravity (ACP)",
         transport: "ACP",
-        model: "Gemini 3 Pro",
         hue: 0xa5b4fc,
         executes_in_process: false,
     },
@@ -1310,7 +1575,6 @@ const ASSISTANT_PROVIDERS: [AssistantProvider; 5] = [
         id: "acp-gemini",
         display_name: "Gemini CLI (ACP)",
         transport: "ACP",
-        model: "2.5 Pro",
         hue: 0x4285f4,
         executes_in_process: false,
     },
@@ -1318,7 +1582,6 @@ const ASSISTANT_PROVIDERS: [AssistantProvider; 5] = [
         id: "codex-app-server",
         display_name: "Codex (App-Server)",
         transport: "App-Server",
-        model: "GPT-5.4",
         hue: 0x10a37f,
         executes_in_process: false,
     },
@@ -1326,7 +1589,6 @@ const ASSISTANT_PROVIDERS: [AssistantProvider; 5] = [
         id: "claude-cli",
         display_name: "Claude Code (CLI)",
         transport: "CLI",
-        model: "Sonnet 4.5",
         hue: 0xd97757,
         executes_in_process: false,
     },
@@ -1903,6 +2165,9 @@ fn assistant_model_button_view(
         .on_click(cx.listener(|editor, _, _, cx| {
             let opening = !editor.assistant.provider_menu_open;
             editor.assistant.provider_menu_open = opening;
+            editor.assistant.model_menu_open = false;
+            editor.assistant.effort_menu_open = false;
+            editor.assistant.skill_menu_open = false;
             if opening {
                 editor.probe_assistant_providers(cx);
             }
@@ -1921,6 +2186,466 @@ fn assistant_model_button_view(
                 .size(px(11.0))
                 .text_color(rgb(MUTED)),
         )
+}
+
+/// The composer's model picker: the model that will actually run, chevron. Opening it
+/// queries the active provider's real catalog; the effort picker appears once a model
+/// with effort variants is active.
+fn assistant_model_picker_view(
+    assistant: &AssistantState,
+    cx: &mut Context<Editor>,
+) -> Stateful<gpui::Div> {
+    let label = assistant.model_label();
+    div()
+        .id("assistant-model-picker")
+        .h(px(28.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .rounded(px(3.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .px(px(8.0))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+        .on_click(cx.listener(|editor, _, _, cx| {
+            let opening = !editor.assistant.model_menu_open;
+            editor.assistant.model_menu_open = opening;
+            editor.assistant.provider_menu_open = false;
+            editor.assistant.effort_menu_open = false;
+            editor.assistant.skill_menu_open = false;
+            if opening {
+                editor.probe_assistant_models(cx);
+            }
+            cx.notify();
+        }))
+        .child(div().text_size(px(11.0)).text_color(rgb(TEXT)).child(label))
+        .child(
+            svg()
+                .path(IconName::ArrowDown.path())
+                .size(px(11.0))
+                .text_color(rgb(MUTED)),
+        )
+}
+
+/// The composer's reasoning-effort picker, shown only when the active model offers
+/// effort variants. The label is the effort that will actually run.
+fn assistant_effort_picker_view(
+    assistant: &AssistantState,
+    cx: &mut Context<Editor>,
+) -> Stateful<gpui::Div> {
+    let label = assistant.effort_label();
+    div()
+        .id("assistant-effort-picker")
+        .h(px(28.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .rounded(px(3.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .px(px(8.0))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+        .on_click(cx.listener(|editor, _, _, cx| {
+            let opening = !editor.assistant.effort_menu_open;
+            editor.assistant.effort_menu_open = opening;
+            editor.assistant.provider_menu_open = false;
+            editor.assistant.model_menu_open = false;
+            editor.assistant.skill_menu_open = false;
+            cx.notify();
+        }))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(TEXT))
+                .child(format!("Effort: {label}")),
+        )
+        .child(
+            svg()
+                .path(IconName::ArrowDown.path())
+                .size(px(11.0))
+                .text_color(rgb(MUTED)),
+        )
+}
+
+/// The model dropdown: the provider default plus every model the provider actually
+/// reported, with its description. A failed probe shows the real error and retries.
+fn assistant_model_menu_view(assistant: &AssistantState, cx: &mut Context<Editor>) -> gpui::Div {
+    let choice = assistant.model_choices[assistant.provider_index].clone();
+    let default_subtitle = match assistant.catalog() {
+        ModelCatalog::Loaded(models) => {
+            let default_model = match models.iter().find(|model| model.is_default) {
+                Some(model) => Some(model),
+                None => models.first(),
+            };
+            match default_model {
+                Some(model) => format!("Use {}", model.display_name),
+                None => "The provider chooses the model".to_string(),
+            }
+        }
+        ModelCatalog::Loading => "Loading the provider's catalog…".to_string(),
+        ModelCatalog::Failed(_) => "The provider chooses the model".to_string(),
+        ModelCatalog::NotProbed => "The provider chooses the model".to_string(),
+    };
+    let mut rows = vec![
+        assistant_model_row_view(
+            "assistant-model-default".to_string(),
+            None,
+            "Provider default".to_string(),
+            default_subtitle,
+            choice.is_none(),
+            cx,
+        )
+        .into_any_element(),
+    ];
+    match assistant.catalog() {
+        ModelCatalog::Loading => {
+            rows.push(assistant_menu_note_view("Loading models…", MUTED).into_any_element());
+        }
+        ModelCatalog::Failed(message) => {
+            rows.push(
+                div()
+                    .id("assistant-model-retry")
+                    .rounded(px(6.0))
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .cursor(CursorStyle::PointingHand)
+                    .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                    .on_click(cx.listener(|editor, _, _, cx| {
+                        editor.emit_event(cx, AppEvent::AssistantModelsRefresh);
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(ERROR))
+                            .child(message.clone()),
+                    )
+                    .child(
+                        div()
+                            .mt(px(2.0))
+                            .text_size(px(10.0))
+                            .text_color(rgb(MUTED))
+                            .child("Click to retry"),
+                    )
+                    .into_any_element(),
+            );
+        }
+        ModelCatalog::Loaded(models) => {
+            if models.is_empty() {
+                rows.push(
+                    assistant_menu_note_view("This provider reported no models.", MUTED)
+                        .into_any_element(),
+                );
+            }
+            for model in models {
+                let subtitle = match &model.description {
+                    Some(description) => description.clone(),
+                    None => {
+                        if model.efforts.is_empty() {
+                            model.id.clone()
+                        } else {
+                            format!("Efforts: {}", model.efforts.join(" · "))
+                        }
+                    }
+                };
+                rows.push(
+                    assistant_model_row_view(
+                        format!("assistant-model-{}", model.id),
+                        Some(model.id.clone()),
+                        model.display_name.clone(),
+                        subtitle,
+                        choice.as_deref() == Some(model.id.as_str()),
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+            }
+        }
+        ModelCatalog::NotProbed => {}
+    }
+
+    let menu = div()
+        .absolute()
+        .bottom(px(96.0))
+        .left(px(if assistant.sessions_sidebar_open {
+            252.0
+        } else {
+            12.0
+        }))
+        .right(px(12.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .p(px(3.0))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px(px(12.0))
+                .pt(px(8.0))
+                .pb(px(4.0))
+                .text_size(px(10.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(MUTED))
+                .child("MODEL"),
+        )
+        .child(
+            div()
+                .id("assistant-model-menu-rows")
+                .max_h(px(320.0))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .children(rows),
+        );
+
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            div()
+                .id("assistant-model-backdrop")
+                .absolute()
+                .inset_0()
+                .on_click(cx.listener(|editor, _, _, cx| {
+                    editor.assistant.model_menu_open = false;
+                    cx.notify();
+                })),
+        )
+        .child(menu)
+}
+
+/// The reasoning-effort dropdown for the active model: the model default plus every
+/// effort variant the model actually supports.
+fn assistant_effort_menu_view(assistant: &AssistantState, cx: &mut Context<Editor>) -> gpui::Div {
+    let choice = assistant.effort_choices[assistant.provider_index].clone();
+    let default_subtitle = match assistant
+        .active_model()
+        .and_then(|model| model.default_effort.as_deref())
+    {
+        Some(effort) => format!("Use {}", effort_display_name(effort)),
+        None => "The model chooses the effort".to_string(),
+    };
+    let mut rows = vec![
+        assistant_effort_row_view(
+            "assistant-effort-default".to_string(),
+            None,
+            "Model default".to_string(),
+            default_subtitle,
+            choice.is_none(),
+            cx,
+        )
+        .into_any_element(),
+    ];
+    for effort in assistant.effort_options() {
+        rows.push(
+            assistant_effort_row_view(
+                format!("assistant-effort-{effort}"),
+                Some(effort.clone()),
+                effort_display_name(effort),
+                String::new(),
+                choice.as_deref() == Some(effort.as_str()),
+                cx,
+            )
+            .into_any_element(),
+        );
+    }
+
+    let menu = div()
+        .absolute()
+        .bottom(px(96.0))
+        .left(px(if assistant.sessions_sidebar_open {
+            252.0
+        } else {
+            12.0
+        }))
+        .right(px(12.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .p(px(3.0))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px(px(12.0))
+                .pt(px(8.0))
+                .pb(px(4.0))
+                .text_size(px(10.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(MUTED))
+                .child("REASONING EFFORT"),
+        )
+        .child(
+            div()
+                .id("assistant-effort-menu-rows")
+                .max_h(px(320.0))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .children(rows),
+        );
+
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            div()
+                .id("assistant-effort-backdrop")
+                .absolute()
+                .inset_0()
+                .on_click(cx.listener(|editor, _, _, cx| {
+                    editor.assistant.effort_menu_open = false;
+                    cx.notify();
+                })),
+        )
+        .child(menu)
+}
+
+fn assistant_model_row_view(
+    id: String,
+    model: Option<String>,
+    title: String,
+    subtitle: String,
+    selected: bool,
+    cx: &mut Context<Editor>,
+) -> Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .rounded(px(6.0))
+        .px(px(12.0))
+        .py(px(8.0))
+        .when(selected, |this| this.bg(rgb(SURFACE_HOVER)))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+        .on_click(cx.listener(move |editor, _, _, cx| {
+            editor.emit_event(
+                cx,
+                AppEvent::AssistantModelSelected {
+                    model: model.clone(),
+                },
+            );
+        }))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(TEXT))
+                        .text_ellipsis()
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .mt(px(2.0))
+                        .text_size(px(10.0))
+                        .text_color(rgb(MUTED))
+                        .text_ellipsis()
+                        .child(subtitle),
+                ),
+        )
+        .when(selected, |this| {
+            this.child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(13.0))
+                    .text_color(rgb(LINK))
+                    .child("✓"),
+            )
+        })
+}
+
+fn assistant_effort_row_view(
+    id: String,
+    effort: Option<String>,
+    title: String,
+    subtitle: String,
+    selected: bool,
+    cx: &mut Context<Editor>,
+) -> Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .rounded(px(6.0))
+        .px(px(12.0))
+        .py(px(8.0))
+        .when(selected, |this| this.bg(rgb(SURFACE_HOVER)))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+        .on_click(cx.listener(move |editor, _, _, cx| {
+            editor.emit_event(
+                cx,
+                AppEvent::AssistantEffortSelected {
+                    effort: effort.clone(),
+                },
+            );
+        }))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(TEXT))
+                        .text_ellipsis()
+                        .child(title),
+                )
+                .when(!subtitle.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .mt(px(2.0))
+                            .text_size(px(10.0))
+                            .text_color(rgb(MUTED))
+                            .text_ellipsis()
+                            .child(subtitle),
+                    )
+                }),
+        )
+        .when(selected, |this| {
+            this.child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(13.0))
+                    .text_color(rgb(LINK))
+                    .child("✓"),
+            )
+        })
+}
+
+fn assistant_menu_note_view(text: &str, color: u32) -> gpui::Div {
+    div()
+        .px(px(12.0))
+        .py(px(8.0))
+        .text_size(px(11.0))
+        .text_color(rgb(color))
+        .child(text.to_string())
+}
+
+fn effort_display_name(effort: &str) -> String {
+    let mut chars = effort.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 /// The window's left rail: the live thread on top, then this project's saved sessions
@@ -2280,7 +3005,7 @@ fn assistant_provider_row_view(
                         .text_size(px(10.0))
                         .text_color(rgb(MUTED))
                         .text_ellipsis()
-                        .child(provider.model),
+                        .child(assistant.provider_model_label(index)),
                 ),
         )
         .child(
@@ -2351,7 +3076,11 @@ fn assistant_skill_button_view(
         .cursor(CursorStyle::PointingHand)
         .hover(|style| style.bg(rgb(SURFACE_HOVER)))
         .on_click(cx.listener(|editor, _, _, cx| {
-            editor.assistant.skill_menu_open = !editor.assistant.skill_menu_open;
+            let opening = !editor.assistant.skill_menu_open;
+            editor.assistant.skill_menu_open = opening;
+            editor.assistant.provider_menu_open = false;
+            editor.assistant.model_menu_open = false;
+            editor.assistant.effort_menu_open = false;
             cx.notify();
         }))
         .child(
