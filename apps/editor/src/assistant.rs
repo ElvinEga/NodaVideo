@@ -53,6 +53,8 @@ pub(crate) struct AssistantState {
     /// for the active skill, so the composer button never stores a duplicate copy.
     skills: SkillRegistry,
     skill_menu_open: bool,
+    /// Whether the sessions rail is visible; the tab bar toggle flips it.
+    sessions_sidebar_open: bool,
 }
 
 pub(crate) fn register_assistant_providers(runtime: &AgentRuntime, cx: &mut Context<Editor>) {
@@ -94,6 +96,7 @@ impl AssistantState {
             provider_readiness: vec![None; ASSISTANT_PROVIDERS.len()],
             skills: SkillRegistry::new(),
             skill_menu_open: false,
+            sessions_sidebar_open: true,
         }
     }
 
@@ -111,6 +114,7 @@ impl Editor {
     ) -> gpui::AnyElement {
         let assistant = &self.assistant;
         let provider = assistant.provider();
+        let gateway_revision = self.timeline.as_ref().map(|timeline| timeline.revision);
 
         let tab_label = match assistant.session {
             Some(_) => provider.display_name,
@@ -146,6 +150,34 @@ impl Editor {
                     ),
             )
             .child(assistant_new_chat_button_view("assistant-tab-new", cx))
+            .child(
+                div()
+                    .h(px(22.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(SURFACE))
+                    .child(
+                        svg()
+                            .path(IconName::Plug.path())
+                            .size(px(11.0))
+                            .text_color(rgb(MUTED)),
+                    )
+                    .child(
+                        div()
+                            .font_family("monospace")
+                            .text_size(px(10.0))
+                            .text_color(rgb(MUTED))
+                            .child(match gateway_revision {
+                                Some(revision) => format!("MCP · rev {revision}"),
+                                None => "MCP · no timeline".to_string(),
+                            }),
+                    ),
+            )
             .child(div().flex_1())
             .when(assistant.busy, |this| {
                 this.child(
@@ -155,7 +187,34 @@ impl Editor {
                         .text_color(rgb(ACCENT))
                         .child("WORKING…"),
                 )
-            });
+            })
+            .child(
+                div()
+                    .id("assistant-sidebar-toggle")
+                    .h(px(24.0))
+                    .w(px(24.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .cursor(CursorStyle::PointingHand)
+                    .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                    .on_click(cx.listener(|editor, _, _, cx| {
+                        editor.assistant.sessions_sidebar_open =
+                            !editor.assistant.sessions_sidebar_open;
+                        cx.notify();
+                    }))
+                    .child(
+                        svg()
+                            .path(IconName::PanelLeft.path())
+                            .size(px(13.0))
+                            .text_color(rgb(if assistant.sessions_sidebar_open {
+                                TEXT
+                            } else {
+                                MUTED
+                            })),
+                    ),
+            );
 
         let messages = div()
             .id("assistant-messages")
@@ -280,6 +339,10 @@ impl Editor {
             Some(_) => ("1 approval pending", WARNING),
             None => ("No pending approvals", MUTED),
         };
+        let gateway_label = match gateway_revision {
+            Some(revision) => format!("MCP gateway · rev {revision}"),
+            None => "MCP gateway · no timeline open".to_string(),
+        };
         let status_bar = div()
             .h(px(28.0))
             .flex_shrink_0()
@@ -292,10 +355,30 @@ impl Editor {
             .text_size(px(10.0))
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
                     .text_color(rgb(MUTED))
-                    .child(format!("{} · {}", provider.transport, provider.model)),
+                    .child(
+                        svg()
+                            .path(IconName::Plug.path())
+                            .size(px(11.0))
+                            .text_color(rgb(MUTED)),
+                    )
+                    .child(gateway_label),
             )
-            .child(div().text_color(rgb(approval_color)).child(approval_label));
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_color(rgb(MUTED))
+                            .child(format!("{} · {}", provider.transport, provider.model)),
+                    )
+                    .child(div().text_color(rgb(approval_color)).child(approval_label)),
+            );
 
         div()
             .id("editor-assistant-window")
@@ -305,7 +388,9 @@ impl Editor {
             .overflow_hidden()
             .bg(rgb(PANEL))
             .text_color(rgb(TEXT))
-            .child(assistant_sessions_sidebar_view(assistant, cx))
+            .when(assistant.sessions_sidebar_open, |this| {
+                this.child(assistant_sessions_sidebar_view(assistant, cx))
+            })
             .child(
                 div()
                     .flex_1()
@@ -1726,7 +1811,11 @@ fn assistant_provider_menu_view(
     let menu = div()
         .absolute()
         .bottom(px(96.0))
-        .left(px(252.0))
+        .left(px(if assistant.sessions_sidebar_open {
+            252.0
+        } else {
+            12.0
+        }))
         .right(px(12.0))
         .rounded(px(8.0))
         .border_1()
@@ -1945,7 +2034,11 @@ fn assistant_skill_menu_view(
     let menu = div()
         .absolute()
         .bottom(px(96.0))
-        .left(px(252.0))
+        .left(px(if assistant.sessions_sidebar_open {
+            252.0
+        } else {
+            12.0
+        }))
         .right(px(12.0))
         .rounded(px(8.0))
         .border_1()
