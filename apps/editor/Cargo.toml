@@ -22,6 +22,7 @@ nodavideo-hyperframes-bridge.workspace = true
 nodavideo-mcp-server.workspace = true
 nodavideo-skill-registry.workspace = true
 anyhow.workspace = true
+chrono.workspace = true
 env_logger.workspace = true
 futures.workspace = true
 gpui_platform.workspace = true

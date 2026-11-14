@@ -168,6 +168,12 @@ pub(crate) enum AppEvent {
     },
     /// The user started a fresh assistant session from the window's New chat control.
     AssistantNewChat,
+    /// The user chose a saved assistant session from the sessions rail to replay.
+    AssistantSessionSelected {
+        id: Ulid,
+    },
+    /// The user returned from a saved transcript to the live conversation.
+    AssistantLiveSessionResumed,
     WaveformsGeneration {
         paths: Vec<PathBuf>, // 素材的绝对路径
     },
@@ -705,6 +711,12 @@ async fn handle_app_event(
         }
         AppEvent::AssistantNewChat => {
             editor.update(cx, |editor, cx| editor.new_assistant_chat(cx));
+        }
+        AppEvent::AssistantSessionSelected { id } => {
+            editor.update(cx, |editor, cx| editor.select_assistant_session(id, cx));
+        }
+        AppEvent::AssistantLiveSessionResumed => {
+            editor.update(cx, |editor, cx| editor.resume_live_assistant(cx));
         }
         AppEvent::HorizontalSplitResized(state) => {
             editor.update(cx, |editor, cx| -> Result<()> {

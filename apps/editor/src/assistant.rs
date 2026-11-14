@@ -1,6 +1,10 @@
 //! AI assistant window: provider cycling, streamed conversation, and approval cards.
 
 use crate::asset::IconName;
+use crate::assistant_history::{
+    AssistantSession, AssistantSessionMeta, load_session, load_session_metas, now_ms, save_session,
+    session_day_label, session_title,
+};
 use crate::edit_action::EditAction;
 use crate::editor::Editor;
 use crate::event_bus::AppEvent;
@@ -12,6 +16,7 @@ use crate::ui_components::TextInput;
 use crate::ui_components::cyberpunk_button::{
     button_cyberpunk_primary, button_cyberpunk_secondary,
 };
+use anyhow::Result;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::prelude::*;
@@ -28,6 +33,7 @@ use nodavideo_agent_runtime::{
 use nodavideo_hyperframes_bridge::{CompositionAsset, load_compositions};
 use nodavideo_mcp_server::{ExplorerChange, McpError, McpExecutor};
 use nodavideo_skill_registry::{SkillPackage, SkillRegistry};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::Path;
@@ -62,6 +68,13 @@ pub(crate) struct AssistantState {
     turn_started_at: Option<Instant>,
     /// How long the most recent finished turn took; shown in its speaker header.
     last_turn_elapsed: Option<Duration>,
+    /// Saved sessions of the open project, newest first; refreshed after every save.
+    history: Vec<AssistantSessionMeta>,
+    /// A saved transcript replayed read-only; None shows the live thread.
+    viewing: Option<AssistantSession>,
+    /// Id of the live transcript once it has a message; None before the first send.
+    transcript_id: Option<Ulid>,
+    transcript_created_at_ms: u64,
 }
 
 pub(crate) fn register_assistant_providers(runtime: &AgentRuntime, cx: &mut Context<Editor>) {
@@ -107,6 +120,10 @@ impl AssistantState {
             expanded_tools: HashSet::new(),
             turn_started_at: None,
             last_turn_elapsed: None,
+            history: Vec::new(),
+            viewing: None,
+            transcript_id: None,
+            transcript_created_at_ms: 0,
         }
     }
 
@@ -125,10 +142,22 @@ impl Editor {
         let assistant = &self.assistant;
         let provider = assistant.provider();
         let gateway_revision = self.timeline.as_ref().map(|timeline| timeline.revision);
+        let viewing = assistant.viewing.as_ref();
+        let entries = match viewing {
+            Some(session) => &session.entries[..],
+            None => &assistant.entries[..],
+        };
+        let thread_provider = match viewing {
+            Some(session) => assistant_provider_for_id(&session.provider_id),
+            None => provider,
+        };
 
-        let tab_label = match assistant.session {
-            Some(_) => provider.display_name,
-            None => "New chat",
+        let tab_label = match viewing {
+            Some(session) => session.title.clone(),
+            None => match assistant.session {
+                Some(_) => provider.display_name.to_string(),
+                None => "New chat".to_string(),
+            },
         };
         let tab_bar = div()
             .h(px(40.0))
@@ -226,17 +255,18 @@ impl Editor {
                     ),
             );
 
-        let last_turn_start = assistant
-            .entries
+        let last_turn_start = entries
             .iter()
             .rposition(|entry| matches!(entry, AssistantEntry::User(_)))
             .map(|index| index + 1)
             .unwrap_or(0);
-        let last_turn_header_index = assistant.entries[last_turn_start..]
+        let last_turn_header_index = entries[last_turn_start..]
             .iter()
             .position(assistant_entry_is_prose)
             .map(|offset| last_turn_start + offset);
-        let turn_label = if assistant.busy {
+        let turn_label = if viewing.is_some() {
+            None
+        } else if assistant.busy {
             Some("working…".to_string())
         } else {
             assistant.last_turn_elapsed.map(format_turn_elapsed)
@@ -252,7 +282,7 @@ impl Editor {
             .flex()
             .flex_col()
             .gap_2()
-            .when(assistant.entries.is_empty(), |this| {
+            .when(entries.is_empty(), |this| {
                 this.child(
                     div()
                         .flex_1()
@@ -281,9 +311,9 @@ impl Editor {
                         ),
                 )
             })
-            .children(assistant.entries.iter().enumerate().map(|(index, entry)| {
+            .children(entries.iter().enumerate().map(|(index, entry)| {
                 let show_header = assistant_entry_is_prose(entry)
-                    && (index == 0 || !assistant_entry_is_prose(&assistant.entries[index - 1]));
+                    && (index == 0 || !assistant_entry_is_prose(&entries[index - 1]));
                 let header_label = if last_turn_header_index == Some(index) {
                     turn_label.as_deref()
                 } else {
@@ -295,13 +325,16 @@ impl Editor {
                     }
                     _ => false,
                 };
-                assistant_entry_view(entry, show_header, provider, header_label, expanded, cx)
+                assistant_entry_view(entry, show_header, thread_provider, header_label, expanded, cx)
             }));
 
-        let approval = assistant
-            .pending_approval
-            .as_ref()
-            .map(|approval| assistant_approval_card_view(approval, window, cx));
+        let approval = match viewing {
+            Some(_) => None,
+            None => assistant
+                .pending_approval
+                .as_ref()
+                .map(|approval| assistant_approval_card_view(approval, window, cx)),
+        };
 
         let input_empty = assistant.input.read(cx).text().trim().is_empty();
         let composer = div()
@@ -339,7 +372,7 @@ impl Editor {
                         button_cyberpunk_primary(
                             "assistant-send",
                             "Send",
-                            !input_empty,
+                            !input_empty && viewing.is_none(),
                             window,
                             cx,
                         )
@@ -363,7 +396,13 @@ impl Editor {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Project".to_string());
-        let state_label = if assistant.busy { "Working…" } else { "Ready" };
+        let state_label = if viewing.is_some() {
+            "Viewing saved session · New chat to continue"
+        } else if assistant.busy {
+            "Working…"
+        } else {
+            "Ready"
+        };
         let context_line = div()
             .flex_shrink_0()
             .px(px(12.0))
@@ -452,11 +491,15 @@ impl Editor {
     }
 
     pub(super) fn send_assistant_message(&mut self, message: String, cx: &mut Context<Self>) {
-        if self.assistant.busy {
+        if self.assistant.busy || self.assistant.viewing.is_some() {
             return;
         }
         self.assistant
             .push_entry(AssistantEntry::User(message.clone()));
+        if self.assistant.transcript_id.is_none() {
+            self.assistant.transcript_id = Some(Ulid::generate());
+            self.assistant.transcript_created_at_ms = now_ms();
+        }
         self.assistant.busy = true;
         self.assistant.turn_started_at = Some(Instant::now());
         self.assistant.last_turn_elapsed = None;
@@ -631,6 +674,7 @@ impl Editor {
             self.assistant.provider_display_name()
         )));
         self.assistant.scroll.scroll_to_bottom();
+        self.persist_assistant_transcript(cx);
         cx.notify();
     }
 
@@ -668,6 +712,7 @@ impl Editor {
         self.assistant
             .push_entry(AssistantEntry::Info("Stopped.".to_string()));
         self.assistant.scroll.scroll_to_bottom();
+        self.persist_assistant_transcript(cx);
         cx.notify();
         if let Some(session) = previous_session {
             let runtime = self.assistant.runtime.clone();
@@ -681,10 +726,13 @@ impl Editor {
     }
 
     pub(super) fn new_assistant_chat(&mut self, cx: &mut Context<Self>) {
+        self.assistant.viewing = None;
+        self.persist_assistant_transcript(cx);
         let previous_session = self.assistant.reset_session();
         self.assistant.entries.clear();
         self.assistant.expanded_tools.clear();
         self.assistant.last_turn_elapsed = None;
+        self.assistant.transcript_id = None;
         self.assistant.provider_menu_open = false;
         self.assistant.skill_menu_open = false;
         cx.notify();
@@ -701,6 +749,7 @@ impl Editor {
 
     pub(super) fn select_assistant_skill(&mut self, id: String, cx: &mut Context<Self>) {
         let previous_session = self.assistant.select_skill(&id);
+        self.persist_assistant_transcript(cx);
         cx.notify();
         if let Some(session) = previous_session {
             let runtime = self.assistant.runtime.clone();
@@ -711,6 +760,98 @@ impl Editor {
             })
             .detach();
         }
+    }
+
+    /// Writes the live transcript to `.opencut/assistant/` off the UI thread, then refreshes
+    /// the sidebar list from disk so saved rows always reflect what is actually stored.
+    pub(super) fn persist_assistant_transcript(&mut self, cx: &mut Context<Self>) {
+        if self.assistant.viewing.is_some() {
+            return;
+        }
+        let Some(id) = self.assistant.transcript_id else {
+            return;
+        };
+        if self.assistant.entries.is_empty() {
+            return;
+        }
+        let session = AssistantSession {
+            id,
+            provider_id: self.assistant.provider_id().to_string(),
+            created_at_ms: self.assistant.transcript_created_at_ms,
+            updated_at_ms: now_ms(),
+            title: session_title(&self.assistant.entries),
+            entries: self.assistant.entries.clone(),
+        };
+        let project_root = self.project_root.clone();
+        cx.spawn(async move |editor, cx| {
+            let saved: Result<Vec<AssistantSessionMeta>> = cx
+                .background_executor()
+                .spawn(async move {
+                    save_session(&project_root, &session)?;
+                    Ok(load_session_metas(&project_root))
+                })
+                .await;
+            match saved {
+                Ok(history) => {
+                    if let Err(error) = editor.update(cx, |editor, cx| {
+                        editor.assistant.history = history;
+                        cx.notify();
+                    }) {
+                        log::debug!("Editor gone before assistant history refresh: {error:?}");
+                    }
+                }
+                Err(error) => log::warn!("Could not persist the assistant session: {error:?}"),
+            }
+        })
+        .detach();
+    }
+
+    /// Reads this project's saved session list off the UI thread at startup.
+    pub(super) fn load_assistant_history(&mut self, cx: &mut Context<Self>) {
+        let project_root = self.project_root.clone();
+        cx.spawn(async move |editor, cx| {
+            let history = cx
+                .background_executor()
+                .spawn(async move { load_session_metas(&project_root) })
+                .await;
+            if let Err(error) = editor.update(cx, |editor, cx| {
+                editor.assistant.history = history;
+                cx.notify();
+            }) {
+                log::debug!("Editor gone before assistant history load: {error:?}");
+            }
+        })
+        .detach();
+    }
+
+    /// Opens a saved transcript read-only. The live session, if any, keeps running untouched.
+    pub(super) fn select_assistant_session(&mut self, id: Ulid, cx: &mut Context<Self>) {
+        let project_root = self.project_root.clone();
+        cx.spawn(async move |editor, cx| {
+            let loaded = cx
+                .background_executor()
+                .spawn(async move { load_session(&project_root, id) })
+                .await;
+            match loaded {
+                Ok(session) => {
+                    if let Err(error) = editor.update(cx, |editor, cx| {
+                        editor.assistant.viewing = Some(session);
+                        editor.assistant.scroll.scroll_to_bottom();
+                        cx.notify();
+                    }) {
+                        log::debug!("Editor gone before assistant session open: {error:?}");
+                    }
+                }
+                Err(error) => log::warn!("Could not open the assistant session: {error:?}"),
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn resume_live_assistant(&mut self, cx: &mut Context<Self>) {
+        self.assistant.viewing = None;
+        self.assistant.scroll.scroll_to_bottom();
+        cx.notify();
     }
 }
 
@@ -1088,7 +1229,8 @@ impl AssistantState {
     }
 }
 
-enum AssistantEntry {
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) enum AssistantEntry {
     User(String),
     Message(String),
     Thought(String),
@@ -1105,8 +1247,8 @@ enum AssistantEntry {
     Error(String),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ToolStatus {
+#[derive(Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) enum ToolStatus {
     Running,
     Done,
     Failed,
@@ -1209,6 +1351,10 @@ fn start_assistant_event_pump(
 
     cx.spawn(async move |cx| {
         while let Some(event) = events.next().await {
+            let turn_finished = matches!(
+                event,
+                AgentEvent::SessionCompleted { .. } | AgentEvent::SessionError { .. }
+            );
             let applied = editor.update(cx, |editor, cx| {
                 if editor.assistant.session_generation != generation {
                     return false;
@@ -1222,6 +1368,9 @@ fn start_assistant_event_pump(
                         editor.begin_assistant_tool_call(call_id, tool_name, arguments, cx);
                     }
                     event => editor.assistant.apply_agent_event(event, cx),
+                }
+                if turn_finished {
+                    editor.persist_assistant_transcript(cx);
                 }
                 true
             });
@@ -1774,14 +1923,72 @@ fn assistant_model_button_view(
         )
 }
 
-/// The window's left rail: one honest row per live session. History is not persisted
-/// yet, so an idle window says so instead of inventing past conversations.
+/// The window's left rail: the live thread on top, then this project's saved sessions
+/// grouped by local day. A saved row replays its transcript read-only; the live row
+/// returns to the running conversation.
 fn assistant_sessions_sidebar_view(
     assistant: &AssistantState,
     cx: &mut Context<Editor>,
 ) -> gpui::Div {
     let provider = assistant.provider();
-    let has_session = assistant.session.is_some();
+    let viewing_id = assistant.viewing.as_ref().map(|session| session.id);
+    let mut rows: Vec<gpui::AnyElement> = Vec::new();
+    if !assistant.entries.is_empty() {
+        rows.push(
+            assistant_session_row_view(
+                "assistant-live-session".to_string(),
+                None,
+                provider.hue,
+                &session_title(&assistant.entries),
+                format!(
+                    "{} · {} messages",
+                    provider.display_name,
+                    assistant.entries.len()
+                ),
+                viewing_id.is_none(),
+                cx,
+            )
+            .into_any_element(),
+        );
+    }
+    let mut last_day: Option<String> = None;
+    for meta in &assistant.history {
+        if assistant.transcript_id == Some(meta.id) {
+            continue; // 上面的 live 行已代表正在进行的转录，避免重复。
+        }
+        let day = session_day_label(meta.updated_at_ms);
+        if last_day.as_deref() != Some(day.as_str()) {
+            rows.push(
+                div()
+                    .px(px(10.0))
+                    .pt(px(8.0))
+                    .pb(px(2.0))
+                    .text_size(px(9.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(MUTED))
+                    .child(day.clone())
+                    .into_any_element(),
+            );
+            last_day = Some(day);
+        }
+        let session_provider = assistant_provider_for_id(&meta.provider_id);
+        rows.push(
+            assistant_session_row_view(
+                format!("assistant-session-{}", meta.id),
+                Some(meta.id),
+                session_provider.hue,
+                &meta.title,
+                format!(
+                    "{} · {} messages",
+                    session_provider.display_name, meta.message_count
+                ),
+                viewing_id == Some(meta.id),
+                cx,
+            )
+            .into_any_element(),
+        );
+    }
+    let empty = rows.is_empty();
     div()
         .w(px(240.0))
         .h_full()
@@ -1820,48 +2027,7 @@ fn assistant_sessions_sidebar_view(
                 .flex()
                 .flex_col()
                 .gap_1()
-                .when(has_session, |this| {
-                    this.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .rounded(px(6.0))
-                            .px(px(10.0))
-                            .py(px(8.0))
-                            .bg(rgb(SURFACE))
-                            .border_1()
-                            .border_color(rgb(ACCENT))
-                            .child(assistant_dot(provider.hue, 7.0))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .flex()
-                                    .flex_col()
-                                    .child(
-                                        div()
-                                            .text_size(px(11.0))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(rgb(TEXT))
-                                            .text_ellipsis()
-                                            .child("Current session"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(MUTED))
-                                            .text_ellipsis()
-                                            .child(format!(
-                                                "{} · {} messages",
-                                                provider.display_name,
-                                                assistant.entries.len()
-                                            )),
-                                    ),
-                            ),
-                    )
-                })
-                .when(!has_session, |this| {
+                .when(empty, |this| {
                     this.child(
                         div()
                             .flex_1()
@@ -1884,8 +2050,78 @@ fn assistant_sessions_sidebar_view(
                                     .child("Send a message to start one."),
                             ),
                     )
-                }),
+                })
+                .children(rows),
         )
+}
+
+/// One sidebar row. `session_id` None is the live thread (click returns to it); Some is a
+/// saved transcript (click replays it). The selected row is already on screen, so it is
+/// not clickable.
+fn assistant_session_row_view(
+    id: String,
+    session_id: Option<Ulid>,
+    hue: u32,
+    title: &str,
+    subtitle: String,
+    selected: bool,
+    cx: &mut Context<Editor>,
+) -> Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .rounded(px(6.0))
+        .px(px(10.0))
+        .py(px(8.0))
+        .when(selected, |this| {
+            this.bg(rgb(SURFACE))
+                .border_1()
+                .border_color(rgb(ACCENT))
+        })
+        .when(!selected, |this| {
+            this.cursor(CursorStyle::PointingHand)
+                .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                .on_click(cx.listener(move |editor, _, _, cx| match session_id {
+                    Some(id) => {
+                        editor.emit_event(cx, AppEvent::AssistantSessionSelected { id });
+                    }
+                    None => {
+                        editor.emit_event(cx, AppEvent::AssistantLiveSessionResumed);
+                    }
+                }))
+        })
+        .child(assistant_dot(hue, 7.0))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(TEXT))
+                        .text_ellipsis()
+                        .child(title.to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(rgb(MUTED))
+                        .text_ellipsis()
+                        .child(subtitle),
+                ),
+        )
+}
+
+fn assistant_provider_for_id(id: &str) -> &'static AssistantProvider {
+    match ASSISTANT_PROVIDERS.iter().find(|provider| provider.id == id) {
+        Some(provider) => provider,
+        None => &ASSISTANT_PROVIDERS[0],
+    }
 }
 
 /// New chat: drops the live session and clears the thread. Shared by the sidebar

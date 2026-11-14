@@ -137,6 +137,7 @@ impl Editor {
         }
         editor.schedule_media_metadata(cx);
         editor.load_assistant_skills(cx);
+        editor.load_assistant_history(cx);
         editor.property_panel = current_property_panel(&editor);
         editor
     }

@@ -1,6 +1,7 @@
 mod actions;
 mod asset;
 mod assistant;
+mod assistant_history;
 mod clip_placement;
 mod composition_thumbnail;
 mod context_menu;
