@@ -120,6 +120,12 @@ impl Asset {
             Self::Image(a) => a.path = value,
         }
     }
+    pub fn set_name(&mut self, value: String) {
+        match self {
+            Self::Video(a) | Self::Audio(a) => a.name = value,
+            Self::Image(a) => a.name = value,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
