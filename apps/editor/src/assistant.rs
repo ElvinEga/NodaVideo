@@ -32,6 +32,7 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use timeline::{Asset, TimelineEditingState};
 use ulid::Ulid;
 
@@ -55,6 +56,12 @@ pub(crate) struct AssistantState {
     skill_menu_open: bool,
     /// Whether the sessions rail is visible; the tab bar toggle flips it.
     sessions_sidebar_open: bool,
+    /// Tool call ids whose card body is expanded; cards start collapsed.
+    expanded_tools: HashSet<String>,
+    /// When the running turn started; None between turns.
+    turn_started_at: Option<Instant>,
+    /// How long the most recent finished turn took; shown in its speaker header.
+    last_turn_elapsed: Option<Duration>,
 }
 
 pub(crate) fn register_assistant_providers(runtime: &AgentRuntime, cx: &mut Context<Editor>) {
@@ -97,6 +104,9 @@ impl AssistantState {
             skills: SkillRegistry::new(),
             skill_menu_open: false,
             sessions_sidebar_open: true,
+            expanded_tools: HashSet::new(),
+            turn_started_at: None,
+            last_turn_elapsed: None,
         }
     }
 
@@ -216,6 +226,22 @@ impl Editor {
                     ),
             );
 
+        let last_turn_start = assistant
+            .entries
+            .iter()
+            .rposition(|entry| matches!(entry, AssistantEntry::User(_)))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let last_turn_header_index = assistant.entries[last_turn_start..]
+            .iter()
+            .position(assistant_entry_is_prose)
+            .map(|offset| last_turn_start + offset);
+        let turn_label = if assistant.busy {
+            Some("working…".to_string())
+        } else {
+            assistant.last_turn_elapsed.map(format_turn_elapsed)
+        };
+
         let messages = div()
             .id("assistant-messages")
             .flex_1()
@@ -258,7 +284,18 @@ impl Editor {
             .children(assistant.entries.iter().enumerate().map(|(index, entry)| {
                 let show_header = assistant_entry_is_prose(entry)
                     && (index == 0 || !assistant_entry_is_prose(&assistant.entries[index - 1]));
-                assistant_entry_view(entry, show_header, provider)
+                let header_label = if last_turn_header_index == Some(index) {
+                    turn_label.as_deref()
+                } else {
+                    None
+                };
+                let expanded = match entry {
+                    AssistantEntry::Tool { call_id, .. } => {
+                        assistant.expanded_tools.contains(call_id)
+                    }
+                    _ => false,
+                };
+                assistant_entry_view(entry, show_header, provider, header_label, expanded, cx)
             }));
 
         let approval = assistant
@@ -421,6 +458,8 @@ impl Editor {
         self.assistant
             .push_entry(AssistantEntry::User(message.clone()));
         self.assistant.busy = true;
+        self.assistant.turn_started_at = Some(Instant::now());
+        self.assistant.last_turn_elapsed = None;
         self.assistant.scroll.scroll_to_bottom();
         cx.notify();
 
@@ -624,6 +663,7 @@ impl Editor {
         if !self.assistant.busy {
             return;
         }
+        self.assistant.finish_turn_timing();
         let previous_session = self.assistant.reset_session();
         self.assistant
             .push_entry(AssistantEntry::Info("Stopped.".to_string()));
@@ -643,6 +683,8 @@ impl Editor {
     pub(super) fn new_assistant_chat(&mut self, cx: &mut Context<Self>) {
         let previous_session = self.assistant.reset_session();
         self.assistant.entries.clear();
+        self.assistant.expanded_tools.clear();
+        self.assistant.last_turn_elapsed = None;
         self.assistant.provider_menu_open = false;
         self.assistant.skill_menu_open = false;
         cx.notify();
@@ -871,7 +913,16 @@ impl AssistantState {
         self.session_generation += 1;
         self.pending_approval = None;
         self.busy = false;
+        self.turn_started_at = None;
         self.session.take()
+    }
+
+    /// Stamps the running turn's duration once it ends, so its speaker header can
+    /// report how long the agent actually worked.
+    fn finish_turn_timing(&mut self) {
+        if let Some(started_at) = self.turn_started_at.take() {
+            self.last_turn_elapsed = Some(started_at.elapsed());
+        }
     }
 
     fn push_entry(&mut self, entry: AssistantEntry) {
@@ -1021,12 +1072,14 @@ impl AssistantState {
             }
             AgentEvent::SessionCompleted { summary } => {
                 self.busy = false;
+                self.finish_turn_timing();
                 if let Some(summary) = summary {
                     self.push_entry(AssistantEntry::Info(summary));
                 }
             }
             AgentEvent::SessionError { code, message } => {
                 self.busy = false;
+                self.finish_turn_timing();
                 self.push_entry(AssistantEntry::Error(format!("{code}: {message}")));
             }
         }
@@ -1262,6 +1315,9 @@ fn assistant_entry_view(
     entry: &AssistantEntry,
     show_header: bool,
     provider: &AssistantProvider,
+    turn_label: Option<&str>,
+    expanded: bool,
+    cx: &mut Context<Editor>,
 ) -> gpui::AnyElement {
     let content = match entry {
         AssistantEntry::User(message) => div()
@@ -1314,13 +1370,21 @@ fn assistant_entry_view(
             )
             .into_any_element(),
         AssistantEntry::Tool {
+            call_id,
             tool_name,
             arguments,
             status,
             result,
-            ..
-        } => assistant_tool_card_view(tool_name, arguments, *status, result.as_deref())
-            .into_any_element(),
+        } => assistant_tool_card_view(
+            call_id,
+            tool_name,
+            arguments,
+            *status,
+            result.as_deref(),
+            expanded,
+            cx,
+        )
+        .into_any_element(),
         AssistantEntry::Info(info) => div()
             .text_size(px(11.0))
             .line_height(px(16.0))
@@ -1358,7 +1422,7 @@ fn assistant_entry_view(
             .flex()
             .flex_col()
             .gap_1()
-            .child(assistant_speaker_header_view(provider))
+            .child(assistant_speaker_header_view(provider, turn_label))
             .child(content)
             .into_any_element()
     } else {
@@ -1378,7 +1442,10 @@ fn assistant_entry_is_prose(entry: &AssistantEntry) -> bool {
     )
 }
 
-fn assistant_speaker_header_view(provider: &AssistantProvider) -> gpui::Div {
+fn assistant_speaker_header_view(
+    provider: &AssistantProvider,
+    turn_label: Option<&str>,
+) -> gpui::Div {
     div()
         .flex()
         .items_center()
@@ -1391,19 +1458,33 @@ fn assistant_speaker_header_view(provider: &AssistantProvider) -> gpui::Div {
                 .text_color(rgb(MUTED))
                 .child(provider.display_name),
         )
+        .when_some(turn_label, |this, label| {
+            this.child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(rgb(MUTED))
+                    .child(format!("· {label}")),
+            )
+        })
 }
 
+/// Collapsed by default: one row with the tool, its live status and a chevron.
+/// Clicking the row expands the arguments and result in place.
 fn assistant_tool_card_view(
+    call_id: &str,
     tool_name: &str,
     arguments: &str,
     status: ToolStatus,
     result: Option<&str>,
+    expanded: bool,
+    cx: &mut Context<Editor>,
 ) -> gpui::Div {
     let result_color = if status == ToolStatus::Failed {
         ERROR
     } else {
         MUTED
     };
+    let toggle_id = call_id.to_string();
     div()
         .overflow_hidden()
         .rounded(px(5.0))
@@ -1414,14 +1495,26 @@ fn assistant_tool_card_view(
         .flex_col()
         .child(
             div()
+                .id(call_id.to_string())
                 .h(px(32.0))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
                 .gap_2()
                 .px(px(10.0))
-                .border_b_1()
-                .border_color(rgb(BORDER))
+                .cursor(CursorStyle::PointingHand)
+                .hover(|style| style.bg(rgb(SURFACE)))
+                .when(expanded, |this| {
+                    this.border_b_1().border_color(rgb(BORDER))
+                })
+                .on_click(cx.listener(move |editor, _, _, cx| {
+                    if editor.assistant.expanded_tools.contains(&toggle_id) {
+                        editor.assistant.expanded_tools.remove(&toggle_id);
+                    } else {
+                        editor.assistant.expanded_tools.insert(toggle_id.clone());
+                    }
+                    cx.notify();
+                }))
                 .child(
                     svg()
                         .path(IconName::Plug.path())
@@ -1438,35 +1531,58 @@ fn assistant_tool_card_view(
                         .text_ellipsis()
                         .child(tool_name.to_string()),
                 )
-                .child(assistant_status_pill_view(status)),
+                .child(assistant_status_pill_view(status))
+                .child(
+                    svg()
+                        .path(if expanded {
+                            IconName::ArrowUp.path()
+                        } else {
+                            IconName::ArrowDown.path()
+                        })
+                        .size(px(11.0))
+                        .text_color(rgb(MUTED)),
+                ),
         )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .px(px(10.0))
-                .py(px(8.0))
-                .when(!arguments.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .font_family("monospace")
-                            .text_size(px(9.0))
-                            .line_height(px(16.0))
-                            .text_color(rgb(MUTED))
-                            .child(arguments.to_string()),
-                    )
-                })
-                .when_some(result, |this, result| {
-                    this.child(
-                        div()
-                            .text_size(px(10.0))
-                            .line_height(px(16.0))
-                            .text_color(rgb(result_color))
-                            .child(result.to_string()),
-                    )
-                }),
-        )
+        .when(expanded, |this| {
+            this.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .when(!arguments.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .font_family("monospace")
+                                .text_size(px(9.0))
+                                .line_height(px(16.0))
+                                .text_color(rgb(MUTED))
+                                .child(arguments.to_string()),
+                        )
+                    })
+                    .when_some(result, |this, result| {
+                        this.child(
+                            div()
+                                .text_size(px(10.0))
+                                .line_height(px(16.0))
+                                .text_color(rgb(result_color))
+                                .child(result.to_string()),
+                        )
+                    }),
+            )
+        })
+}
+
+fn format_turn_elapsed(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    if seconds == 0 {
+        "worked for <1s".to_string()
+    } else if seconds < 60 {
+        format!("worked for {seconds}s")
+    } else {
+        format!("worked for {}m {}s", seconds / 60, seconds % 60)
+    }
 }
 
 fn assistant_status_pill_view(status: ToolStatus) -> gpui::Div {
