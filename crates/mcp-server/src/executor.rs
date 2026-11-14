@@ -6,6 +6,7 @@
 
 use crate::composition;
 use crate::error::McpError;
+use crate::explorer::ExplorerChange;
 use crate::schema::McpToolDefinition;
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -25,6 +26,7 @@ pub struct McpExecutor {
     project_root: Option<PathBuf>,
     revision: u64, // 种子状态的项目提交计数；commit 成功后自增，与编辑器保持一致。
     media_library: Vec<Asset>, // 资源管理器媒体库快照；只读观察用，非时间线 assets。
+    explorer_change: Option<ExplorerChange>, // 待编辑器应用的媒体库写请求；不改时间线，故不推进 revision。
 }
 
 // Public APIs only
@@ -36,6 +38,7 @@ impl McpExecutor {
             project_root: None,
             revision: 0,
             media_library: Vec::new(),
+            explorer_change: None,
         }
     }
 
@@ -77,6 +80,12 @@ impl McpExecutor {
     /// The current project revision; advances only when a timeline edit commits.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Take the pending media-library change, if the call produced one. The editor
+    /// applies it through its own explorer pipeline; the gateway only validated it.
+    pub fn take_explorer_change(&mut self) -> Option<ExplorerChange> {
+        self.explorer_change.take()
     }
 
     /// Execute one MCP tool call.
@@ -128,6 +137,9 @@ impl McpExecutor {
             "get_selected_clips" => Ok(self.selected_clips_summary()),
             "get_media_items" => Ok(self.media_library_summary()),
             "search_media" => self.search_media(args),
+            "import_media" => self.import_media(args),
+            "remove_media" => self.remove_media(args),
+            "rename_media" => self.rename_media(args),
             "add_clip" => self.add_clip(args),
             "move_clip" => self.move_clip(args),
             "trim_clip" => self.trim_clip(args),
@@ -185,6 +197,85 @@ impl McpExecutor {
                 .map(asset_json)
                 .collect::<Vec<_>>(),
         })
+    }
+
+    fn import_media(&mut self, args: &Value) -> Result<Value, McpError> {
+        let Some(values) = args.get("paths").and_then(Value::as_array) else {
+            return Err(invalid(
+                "import_media",
+                "paths must be an array of file paths",
+            ));
+        };
+        if values.is_empty() {
+            return Err(invalid("import_media", "paths must not be empty"));
+        }
+        let mut paths = Vec::with_capacity(values.len());
+        for value in values {
+            let Some(text) = value.as_str() else {
+                return Err(invalid("import_media", "each path must be a string"));
+            };
+            let path = PathBuf::from(text);
+            if !path.is_absolute() {
+                return Err(invalid(
+                    "import_media",
+                    format!("path {text:?} must be absolute"),
+                ));
+            }
+            if !path.is_file() {
+                return Err(invalid(
+                    "import_media",
+                    format!("path {text:?} is not an existing file"),
+                ));
+            }
+            paths.push(path);
+        }
+        let reported = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        self.explorer_change = Some(ExplorerChange::Import { paths });
+        Ok(json!({ "status": "import_queued", "paths": reported }))
+    }
+
+    fn remove_media(&mut self, args: &Value) -> Result<Value, McpError> {
+        let asset_id = required_ulid("remove_media", args, "asset_id")?;
+        if !self
+            .media_library
+            .iter()
+            .any(|asset| asset.id() == asset_id)
+        {
+            return Err(invalid(
+                "remove_media",
+                format!("asset {asset_id} is not in the media library"),
+            ));
+        }
+        self.explorer_change = Some(ExplorerChange::Remove { asset_id });
+        Ok(json!({ "status": "removed", "asset_id": asset_id.to_string() }))
+    }
+
+    fn rename_media(&mut self, args: &Value) -> Result<Value, McpError> {
+        let asset_id = required_ulid("rename_media", args, "asset_id")?;
+        let name = required_str("rename_media", args, "name")?
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            return Err(invalid("rename_media", "name must not be empty"));
+        }
+        if !self
+            .media_library
+            .iter()
+            .any(|asset| asset.id() == asset_id)
+        {
+            return Err(invalid(
+                "rename_media",
+                format!("asset {asset_id} is not in the media library"),
+            ));
+        }
+        self.explorer_change = Some(ExplorerChange::Rename {
+            asset_id,
+            name: name.clone(),
+        });
+        Ok(json!({ "status": "renamed", "asset_id": asset_id.to_string(), "name": name }))
     }
 
     fn timeline_summary(&self) -> Value {

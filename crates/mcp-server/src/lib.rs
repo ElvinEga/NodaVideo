@@ -7,10 +7,12 @@
 pub mod composition;
 pub mod error;
 pub mod executor;
+pub mod explorer;
 pub mod schema;
 
 pub use error::McpError;
 pub use executor::McpExecutor;
+pub use explorer::ExplorerChange;
 pub use schema::McpToolDefinition;
 
 #[cfg(test)]

@@ -86,6 +86,53 @@ impl McpToolDefinition {
             },
             // Mutation Tools
             Self {
+                name: "import_media".into(),
+                description: "Reference original media files into the project media library without copying them. Probing runs asynchronously in the editor, so this returns import_queued; read the resulting assets (with ids, dimensions and duration) via get_media_items once they appear.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "paths": {
+                            "type": "array",
+                            "description": "Absolute paths of existing media files to reference into the library",
+                            "items": { "type": "string" }
+                        }
+                    },
+                    "required": ["paths"],
+                    "additionalProperties": false
+                }),
+                is_mutation: true,
+                requires_approval: false,
+            },
+            Self {
+                name: "remove_media".into(),
+                description: "Remove an asset from the project media library. The source file on disk is kept. Rejected when timeline clips still reference the asset.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "asset_id": { "type": "string", "description": "ULID of the library asset to remove (from get_media_items)" }
+                    },
+                    "required": ["asset_id"],
+                    "additionalProperties": false
+                }),
+                is_mutation: true,
+                requires_approval: false,
+            },
+            Self {
+                name: "rename_media".into(),
+                description: "Rename an asset's display name in the project media library. The source file on disk is not renamed or moved.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "asset_id": { "type": "string", "description": "ULID of the library asset to rename (from get_media_items)" },
+                        "name": { "type": "string", "description": "New display name (non-empty)" }
+                    },
+                    "required": ["asset_id", "name"],
+                    "additionalProperties": false
+                }),
+                is_mutation: true,
+                requires_approval: false,
+            },
+            Self {
                 name: "add_clip".into(),
                 description: "Add a media asset to a specified timeline track at a given frame position.".into(),
                 input_schema: serde_json::json!({
