@@ -23,6 +23,7 @@ mod global_settings_dialog;
 mod gpui_inspector;
 mod keyboard_shortcuts;
 mod layout;
+mod media_analysis;
 mod media_thumbnail;
 mod preview;
 mod preview_composition;

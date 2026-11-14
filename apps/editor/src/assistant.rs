@@ -792,8 +792,17 @@ fn run_assistant_tool_background(
         .with_selection(selected_clips)
         .with_revision(revision)
         .with_media_library(media_library);
-    let result = executor.execute(&tool_name, arguments, true);
+    let executed = executor.execute(&tool_name, arguments, true);
     let explorer_change = executor.take_explorer_change();
+    let analysis_request = executor.take_analysis_request();
+
+    // 分析工具的真实音频解码在后台线程完成，结果并入网关临时响应；失败则改写为真实错误。
+    let result = match (executed, analysis_request) {
+        (Ok(summary), Some(request)) => {
+            crate::media_analysis::analyze_media_asset(&request.asset, summary)
+        }
+        (other, _) => other,
+    };
 
     // 仅当时间线真正提交（revision 前进）才回写；合成磁盘工具不改时间线，避免空撤销与 revision 漂移。
     let mutated_timeline = if result.is_ok() && executor.revision() > revision {
