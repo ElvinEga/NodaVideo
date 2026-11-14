@@ -27,6 +27,7 @@ use gpui::{
 use nodavideo_agent_acp::AcpAgentProvider;
 use nodavideo_agent_claude::ClaudeAgentProvider;
 use nodavideo_agent_codex::CodexAgentProvider;
+use nodavideo_agent_opencode::OpenCodeAgentProvider;
 use nodavideo_agent_runtime::{
     AgentConfig, AgentEvent, AgentModel, AgentRuntime, MockAgentProvider, SessionId,
 };
@@ -102,6 +103,9 @@ pub(crate) fn register_assistant_providers(runtime: &AgentRuntime, cx: &mut Cont
             .await;
         runtime
             .register_provider(Arc::new(ClaudeAgentProvider::default()))
+            .await;
+        runtime
+            .register_provider(Arc::new(OpenCodeAgentProvider::default()))
             .await;
     })
     .detach();
@@ -1556,7 +1560,7 @@ struct AssistantProvider {
     executes_in_process: bool,
 }
 
-const ASSISTANT_PROVIDERS: [AssistantProvider; 5] = [
+const ASSISTANT_PROVIDERS: [AssistantProvider; 6] = [
     AssistantProvider {
         id: "mock",
         display_name: "Mock Assistant (Offline)",
@@ -1590,6 +1594,13 @@ const ASSISTANT_PROVIDERS: [AssistantProvider; 5] = [
         display_name: "Claude Code (CLI)",
         transport: "CLI",
         hue: 0xd97757,
+        executes_in_process: false,
+    },
+    AssistantProvider {
+        id: "opencode",
+        display_name: "OpenCode",
+        transport: "HTTP",
+        hue: 0x22d3ee,
         executes_in_process: false,
     },
 ];

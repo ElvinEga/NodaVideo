@@ -17,6 +17,7 @@ platform-fs.workspace = true
 nodavideo-agent-acp.workspace = true
 nodavideo-agent-claude.workspace = true
 nodavideo-agent-codex.workspace = true
+nodavideo-agent-opencode.workspace = true
 nodavideo-agent-runtime.workspace = true
 nodavideo-hyperframes-bridge.workspace = true
 nodavideo-mcp-server.workspace = true

@@ -1478,6 +1478,7 @@ dependencies = [
  "nodavideo-agent-acp",
  "nodavideo-agent-claude",
  "nodavideo-agent-codex",
+ "nodavideo-agent-opencode",
  "nodavideo-agent-runtime",
  "nodavideo-hyperframes-bridge",
  "nodavideo-mcp-server",
@@ -3667,6 +3668,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodavideo-agent-opencode"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "log",
+ "nodavideo-agent-runtime",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "nodavideo-agent-runtime"
 version = "0.1.0"
 dependencies = [
@@ -5250,12 +5265,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots",
 ]
@@ -6199,6 +6216,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-util"
+version = "0.7.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "libc",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "toml"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6746,6 +6777,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b1f9c3798725016c6ee5f2f57869ec0831e8bbc0ab0310a86e787e97f41389e"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

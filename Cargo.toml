@@ -18,6 +18,7 @@ members = [
     "crates/agent-acp",
     "crates/agent-codex",
     "crates/agent-claude",
+    "crates/agent-opencode",
     "crates/mcp-server",
     "crates/skill-registry",
     "crates/hyperframes-bridge",
@@ -47,6 +48,7 @@ nodavideo-agent-runtime = { path = "crates/agent-runtime" }
 nodavideo-agent-acp = { path = "crates/agent-acp" }
 nodavideo-agent-codex = { path = "crates/agent-codex" }
 nodavideo-agent-claude = { path = "crates/agent-claude" }
+nodavideo-agent-opencode = { path = "crates/agent-opencode" }
 nodavideo-mcp-server = { path = "crates/mcp-server" }
 nodavideo-skill-registry = { path = "crates/skill-registry" }
 nodavideo-hyperframes-bridge = { path = "crates/hyperframes-bridge" }
