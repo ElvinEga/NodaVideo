@@ -4,6 +4,7 @@
 //! Mutations are applied to a copy and committed only after the whole editing
 //! state validates, so a failed call never leaves a partial edit behind.
 
+use crate::analysis::MediaAnalysisRequest;
 use crate::composition;
 use crate::error::McpError;
 use crate::explorer::ExplorerChange;
@@ -27,6 +28,7 @@ pub struct McpExecutor {
     revision: u64, // 种子状态的项目提交计数；commit 成功后自增，与编辑器保持一致。
     media_library: Vec<Asset>, // 资源管理器媒体库快照；只读观察用，非时间线 assets。
     explorer_change: Option<ExplorerChange>, // 待编辑器应用的媒体库写请求；不改时间线，故不推进 revision。
+    analysis_request: Option<MediaAnalysisRequest>, // 待编辑器后台解码的音频分析请求；只读，不改时间线。
 }
 
 // Public APIs only
@@ -39,6 +41,7 @@ impl McpExecutor {
             revision: 0,
             media_library: Vec::new(),
             explorer_change: None,
+            analysis_request: None,
         }
     }
 
@@ -86,6 +89,12 @@ impl McpExecutor {
     /// applies it through its own explorer pipeline; the gateway only validated it.
     pub fn take_explorer_change(&mut self) -> Option<ExplorerChange> {
         self.explorer_change.take()
+    }
+
+    /// Take the pending media-analysis request, if the call produced one. The editor
+    /// decodes the audio off the UI thread and finalizes the provisional result.
+    pub fn take_analysis_request(&mut self) -> Option<MediaAnalysisRequest> {
+        self.analysis_request.take()
     }
 
     /// Execute one MCP tool call.
@@ -137,6 +146,7 @@ impl McpExecutor {
             "get_selected_clips" => Ok(self.selected_clips_summary()),
             "get_media_items" => Ok(self.media_library_summary()),
             "search_media" => self.search_media(args),
+            "analyze_media" => self.analyze_media(args),
             "import_media" => self.import_media(args),
             "remove_media" => self.remove_media(args),
             "rename_media" => self.rename_media(args),
@@ -362,6 +372,24 @@ impl McpExecutor {
             .map(asset_json)
             .collect::<Vec<_>>();
         Ok(json!({ "assets": assets }))
+    }
+
+    fn analyze_media(&mut self, args: &Value) -> Result<Value, McpError> {
+        let asset_id = required_ulid("analyze_media", args, "asset_id")?;
+        let asset = self
+            .media_library
+            .iter()
+            .find(|asset| asset.id() == asset_id)
+            .cloned()
+            .ok_or_else(|| {
+                invalid(
+                    "analyze_media",
+                    format!("asset {asset_id} is not in the media library"),
+                )
+            })?;
+        let summary = asset_json(&asset);
+        self.analysis_request = Some(MediaAnalysisRequest { asset });
+        Ok(json!({ "status": "analyzing", "asset": summary }))
     }
 
     fn add_clip(&mut self, args: &Value) -> Result<Value, McpError> {
@@ -964,6 +992,7 @@ fn asset_json(asset: &Asset) -> Value {
         "height": asset.height(),
         "duration_seconds": asset.duration(),
         "has_audio": asset.has_audio(),
+        "codec": asset.codec(),
     })
 }
 

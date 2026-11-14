@@ -4,12 +4,14 @@
 //! Tool calls are executed against a [`timeline::TimelineEditingState`]; the
 //! editor owns the live state and decides when an approved change is committed.
 
+pub mod analysis;
 pub mod composition;
 pub mod error;
 pub mod executor;
 pub mod explorer;
 pub mod schema;
 
+pub use analysis::MediaAnalysisRequest;
 pub use error::McpError;
 pub use executor::McpExecutor;
 pub use explorer::ExplorerChange;

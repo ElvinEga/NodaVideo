@@ -84,6 +84,20 @@ impl McpToolDefinition {
                 is_mutation: false,
                 requires_approval: false,
             },
+            Self {
+                name: "analyze_media".into(),
+                description: "Analyze a library media asset offline: probe metadata plus, for assets with audio, peak and RMS loudness in dBFS and silence regions decoded from the waveform. RMS is estimated from the waveform peak envelope, not raw samples. Runs in the editor off the UI thread with no network or API key. Images and silent assets return audio: null. Use the silence regions to plan silence-based cuts.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "asset_id": { "type": "string", "description": "ULID of the library asset to analyze (from get_media_items)" }
+                    },
+                    "required": ["asset_id"],
+                    "additionalProperties": false
+                }),
+                is_mutation: false,
+                requires_approval: false,
+            },
             // Mutation Tools
             Self {
                 name: "import_media".into(),
