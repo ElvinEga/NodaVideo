@@ -19,7 +19,7 @@ use nodavideo_agent_runtime::{
     AgentConfig, AgentEvent, AgentRuntime, MockAgentProvider, SessionId,
 };
 use nodavideo_hyperframes_bridge::{CompositionAsset, load_compositions};
-use nodavideo_mcp_server::{McpError, McpExecutor};
+use nodavideo_mcp_server::{ExplorerChange, McpError, McpExecutor};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::Path;
@@ -436,7 +436,7 @@ impl Editor {
         &mut self,
         call_id: String,
         tool_name: String,
-        outcome: AssistantToolOutcome,
+        mut outcome: AssistantToolOutcome,
         cx: &mut Context<Self>,
     ) {
         if let Some(timeline) = outcome.mutated_timeline {
@@ -445,6 +445,22 @@ impl Editor {
         if let Some(compositions) = outcome.reloaded_compositions {
             self.explorer.compositions = compositions;
             self.schedule_composition_thumbnails(cx);
+        }
+        if let Some(change) = outcome.explorer_change.take() {
+            // 媒体库写请求由编辑器权威应用；失败时把工具结果改写为真实错误，避免上报虚假成功。
+            let applied = match change {
+                ExplorerChange::Import { paths } => {
+                    self.import_external_paths(&paths, cx);
+                    Ok(())
+                }
+                ExplorerChange::Remove { asset_id } => self.remove_media_asset(asset_id, cx),
+                ExplorerChange::Rename { asset_id, name } => {
+                    self.rename_media_asset(asset_id, name)
+                }
+            };
+            if let Err(error) = applied {
+                outcome.result = Err(McpError::ExecutionFailed(format!("{error:#}")));
+            }
         }
 
         let (result, is_error) = match outcome.result {
@@ -656,6 +672,9 @@ struct AssistantToolOutcome {
     mutated_timeline: Option<TimelineEditingState>,
     /// Present only when a composition was created or edited on disk; refreshes the Media Pool.
     reloaded_compositions: Option<Vec<CompositionAsset>>,
+    /// Present only when an explorer write tool validated a media-library change; the editor
+    /// applies it through its own import pipeline and library persistence.
+    explorer_change: Option<ExplorerChange>,
 }
 
 #[derive(Clone, Copy)]
@@ -764,6 +783,7 @@ fn run_assistant_tool_background(
             }),
             mutated_timeline: None,
             reloaded_compositions: None,
+            explorer_change: None,
         };
     };
 
@@ -773,6 +793,7 @@ fn run_assistant_tool_background(
         .with_revision(revision)
         .with_media_library(media_library);
     let result = executor.execute(&tool_name, arguments, true);
+    let explorer_change = executor.take_explorer_change();
 
     // 仅当时间线真正提交（revision 前进）才回写；合成磁盘工具不改时间线，避免空撤销与 revision 漂移。
     let mutated_timeline = if result.is_ok() && executor.revision() > revision {
@@ -801,6 +822,7 @@ fn run_assistant_tool_background(
         result,
         mutated_timeline,
         reloaded_compositions,
+        explorer_change,
     }
 }
 

@@ -268,6 +268,86 @@ impl Editor {
     }
 }
 
+// Public APIs only
+impl Editor {
+    /// Remove an asset from the media library, keeping the source file on disk.
+    /// Rejects removal while the active timeline still references the asset.
+    pub(crate) fn remove_media_asset(
+        &mut self,
+        asset_id: Ulid,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let Some(library_path) = library_asset_path(&self.explorer, asset_id) else {
+            bail!("asset {asset_id} is not in the media library");
+        };
+
+        // 素材按路径与时间线关联（放置时分配新 id），故用解析后的绝对路径判断是否仍被引用。
+        if let Some(timeline) = self.timeline.as_ref()
+            && let Some(timeline_directory) = timeline.path.parent()
+        {
+            let referenced_ids = timeline
+                .editing_state
+                .clips
+                .iter()
+                .filter_map(|clip| clip.asset_id())
+                .collect::<HashSet<_>>();
+            let in_use = timeline
+                .editing_state
+                .assets
+                .iter()
+                .filter(|asset| referenced_ids.contains(&asset.id()))
+                .any(|asset| resolve_asset_path(timeline_directory, asset.path()) == library_path);
+            if in_use {
+                bail!("asset {asset_id} is still referenced by timeline clips");
+            }
+        }
+
+        // 先在副本上构造新的媒体库并落盘，全部成功后再替换库状态。
+        let mut new_imported_paths = self.explorer.imported_paths.clone();
+        new_imported_paths.remove(&library_path);
+        let new_assets: Vec<Asset> = new_imported_paths
+            .iter()
+            .filter_map(|path| self.explorer.media_metadata.get(path))
+            .cloned()
+            .collect();
+        save_imported_media(&self.project_root, &new_assets)?;
+
+        self.explorer.imported_paths = new_imported_paths;
+        self.explorer.media_metadata.remove(&library_path);
+        self.explorer.rebuild_imported_media();
+        self.schedule_media_metadata(cx);
+        Ok(())
+    }
+
+    /// Rename an asset's display name in the media library; the source file is untouched.
+    pub(crate) fn rename_media_asset(&mut self, asset_id: Ulid, name: String) -> Result<()> {
+        let Some(library_path) = library_asset_path(&self.explorer, asset_id) else {
+            bail!("asset {asset_id} is not in the media library");
+        };
+
+        // 先在副本上改名并落盘，全部成功后再替换库状态。
+        let mut new_assets: Vec<Asset> = self
+            .explorer
+            .imported_paths
+            .iter()
+            .filter_map(|path| self.explorer.media_metadata.get(path))
+            .cloned()
+            .collect();
+        for asset in &mut new_assets {
+            if asset.id() == asset_id {
+                asset.set_name(name.clone());
+            }
+        }
+        save_imported_media(&self.project_root, &new_assets)?;
+
+        if let Some(asset) = self.explorer.media_metadata.get_mut(&library_path) {
+            asset.set_name(name);
+        }
+        self.explorer.rebuild_imported_media();
+        Ok(())
+    }
+}
+
 impl Editor {
     pub(super) fn schedule_explorer_search(&mut self, cx: &mut Context<Self>) {
         let query = self.explorer.filter.read(cx).text().trim().to_string();
@@ -841,6 +921,18 @@ pub(crate) fn save_imported_media(project_root: &Path, assets: &[Asset]) -> Resu
     fs::write(&temporary_path, contents)?;
     fs::rename(temporary_path, directory.join("media.json"))?;
     Ok(())
+}
+
+/// The canonical absolute path of a media-library asset, or None when the id is
+/// not a library member. Library membership is imported_paths, not the broader
+/// media_metadata probe cache.
+fn library_asset_path(explorer: &ExplorerState, asset_id: Ulid) -> Option<PathBuf> {
+    explorer
+        .media_metadata
+        .iter()
+        .filter(|(path, _)| explorer.imported_paths.contains(*path))
+        .find(|(_, asset)| asset.id() == asset_id)
+        .map(|(path, _)| path.clone())
 }
 
 #[cfg(test)]
