@@ -24,7 +24,7 @@ pub struct McpToolDefinition {
 impl McpToolDefinition {
     /// Return the list of canonical editor tools supported by NodaVideo.
     pub fn all_tools() -> Vec<Self> {
-        vec![
+        let mut tools = vec![
             // Query Tools
             Self {
                 name: "get_project".into(),
@@ -60,6 +60,17 @@ impl McpToolDefinition {
                 requires_approval: false,
             },
             Self {
+                name: "get_media_items".into(),
+                description: "List the imported media library (explorer media bin): id, name, kind, path, dimensions and duration. Independent of what is placed on the timeline.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+                is_mutation: false,
+                requires_approval: false,
+            },
+            Self {
                 name: "search_media".into(),
                 description: "Search imported media assets in the project media bin by name or media type.".into(),
                 input_schema: serde_json::json!({
@@ -73,7 +84,68 @@ impl McpToolDefinition {
                 is_mutation: false,
                 requires_approval: false,
             },
+            Self {
+                name: "analyze_media".into(),
+                description: "Analyze a library media asset offline: probe metadata plus, for assets with audio, peak and RMS loudness in dBFS and silence regions decoded from the waveform. RMS is estimated from the waveform peak envelope, not raw samples. Runs in the editor off the UI thread with no network or API key. Images and silent assets return audio: null. Use the silence regions to plan silence-based cuts.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "asset_id": { "type": "string", "description": "ULID of the library asset to analyze (from get_media_items)" }
+                    },
+                    "required": ["asset_id"],
+                    "additionalProperties": false
+                }),
+                is_mutation: false,
+                requires_approval: false,
+            },
             // Mutation Tools
+            Self {
+                name: "import_media".into(),
+                description: "Reference original media files into the project media library without copying them. Probing runs asynchronously in the editor, so this returns import_queued; read the resulting assets (with ids, dimensions and duration) via get_media_items once they appear.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "paths": {
+                            "type": "array",
+                            "description": "Absolute paths of existing media files to reference into the library",
+                            "items": { "type": "string" }
+                        }
+                    },
+                    "required": ["paths"],
+                    "additionalProperties": false
+                }),
+                is_mutation: true,
+                requires_approval: false,
+            },
+            Self {
+                name: "remove_media".into(),
+                description: "Remove an asset from the project media library. The source file on disk is kept. Rejected when timeline clips still reference the asset.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "asset_id": { "type": "string", "description": "ULID of the library asset to remove (from get_media_items)" }
+                    },
+                    "required": ["asset_id"],
+                    "additionalProperties": false
+                }),
+                is_mutation: true,
+                requires_approval: false,
+            },
+            Self {
+                name: "rename_media".into(),
+                description: "Rename an asset's display name in the project media library. The source file on disk is not renamed or moved.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "asset_id": { "type": "string", "description": "ULID of the library asset to rename (from get_media_items)" },
+                        "name": { "type": "string", "description": "New display name (non-empty)" }
+                    },
+                    "required": ["asset_id", "name"],
+                    "additionalProperties": false
+                }),
+                is_mutation: true,
+                requires_approval: false,
+            },
             Self {
                 name: "add_clip".into(),
                 description: "Add a media asset to a specified timeline track at a given frame position.".into(),
@@ -82,7 +154,6 @@ impl McpToolDefinition {
                     "properties": {
                         "track_id": { "type": "string", "description": "Target track UUID" },
                         "asset_id": { "type": "string", "description": "Media asset UUID to place" },
-                        "name": { "type": "string", "description": "Display name of the new clip" },
                         "start_frame": { "type": "integer", "minimum": 0, "description": "Timeline start frame" },
                         "source_in": { "type": "integer", "minimum": 0, "description": "Source asset in-point in frames" },
                         "source_out": { "type": "integer", "minimum": 1, "description": "Source asset out-point in frames" }
@@ -223,36 +294,119 @@ impl McpToolDefinition {
                 requires_approval: false,
             },
             Self {
-                name: "add_composition".into(),
-                description: "Instantiate a motion graphics composition template and place it on a timeline track.".into(),
+                name: "list_compositions".into(),
+                description: "List the motion graphics compositions saved in the current project, with their template and parameter values.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+                is_mutation: false,
+                requires_approval: false,
+            },
+            Self {
+                name: "create_composition".into(),
+                description: "Create a reusable motion graphics composition from a template and save it to the project. Returns its id for editing, rendering and placement. The composition stays editable; it is not flattened to video.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "template_id": { "type": "string", "description": "ID of template (e.g. lower-third-modern, title-minimal, social-caption-card)" },
-                        "track_id": { "type": "string", "description": "UUID of video track (recommended: V2 or upper track)" },
-                        "start_frame": { "type": "integer", "minimum": 0, "description": "Timeline frame placement position" },
-                        "name": { "type": "string", "description": "Optional human-readable title" },
-                        "parameters": { "type": "object", "description": "Customizable template parameters (title, subtitle, colors, etc.)" }
+                        "template_id": { "type": "string", "description": "Template id from list_composition_templates" },
+                        "name": { "type": "string", "description": "Display name (defaults to the template name)" }
                     },
-                    "required": ["template_id", "track_id", "start_frame"],
+                    "required": ["template_id"],
                     "additionalProperties": false
                 }),
                 is_mutation: true,
                 requires_approval: false,
             },
             Self {
-                name: "set_clip_transform".into(),
-                description: "Update the spatial and visual transform attributes (position, scale, rotation, opacity) of a timeline clip.".into(),
+                name: "inspect_composition".into(),
+                description: "Inspect a project composition: its template, current parameter values, dimensions and duration.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "clip_id": { "type": "string", "description": "UUID of the clip to update" },
-                        "position_x": { "type": "number", "description": "Horizontal position offset in pixels (0.0 = centered)" },
-                        "position_y": { "type": "number", "description": "Vertical position offset in pixels (0.0 = centered)" },
-                        "scale_x": { "type": "number", "minimum": 0.01, "description": "Horizontal scale multiplier (1.0 = 100%)" },
-                        "scale_y": { "type": "number", "minimum": 0.01, "description": "Vertical scale multiplier (1.0 = 100%)" },
-                        "rotation": { "type": "number", "description": "Rotation in degrees clockwise" },
-                        "opacity": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Visual opacity (0.0 to 1.0)" }
+                        "composition_id": { "type": "string", "description": "ULID of the composition" }
+                    },
+                    "required": ["composition_id"],
+                    "additionalProperties": false
+                }),
+                is_mutation: false,
+                requires_approval: false,
+            },
+            Self {
+                name: "edit_composition".into(),
+                description: "Update a composition's template parameters (text, colors, numbers). Values are validated against the template before saving, so the source stays editable and consistent.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "composition_id": { "type": "string", "description": "ULID of the composition" },
+                        "parameters": {
+                            "type": "object",
+                            "description": "Parameter name/value pairs to merge (e.g. {\"title\": \"Jane Doe\", \"accent_color\": \"#10b981\"})",
+                            "additionalProperties": true
+                        }
+                    },
+                    "required": ["composition_id", "parameters"],
+                    "additionalProperties": false
+                }),
+                is_mutation: true,
+                requires_approval: false,
+            },
+            Self {
+                name: "render_composition".into(),
+                description: "Render a composition to a transparent PNG cache asset and return its path. Rendering is a cache step; the editable composition source is preserved.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "composition_id": { "type": "string", "description": "ULID of the composition" }
+                    },
+                    "required": ["composition_id"],
+                    "additionalProperties": false
+                }),
+                is_mutation: false,
+                requires_approval: false,
+            },
+            Self {
+                name: "validate_composition".into(),
+                description: "Validate a composition's parameters against its template schema without rendering or modifying it.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "composition_id": { "type": "string", "description": "ULID of the composition" }
+                    },
+                    "required": ["composition_id"],
+                    "additionalProperties": false
+                }),
+                is_mutation: false,
+                requires_approval: false,
+            },
+            Self {
+                name: "add_composition_to_timeline".into(),
+                description: "Place an editable motion graphics composition on the timeline as a clip. Requires user approval. Omit track_id to create a dedicated upper video track; the composition stays editable and is not flattened to video.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "composition_id": { "type": "string", "description": "ULID of the project composition to place" },
+                        "start_frame": { "type": "integer", "minimum": 0, "description": "Timeline position in frames where the composition starts" },
+                        "track_id": { "type": "string", "description": "Optional ULID of an existing video track; omit to create a dedicated upper video track" },
+                        "duration_frames": { "type": "integer", "minimum": 1, "description": "Optional duration in timeline frames; defaults to the composition's native length" }
+                    },
+                    "required": ["composition_id", "start_frame"],
+                    "additionalProperties": false
+                }),
+                is_mutation: true,
+                requires_approval: true,
+            },
+            Self {
+                name: "set_clip_transform".into(),
+                description: "Update the transform of a video clip or the position of a text clip.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "clip_id": { "type": "string", "description": "ULID of the clip to update" },
+                        "position_x": { "type": "number", "description": "Horizontal offset in timeline pixels (0.0 = centered)" },
+                        "position_y": { "type": "number", "description": "Vertical offset in timeline pixels (0.0 = centered)" },
+                        "scale": { "type": "number", "minimum": 0.01, "description": "Uniform scale multiplier for video clips (1.0 = 100%)" }
                     },
                     "required": ["clip_id"],
                     "additionalProperties": false
@@ -262,46 +416,15 @@ impl McpToolDefinition {
             },
             Self {
                 name: "set_clip_audio".into(),
-                description: "Update the audio parameters (volume dB gain, stereo pan) of a timeline clip.".into(),
+                description: "Update the audio gain and mute state of a video or audio clip.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "clip_id": { "type": "string", "description": "UUID of the clip to update" },
-                        "volume_db": { "type": "number", "minimum": -100.0, "maximum": 24.0, "description": "Audio gain in decibels (0.0 = unity gain, negative = attenuate, positive = boost)" },
-                        "pan": { "type": "number", "minimum": -1.0, "maximum": 1.0, "description": "Stereo pan position (-1.0 = full left, 0.0 = center, +1.0 = full right)" }
+                        "clip_id": { "type": "string", "description": "ULID of the clip to update" },
+                        "gain_db": { "type": "number", "minimum": -100.0, "maximum": 24.0, "description": "Audio gain in decibels (0.0 = unity gain)" },
+                        "muted": { "type": "boolean", "description": "Whether the clip audio is muted" }
                     },
                     "required": ["clip_id"],
-                    "additionalProperties": false
-                }),
-                is_mutation: true,
-                requires_approval: false,
-            },
-            Self {
-                name: "add_transition".into(),
-                description: "Add a visual or audio transition (crossfade, dissolve, fade to black, wipe) across an edit cut between two adjacent clips on a track.".into(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "track_id": { "type": "string", "description": "UUID of track containing the edit cut" },
-                        "from_clip_id": { "type": "string", "description": "UUID of the outgoing clip" },
-                        "to_clip_id": { "type": "string", "description": "UUID of the incoming clip" },
-                        "transition_type": {
-                            "type": "string",
-                            "enum": ["crossfade", "dissolve", "fade_to_black", "dip_to_white", "wipe_left", "wipe_right"],
-                            "description": "Type of transition effect"
-                        },
-                        "alignment": {
-                            "type": "string",
-                            "enum": ["centered", "start_at_cut", "end_at_cut"],
-                            "description": "Alignment of the transition duration relative to cut frame (default: centered)"
-                        },
-                        "duration_frames": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "description": "Duration of the transition in frames (default: 24)"
-                        }
-                    },
-                    "required": ["track_id", "from_clip_id", "to_clip_id"],
                     "additionalProperties": false
                 }),
                 is_mutation: true,
@@ -362,6 +485,25 @@ impl McpToolDefinition {
                 is_mutation: true,
                 requires_approval: false,
             },
-        ]
+        ];
+        for tool in &mut tools {
+            if tool.is_mutation {
+                if let Some(properties) = tool
+                    .input_schema
+                    .get_mut("properties")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    properties.insert(
+                        "expected_revision".into(),
+                        serde_json::json!({
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Optional project_revision from a previous result. The call is rejected as stale if the project has changed since, so the agent never overwrites newer user edits."
+                        }),
+                    );
+                }
+            }
+        }
+        tools
     }
 }

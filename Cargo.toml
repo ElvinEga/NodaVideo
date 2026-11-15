@@ -1,22 +1,29 @@
 [workspace]
 resolver = "3"
 members = [
-    "apps/desktop",
-    "crates/project",
-    "crates/media-engine",
-    "crates/timeline",
-    "crates/command-system",
+    # Editor core (from OpenCut)
+    "libs/media-backend",
+    "libs/timeline",
+    "libs/engine",
+    "libs/transcribe",
+    "libs/player-ui",
+    "libs/waveform",
+    "libs/platform-fs",
+    # Applications (from OpenCut)
+    "apps/editor",
+    "apps/player",
+    "apps/cli",
+    # AI layer (from NodaVideo, preserved)
     "crates/agent-runtime",
-    "crates/mcp-server",
     "crates/agent-acp",
     "crates/agent-codex",
     "crates/agent-claude",
+    "crates/agent-opencode",
+    "crates/mcp-server",
     "crates/skill-registry",
     "crates/hyperframes-bridge",
-    "crates/audio-engine",
-    "crates/gpu-renderer",
-    "crates/editor-core",
 ]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -24,47 +31,98 @@ edition = "2024"
 rust-version = "1.92.0"
 license = "Apache-2.0"
 authors = ["NodaVideo Contributors"]
+publish = false
 
 [workspace.dependencies]
-nodavideo-project = { path = "crates/project" }
-nodavideo-media-engine = { path = "crates/media-engine" }
-nodavideo-timeline = { path = "crates/timeline" }
-nodavideo-command-system = { path = "crates/command-system" }
+# OpenCut libs (editor core)
+timeline = { path = "libs/timeline" }
+engine = { path = "libs/engine" }
+transcribe = { path = "libs/transcribe" }
+media-backend = { path = "libs/media-backend" }
+player-ui = { path = "libs/player-ui" }
+waveform = { path = "libs/waveform" }
+platform-fs = { path = "libs/platform-fs" }
+
+# NodaVideo AI crates (preserved)
 nodavideo-agent-runtime = { path = "crates/agent-runtime" }
-nodavideo-mcp-server = { path = "crates/mcp-server" }
 nodavideo-agent-acp = { path = "crates/agent-acp" }
 nodavideo-agent-codex = { path = "crates/agent-codex" }
 nodavideo-agent-claude = { path = "crates/agent-claude" }
+nodavideo-agent-opencode = { path = "crates/agent-opencode" }
+nodavideo-mcp-server = { path = "crates/mcp-server" }
 nodavideo-skill-registry = { path = "crates/skill-registry" }
 nodavideo-hyperframes-bridge = { path = "crates/hyperframes-bridge" }
-nodavideo-audio-engine = { path = "crates/audio-engine" }
-nodavideo-gpu-renderer = { path = "crates/gpu-renderer" }
-nodavideo-editor-core = { path = "crates/editor-core" }
-gpui-kit = "0.9.0"
-anyhow = "1.0.95"
+
+# GPUI (vendored Zed)
+gpui = { path = "vendor/zed/crates/gpui" }
+gpui_platform = { path = "vendor/zed/crates/gpui_platform", features = ["font-kit"] }
+gpui_tokio = { path = "vendor/zed/crates/gpui_tokio" }
+
+# FFmpeg FFI
+ffmpeg-next = "8.1"
+
+# Audio
+cpal = "0.17.1"
+
+# macOS-specific
+metal = "0.33"
+core-foundation = "0.10"
+core-video = { version = "0.5.2", features = ["metal"] }
+block2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "NSEvent",
+    "block2",
+    "objc2-core-foundation",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "alloc",
+    "NSError",
+    "NSFileManager",
+    "NSString",
+    "NSURL",
+] }
+objc2-core-foundation = "0.3"
+objc2-core-video = "0.3"
+
+# General
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "process", "io-util", "sync"] }
+reqwest = { version = "=0.12.24", default-features = false, features = ["multipart", "rustls-tls"] }
+clap = { version = "=4.5.49", features = ["derive"] }
+schemars = { version = "=1.2.2", features = ["derive"] }
+resvg = "=0.45.1"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+env_logger = "0.11"
+image = { version = "0.25", default-features = false, features = [
+    "bmp",
+    "gif",
+    "ico",
+    "jpeg",
+    "png",
+    "webp",
+] }
+log = "0.4"
+notify = "=8.2.1"
+smallvec = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-segmentation = "1"
+unicode-script = "0.5.8"
+ulid = { version = "3", features = ["serde"] }
 thiserror = "2.0.11"
-serde = { version = "1.0.217", features = ["derive"] }
-serde_json = "1.0.138"
-rusqlite = { version = "0.32", features = ["bundled"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-uuid = { version = "1.11", features = ["v4", "serde"] }
-chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 tempfile = "3.17"
 async-trait = "0.1.92"
-tokio = { version = "1.43", features = ["sync", "rt", "process", "io-util", "time", "macros"] }
-futures = "0.3.34"
-wgpu = "30.0"
-bytemuck = { version = "1.25", features = ["derive"] }
+uuid = { version = "1.11", features = ["v4", "serde"] }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "allow"
 missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
-# Allow common UI/app patterns
 module_name_repetitions = "allow"
 cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
@@ -93,23 +151,16 @@ assert_is_empty = "allow"
 large_stack_frames = "allow"
 type_complexity = "allow"
 
-[profile.dev]
-opt-level = 0
-debug = true
-
-# Optimize heavy UI framework dependencies in dev mode for responsive UI performance
-[profile.dev.package]
-gpui-pre = { opt-level = 3 }
-gpui-component = { opt-level = 3 }
-gpui-kit = { opt-level = 3 }
-gpui-kit-assets = { opt-level = 3 }
-gpui-pre-platform = { opt-level = 3 }
-rustybuzz = { opt-level = 3 }
-taffy = { opt-level = 3 }
-ttf-parser = { opt-level = 3 }
+[profile.dev.package."*"]
+opt-level = 1
 
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[patch."https://github.com/zed-industries/zed"]
+gpui = { path = "vendor/zed/crates/gpui" }
+gpui_macros = { path = "vendor/zed/crates/gpui_macros" }
+gpui_platform = { path = "vendor/zed/crates/gpui_platform" }

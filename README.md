@@ -1,103 +1,94 @@
-# NodaVideo 🎬
+# NodaVideo
 
-> **Your timeline. Your creativity. Your AI.**
+*Your timeline. Your creativity. Your AI.*
 
-NodaVideo is an AI-powered desktop video editor: a native Rust + GPUI application built for cross-platform performance (macOS, Windows, and Linux). It combines a professional multi-track timeline with pluggable AI agents (Claude Code, Codex, Antigravity, and ACP-compatible providers) that can create, edit, and manage video projects under full user control.
+An AI-powered desktop video editor built with native Rust + GPUI. Cross-platform
+(macOS, Windows, Linux), featuring a professional multi-track timeline, real-time
+GPU-accelerated playback, and pluggable AI agents.
 
----
+## Architecture
+
+NodaVideo combines two codebases:
+
+- **Editor core** — from [OpenCut](https://github.com/opencut/opencut): working
+  video engine with `ffmpeg-next` FFI decoding, VideoToolbox on macOS, Metal GPU
+  compositing, `cpal` audio output, and a shared decoder path for preview + export.
+- **AI layer** — NodaVideo's original agent system: pluggable `AgentProvider`
+  trait, ACP/Codex/Claude adapters, MCP tool server, skill registry, and
+  HyperFrames motion graphics bridge.
 
 ## Product Direction
 
-1. **Professional video editor first**, AI assistant second. Hiding the AI workspace leaves an uncompromising, fully featured desktop NLE.
-2. **Complete user control.** Agents propose actions and draft edits; the user reviews, inspects, approves, or undoes them.
-3. **Provider independence.** Antigravity, Codex, Gemini CLI, Claude Code, and ACP-compatible agents operate interchangeably without vendor lock-in.
-4. **Deterministic command system.** Every state mutation passes through an undoable, replayable `EditorCommand` stream.
+1. **Professional video editor first**, AI assistant second. Hiding the AI
+   workspace leaves a fully featured desktop NLE.
+2. **Complete user control.** Agents propose actions; the user reviews, approves,
+   or undoes them.
+3. **Provider independence.** Antigravity, Codex, Gemini CLI, Claude Code, and
+   ACP-compatible agents operate interchangeably without vendor lock-in.
+4. **Extensible AI skills** system for video-production capabilities.
 
----
+## Requirements
 
-## Architectural Principles
+- Latest stable Rust (edition 2024, MSRV 1.92.0)
+- Vendored FFmpeg 8.1.2 development libraries in `vendor/ffmpeg-8.1.2/`
+- Vendored Zed GPUI at `vendor/zed/` (git clone or submodule)
+- On macOS: Xcode command line tools and `pkg-config` (`brew install pkg-config`)
+- On Windows: Visual Studio 2022 C++ Build Tools and Windows SDK
 
-- **Two decoupled engines:**
-  - The **editor** (Rust + GPUI) owns all project documents, media bin assets, timeline editing, preview playback, and rendering.
-  - The **agent runtime** orchestrates external AI CLIs via structured protocols (ACP, Codex app-server, MCP tool surface) and never directly mutates editor state.
-- **Single mutation gateway:** No backdoor edits or direct disk writes. All actions—human or AI—are captured by `crates/command-system`.
-- **Permissions in the editor:** Approval gates for destructive operations (delete, overwrite, export) are enforced by the command system and surfaced in the UI.
-- **Heavy work off the UI thread:** Media decoding, effects compositing, audio mixing, transcription, and agent I/O run asynchronously off the main GPUI thread.
+## Build and run
 
----
+Run commands from the repository root. Each command selects a platform explicitly:
 
-## Prerequisites
-
-- **Rust toolchain:** Rust 1.92.0 or later (declared MSRV). Edition 2024.
-- **macOS:**
-  - macOS 15+ recommended.
-  - Xcode Command Line Tools (`xcode-select --install`).
-- **Windows:**
-  - Windows 10 or later (64-bit).
-  - Visual Studio 2022 C++ Build Tools (MSVC toolchain) and Windows SDK.
-  - CMake available on `PATH`.
-- **Linux (Ubuntu 24.04 / Debian):**
-  - Wayland or X11 session with working Vulkan drivers.
-  - Required packages:
-    ```bash
-    sudo apt update
-    sudo apt install -y gcc g++ clang libfontconfig-dev libwayland-dev \
-      libwebkit2gtk-4.1-dev libxkbcommon-x11-dev libx11-xcb-dev \
-      libssl-dev libzstd-dev libasound2-dev vulkan-validationlayers libvulkan1
-    ```
-
----
-
-## Building and Running
-
-Clone the repository and build the desktop application:
-
-```bash
-# Run the desktop application
-cargo run -p nodavideo-desktop
-
-# Run test suite across workspace
-cargo test --workspace
-
-# Run Clippy checks with warnings treated as errors
-cargo clippy --workspace --all-targets -- -D warnings
-
-# Verify formatting
-cargo fmt --all -- --check
+```sh
+cargo editor-mac                 # Windows: cargo editor-win
+cargo player-mac <file>          # Windows: cargo player-win <file>
+cargo build-editor-mac
+cargo test-mac                   # Windows: cargo test-win
 ```
 
----
+For other Cargo operations, pass the platform configuration:
 
-## Workspace Layout
-
-```
-NodaVideo/
-├── apps/
-│   └── desktop/                 # Native GPUI desktop application (nodavideo-desktop)
-├── crates/
-│   ├── project/                 # Versioned project document, atomic save/load (nodavideo-project)
-│   └── media-engine/            # FFmpeg probing, thumbnails, waveforms, SQLite cache (nodavideo-media-engine)
-├── docs/                        # Architecture & GPUI Kit guidelines
-├── skills/                      # Reference and extensible production skills
-├── AGENTS.md                    # Canonical instructions and contracts for AI agents
-├── Cargo.toml                   # Workspace manifest with centralized dependencies & lints
-├── Cargo.lock                   # Pinned dependency graph
-└── rustfmt.toml                 # Workspace formatting configuration
+```sh
+cargo check --config .cargo/macos.toml -p editor   # Windows: .cargo/windows.toml
+cargo clippy --config .cargo/macos.toml --all-features
 ```
 
----
+## Workspace structure
 
-## Milestone Roadmap
+```
+libs/           — Editor core (from OpenCut)
+  media-backend/  FFmpeg FFI video/audio decoding, VideoToolbox
+  timeline/       Timeline model (Clip, Track, FrameRate, serialization)
+  engine/         Playback engine (TimelineBackend, TimelineDecoder, GPU/CPU, export)
+  transcribe/     Audio transcription (Whisper API)
+  player-ui/      Player UI components, cpal audio output
+  waveform/       Audio waveform extraction
+  platform-fs/    Platform-specific file system operations
 
-- [x] **M0 (Foundation - Bootstrap):** Root workspace, centralized dependencies, MSRV 1.92+, GPUI Kit 0.9.0 desktop entry, clean startup & shutdown.
-- [x] **M0 (Desktop Shell):** Native menus with shortcuts, top toolbar, workspace tabs (Edit/Color/Audio/AI Studio), 5 resizable panels (Media Browser, Preview Monitor, Inspector, Timeline, dockable AI Assistant), session persistence, and dark NLE theme.
-- [x] **M1 (Media Management):** Asset bin, FFmpeg/FFprobe probing, thumbnails, normalized audio waveforms, SQLite index cache, search/filtering, and persistent media references.
-- [ ] **M2 (Timeline Engine):** Multi-track editing, trimming, splitting, ripple edits, snapping, pure deterministic model.
-- [ ] **M3 (Preview & Export):** Playback sync, wgpu compositing, first vertical slice (import → edit → export MP4).
-- [ ] **M4 (AI Integration):** ACP adapter, Codex app-server adapter, Claude CLI stream, MCP tool surface.
-- [ ] **M5 (AI Editing Workflows):** Smart cuts, auto-captions, motion graphics, prompt-to-edit workflows.
+apps/           — Applications
+  editor/         Multi-track NLE editor
+  player/         Standalone debugging player
+  cli/            Headless CLI for probing, validating, exporting
 
----
+crates/         — AI layer (NodaVideo-specific)
+  agent-runtime/  AgentProvider trait, AgentRuntime, MockAgentProvider
+  agent-acp/      ACP JSON-RPC adapter (Antigravity, Gemini CLI)
+  agent-codex/    Codex app-server JSON-RPC adapter
+  agent-claude/   Claude Code CLI streaming adapter
+  mcp-server/     MCP editor tool schemas and executor
+  skill-registry/ SKILL.md parser, discovery, prompt composer
+  hyperframes-bridge/ Motion graphics templates, HTML/SVG composition
+
+skills/         — Production AI skills (smart-cuts, auto-captions, etc.)
+templates/      — Motion graphics template bundles
+sidecars/       — HyperFrames sidecar renderer
+vendor/         — Vendored Zed GPUI + FFmpeg libraries
+```
+
+## Documentation
+
+- [Migration plan](docs/MIGRATION_PLAN.md): Detailed plan for the OpenCut core replacement
+- [Design spec](design/spec.md): User stories and acceptance criteria (from OpenCut)
 
 ## License
 

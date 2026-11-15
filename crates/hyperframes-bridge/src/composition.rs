@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use nodavideo_project::FrameRate;
 use serde::{Deserialize, Serialize};
+use timeline::FrameRate;
 
 use crate::id::CompositionId;
 use crate::template::TemplateDefinition;
@@ -36,7 +36,7 @@ impl Composition {
             template_id: template.id.clone(),
             name: name.into(),
             duration_frames: template.default_duration_frames,
-            fps: FrameRate::FPS_24,
+            fps: FrameRate::new(24, 1),
             width: 1920,
             height: 1080,
             parameters: params,

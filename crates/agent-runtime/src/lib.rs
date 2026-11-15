@@ -15,7 +15,7 @@ pub use error::AgentRuntimeError;
 pub use event::AgentEvent;
 pub use id::SessionId;
 pub use mock::MockAgentProvider;
-pub use provider::{AgentConfig, AgentProvider};
+pub use provider::{AgentConfig, AgentModel, AgentProvider, PermissionMode};
 pub use registry::AgentRuntime;
 
 #[cfg(test)]

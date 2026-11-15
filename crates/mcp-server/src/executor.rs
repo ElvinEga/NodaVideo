@@ -1,43 +1,116 @@
-//! Tool execution dispatcher translating MCP tool calls into queries and EditorCommands.
+//! Tool execution dispatcher for MCP tool calls.
+//!
+//! The executor owns an editing state and applies tool invocations to it.
+//! Mutations are applied to a copy and committed only after the whole editing
+//! state validates, so a failed call never leaves a partial edit behind.
 
-use std::str::FromStr;
-
-use nodavideo_command_system::{
-    AddClip, AddComposition, AddTextOverlay, AddTransition, CommandHistory, DeleteClip,
-    EditorCommand, GenerateCaptions, MoveClip, SetClipAudio, SetClipTransform, SplitClip,
-    StagedChangeset, TrimClip,
-};
-use nodavideo_hyperframes_bridge::{Composition, CompositionRenderer, TemplateRegistry};
-use nodavideo_project::{AssetId, MediaType, ProjectDocument};
-use nodavideo_timeline::{
-    Clip, ClipId, Sequence, TextAlignment, TextStyle, TrackId, Transition, TransitionAlignment,
-    TransitionId, TransitionType,
-};
-
+use crate::analysis::MediaAnalysisRequest;
+use crate::composition;
 use crate::error::McpError;
+use crate::explorer::ExplorerChange;
 use crate::schema::McpToolDefinition;
+use serde_json::{Value, json};
+use std::collections::HashSet;
+use std::path::PathBuf;
+use timeline::{
+    Asset, AudioClip, AudioClipProperties, Clip, CompositionClip, MediaKind, TextBackground,
+    TextClip, TextClipProperties, TimelineEditingState, TimelineFrameIndex, Track, TrackKind,
+    VideoClip, VideoClipProperties,
+};
+use ulid::Ulid;
 
-/// Dispatches typed MCP tool invocations against editor project and timeline state.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct McpExecutor;
+/// Dispatches typed MCP tool invocations against an editing state.
+#[derive(Debug, Clone, Default)]
+pub struct McpExecutor {
+    timeline: TimelineEditingState,
+    selected_clips: HashSet<Ulid>,
+    project_root: Option<PathBuf>,
+    revision: u64, // 种子状态的项目提交计数；commit 成功后自增，与编辑器保持一致。
+    media_library: Vec<Asset>, // 资源管理器媒体库快照；只读观察用，非时间线 assets。
+    explorer_change: Option<ExplorerChange>, // 待编辑器应用的媒体库写请求；不改时间线，故不推进 revision。
+    analysis_request: Option<MediaAnalysisRequest>, // 待编辑器后台解码的音频分析请求；只读，不改时间线。
+}
 
+// Public APIs only
 impl McpExecutor {
-    /// Execute an MCP tool call against the given project and sequence state.
+    pub fn new(timeline: TimelineEditingState) -> Self {
+        Self {
+            timeline,
+            selected_clips: HashSet::new(),
+            project_root: None,
+            revision: 0,
+            media_library: Vec::new(),
+            explorer_change: None,
+            analysis_request: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_selection(mut self, selected_clips: HashSet<Ulid>) -> Self {
+        self.selected_clips = selected_clips;
+        self
+    }
+
+    /// Set the project directory used by composition tools for on-disk persistence.
+    #[must_use]
+    pub fn with_project_root(mut self, project_root: PathBuf) -> Self {
+        self.project_root = Some(project_root);
+        self
+    }
+
+    /// Seed the project revision the caller believes is current, for stale-state checks.
+    #[must_use]
+    pub fn with_revision(mut self, revision: u64) -> Self {
+        self.revision = revision;
+        self
+    }
+
+    /// Seed the explorer media library snapshot so read tools can observe imported media.
+    #[must_use]
+    pub fn with_media_library(mut self, media_library: Vec<Asset>) -> Self {
+        self.media_library = media_library;
+        self
+    }
+
+    pub fn timeline(&self) -> &TimelineEditingState {
+        &self.timeline
+    }
+
+    pub fn into_timeline(self) -> TimelineEditingState {
+        self.timeline
+    }
+
+    /// The current project revision; advances only when a timeline edit commits.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Take the pending media-library change, if the call produced one. The editor
+    /// applies it through its own explorer pipeline; the gateway only validated it.
+    pub fn take_explorer_change(&mut self) -> Option<ExplorerChange> {
+        self.explorer_change.take()
+    }
+
+    /// Take the pending media-analysis request, if the call produced one. The editor
+    /// decodes the audio off the UI thread and finalizes the provisional result.
+    pub fn take_analysis_request(&mut self) -> Option<MediaAnalysisRequest> {
+        self.analysis_request.take()
+    }
+
+    /// Execute one MCP tool call.
     ///
-    /// If the tool mutates state, it constructs and executes an `EditorCommand`
-    /// through `CommandHistory`, ensuring deterministic application and undo/redo support.
+    /// Tools marked as requiring approval are rejected unless `approved` is true.
+    /// The caller owns the approval prompt; this check is not a UI policy.
     pub fn execute(
+        &mut self,
         tool_name: &str,
-        args: &serde_json::Value,
-        project: &ProjectDocument,
-        sequence: &mut Sequence,
-        history: &mut CommandHistory,
+        args: &Value,
         approved: bool,
-    ) -> Result<serde_json::Value, McpError> {
+    ) -> Result<Value, McpError> {
         let tools = McpToolDefinition::all_tools();
         let def = tools
             .iter()
-            .find(|t| t.name == tool_name)
+            .find(|definition| definition.name == tool_name)
             .ok_or_else(|| McpError::ToolNotFound(tool_name.to_string()))?;
 
         if def.requires_approval && !approved {
@@ -47,1763 +120,1084 @@ impl McpExecutor {
             });
         }
 
-        match tool_name {
-            "get_project" => Ok(serde_json::json!({
-                "id": project.id.to_string(),
-                "name": project.name,
-                "asset_count": project.assets.len(),
-                "duration_frames": sequence.duration_frames(),
-                "duration_timecode": sequence.duration_timecode(),
-                "fps": sequence.fps.to_f64(),
-            })),
-
-            "get_timeline" => {
-                let tracks: Vec<_> = sequence
-                    .tracks
-                    .iter()
-                    .map(|t| {
-                        serde_json::json!({
-                            "id": t.id.to_string(),
-                            "name": t.name,
-                            "type": format!("{:?}", t.track_type).to_lowercase(),
-                            "clip_count": t.clips.len(),
-                            "clips": t.clips.iter().map(|c| {
-                                serde_json::json!({
-                                    "id": c.id.to_string(),
-                                    "name": c.name,
-                                    "start_frame": c.start_frame,
-                                    "duration_frames": c.duration_frames(),
-                                    "source_in": c.source_in,
-                                    "source_out": c.source_out,
-                                })
-                            }).collect::<Vec<_>>()
-                        })
-                    })
-                    .collect();
-
-                Ok(serde_json::json!({
-                    "sequence_id": sequence.id.to_string(),
-                    "name": sequence.name,
-                    "fps": sequence.fps.to_f64(),
-                    "width": sequence.width,
-                    "height": sequence.height,
-                    "duration_frames": sequence.duration_frames(),
-                    "duration_timecode": sequence.duration_timecode(),
-                    "tracks": tracks
-                }))
-            }
-
-            "get_selected_clips" => {
-                // Return clips with selected flag if any
-                Ok(serde_json::json!({
-                    "selected_clips": []
-                }))
-            }
-
-            "search_media" => {
-                let query = args
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                let type_filter = args.get("media_type").and_then(|v| v.as_str());
-
-                let matching: Vec<_> = project
-                    .assets
-                    .iter()
-                    .filter(|a| {
-                        if !query.is_empty()
-                            && !a
-                                .file_path
-                                .display()
-                                .to_string()
-                                .to_lowercase()
-                                .contains(&query)
-                        {
-                            return false;
-                        }
-                        if let Some(tf) = type_filter {
-                            matches!(
-                                (tf, a.media_type),
-                                ("video", MediaType::Video)
-                                    | ("audio", MediaType::Audio)
-                                    | ("image", MediaType::Image)
-                            )
-                        } else {
-                            true
-                        }
-                    })
-                    .map(|a| {
-                        serde_json::json!({
-                            "id": a.id.to_string(),
-                            "path": a.file_path.display().to_string(),
-                            "type": format!("{:?}", a.media_type).to_lowercase(),
-                            "duration_seconds": a.duration.map(|d| d.to_seconds_f64()),
-                        })
-                    })
-                    .collect();
-
-                Ok(serde_json::json!({ "results": matching }))
-            }
-
-            "add_clip" => {
-                let track_id_str =
-                    args.get("track_id")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'track_id'".into(),
-                        })?;
-                let asset_id_str =
-                    args.get("asset_id")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'asset_id'".into(),
-                        })?;
-                let start_frame = args
-                    .get("start_frame")
-                    .and_then(|v| v.as_i64())
-                    .ok_or_else(|| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: "Missing 'start_frame'".into(),
-                    })?;
-                let source_in =
-                    args.get("source_in")
-                        .and_then(|v| v.as_i64())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'source_in'".into(),
-                        })?;
-                let source_out =
-                    args.get("source_out")
-                        .and_then(|v| v.as_i64())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'source_out'".into(),
-                        })?;
-                let clip_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Clip");
-
-                let track_id =
-                    TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: format!("Invalid track UUID: {e}"),
-                    })?;
-                let asset_id =
-                    AssetId::from_str(asset_id_str).map_err(|e| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: format!("Invalid asset UUID: {e}"),
-                    })?;
-
-                let clip_id = ClipId::new();
-                let clip = Clip::new(
-                    clip_id,
-                    asset_id,
-                    track_id,
-                    clip_name,
-                    start_frame,
-                    source_in,
-                    source_out,
-                )
-                .map_err(|e| McpError::ExecutionFailed(format!("Invalid clip parameters: {e}")))?;
-
-                let cmd = EditorCommand::AddClip(AddClip { track_id, clip });
-                history
-                    .execute(cmd, sequence)
-                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "clip_id": clip_id.to_string(),
-                    "track_id": track_id.to_string(),
-                    "start_frame": start_frame,
-                    "duration_frames": source_out - source_in
-                }))
-            }
-
-            "move_clip" => {
-                let clip_id_str =
-                    args.get("clip_id")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'clip_id'".into(),
-                        })?;
-                let new_start_frame = args
-                    .get("new_start_frame")
-                    .and_then(|v| v.as_i64())
-                    .ok_or_else(|| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: "Missing 'new_start_frame'".into(),
-                    })?;
-                let new_track_id = match args.get("new_track_id").and_then(|v| v.as_str()) {
-                    Some(s) => {
-                        Some(
-                            TrackId::from_str(s).map_err(|e| McpError::InvalidArguments {
-                                tool: tool_name.into(),
-                                details: format!("Invalid track UUID: {e}"),
-                            })?,
-                        )
-                    }
-                    None => None,
-                };
-
-                let clip_id =
-                    ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: format!("Invalid clip UUID: {e}"),
-                    })?;
-
-                let (from_track, old_start_frame) = {
-                    let track = sequence.find_track_for_clip(clip_id).ok_or_else(|| {
-                        McpError::ExecutionFailed(format!(
-                            "Clip '{clip_id}' not found on any track"
-                        ))
-                    })?;
-                    let clip = sequence.get_clip(clip_id).unwrap();
-                    (track.id, clip.start_frame)
-                };
-                let to_track = new_track_id.unwrap_or(from_track);
-
-                let cmd = EditorCommand::MoveClip(MoveClip {
-                    clip_id,
-                    from_track,
-                    to_track,
-                    old_start_frame,
-                    new_start_frame,
-                });
-
-                history
-                    .execute(cmd, sequence)
-                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "clip_id": clip_id.to_string(),
-                    "new_start_frame": new_start_frame
-                }))
-            }
-
-            "trim_clip" => {
-                let clip_id_str =
-                    args.get("clip_id")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'clip_id'".into(),
-                        })?;
-                let new_start_frame = args
-                    .get("new_start_frame")
-                    .and_then(|v| v.as_i64())
-                    .ok_or_else(|| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: "Missing 'new_start_frame'".into(),
-                    })?;
-                let new_source_in = args
-                    .get("new_source_in")
-                    .and_then(|v| v.as_i64())
-                    .ok_or_else(|| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: "Missing 'new_source_in'".into(),
-                    })?;
-                let new_source_out = args
-                    .get("new_source_out")
-                    .and_then(|v| v.as_i64())
-                    .ok_or_else(|| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: "Missing 'new_source_out'".into(),
-                    })?;
-
-                let clip_id =
-                    ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: format!("Invalid clip UUID: {e}"),
-                    })?;
-
-                let (track_id, old_start_frame, old_source_in, old_source_out) = {
-                    let track = sequence.find_track_for_clip(clip_id).ok_or_else(|| {
-                        McpError::ExecutionFailed(format!(
-                            "Clip '{clip_id}' not found on any track"
-                        ))
-                    })?;
-                    let clip = sequence.get_clip(clip_id).unwrap();
-                    (track.id, clip.start_frame, clip.source_in, clip.source_out)
-                };
-
-                let cmd = EditorCommand::TrimClip(TrimClip {
-                    clip_id,
-                    track_id,
-                    old_start_frame,
-                    new_start_frame,
-                    old_source_in,
-                    new_source_in,
-                    old_source_out,
-                    new_source_out,
-                });
-
-                history
-                    .execute(cmd, sequence)
-                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "clip_id": clip_id.to_string(),
-                    "duration_frames": new_source_out - new_source_in
-                }))
-            }
-
-            "split_clip" => {
-                let clip_id_str =
-                    args.get("clip_id")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'clip_id'".into(),
-                        })?;
-                let split_frame = args
-                    .get("split_frame")
-                    .and_then(|v| v.as_i64())
-                    .ok_or_else(|| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: "Missing 'split_frame'".into(),
-                    })?;
-
-                let clip_id =
-                    ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: format!("Invalid clip UUID: {e}"),
-                    })?;
-
-                let (track_id, original_source_out) = {
-                    let track = sequence.find_track_for_clip(clip_id).ok_or_else(|| {
-                        McpError::ExecutionFailed(format!(
-                            "Clip '{clip_id}' not found on any track"
-                        ))
-                    })?;
-                    let clip = sequence.get_clip(clip_id).unwrap();
-                    (track.id, clip.source_out)
-                };
-
-                let new_right_clip_id = ClipId::new();
-                let cmd = EditorCommand::SplitClip(SplitClip {
-                    original_clip_id: clip_id,
-                    track_id,
-                    split_frame,
-                    new_clip_id: new_right_clip_id,
-                    original_source_out,
-                });
-
-                history
-                    .execute(cmd, sequence)
-                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "original_clip_id": clip_id.to_string(),
-                    "new_clip_id": new_right_clip_id.to_string(),
-                    "split_frame": split_frame
-                }))
-            }
-
-            "delete_clip" => {
-                let clip_id_str =
-                    args.get("clip_id")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'clip_id'".into(),
-                        })?;
-
-                let clip_id =
-                    ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: format!("Invalid clip UUID: {e}"),
-                    })?;
-
-                let (track_id, clip) = {
-                    let track = sequence.find_track_for_clip(clip_id).ok_or_else(|| {
-                        McpError::ExecutionFailed(format!(
-                            "Clip '{clip_id}' not found on any track"
-                        ))
-                    })?;
-                    let clip = sequence.get_clip(clip_id).unwrap().clone();
-                    (track.id, clip)
-                };
-
-                let cmd = EditorCommand::DeleteClip(DeleteClip { track_id, clip });
-
-                history
-                    .execute(cmd, sequence)
-                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "deleted_clip_id": clip_id.to_string()
-                }))
-            }
-
-            "export_video" => {
-                let output_path = args
-                    .get("output_path")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: "Missing 'output_path'".into(),
-                    })?;
-
-                Ok(serde_json::json!({
-                    "status": "scheduled",
-                    "output_path": output_path,
-                    "duration_frames": sequence.duration_frames(),
-                    "fps": sequence.fps.to_f64()
-                }))
-            }
-
-            "preview_changeset" => {
-                let title = args
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Proposed Changeset");
-                let description = args
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let skill_id = args.get("skill_id").and_then(|v| v.as_str());
-                let commands_arr =
-                    args.get("commands")
-                        .and_then(|v| v.as_array())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'commands' array".into(),
-                        })?;
-
-                let mut staged = StagedChangeset::new(title, description);
-                if let Some(s) = skill_id {
-                    staged = staged.with_skill(s);
-                }
-
-                let mut speculative = sequence.clone();
-                for cmd_json in commands_arr {
-                    let cmd = parse_command_spec(cmd_json, &speculative)?;
-                    cmd.apply(&mut speculative)
-                        .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-                    staged.add_command(cmd);
-                }
-
-                let diff = staged
-                    .compute_diff(sequence)
-                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                Ok(serde_json::json!({
-                    "status": "preview",
-                    "changeset_id": staged.id,
-                    "title": staged.title,
-                    "description": staged.description,
-                    "skill_id": staged.skill_id,
-                    "diff": {
-                        "original_duration_frames": diff.original_duration_frames,
-                        "staged_duration_frames": diff.staged_duration_frames,
-                        "original_clip_count": diff.original_clip_count,
-                        "staged_clip_count": diff.staged_clip_count,
-                        "commands_count": diff.commands_count,
-                        "tracks_affected": diff.tracks_affected
-                    }
-                }))
-            }
-
-            "propose_changeset" => {
-                let title = args
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Proposed Changeset");
-                let description = args
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let skill_id = args.get("skill_id").and_then(|v| v.as_str());
-                let commands_arr =
-                    args.get("commands")
-                        .and_then(|v| v.as_array())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'commands' array".into(),
-                        })?;
-
-                let mut staged = StagedChangeset::new(title, description);
-                if let Some(s) = skill_id {
-                    staged = staged.with_skill(s);
-                }
-
-                let mut speculative = sequence.clone();
-                for cmd_json in commands_arr {
-                    let cmd = parse_command_spec(cmd_json, &speculative)?;
-                    cmd.apply(&mut speculative)
-                        .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-                    staged.add_command(cmd);
-                }
-
-                let diff = staged
-                    .compute_diff(sequence)
-                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                // Commit the staged changeset atomically into history
-                history
-                    .commit_staged(staged.clone(), sequence)
-                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                Ok(serde_json::json!({
-                    "status": "committed",
-                    "changeset_id": staged.id,
-                    "title": staged.title,
-                    "commands_executed": staged.commands.len(),
-                    "new_duration_frames": sequence.duration_frames(),
-                    "diff": {
-                        "original_duration_frames": diff.original_duration_frames,
-                        "staged_duration_frames": diff.staged_duration_frames,
-                        "original_clip_count": diff.original_clip_count,
-                        "staged_clip_count": diff.staged_clip_count,
-                        "commands_count": diff.commands_count,
-                        "tracks_affected": diff.tracks_affected
-                    }
-                }))
-            }
-
-            "list_composition_templates" => {
-                let registry = TemplateRegistry::builtin();
-                let templates = registry
-                    .list()
-                    .into_iter()
-                    .map(|t| {
-                        serde_json::json!({
-                            "id": t.id,
-                            "name": t.name,
-                            "category": t.category,
-                            "default_duration_frames": t.default_duration_frames,
-                            "parameters": t.parameters.iter().map(|p| {
-                                serde_json::json!({
-                                    "name": p.name,
-                                    "label": p.label,
-                                    "description": p.description,
-                                    "default": p.default_value
-                                })
-                            }).collect::<Vec<_>>()
-                        })
-                    })
-                    .collect::<Vec<_>>();
-
-                Ok(serde_json::json!({ "templates": templates }))
-            }
-
-            "add_composition" => {
-                let template_id = args
-                    .get("template_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: "Missing 'template_id'".into(),
-                    })?;
-                let track_id_str =
-                    args.get("track_id")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'track_id'".into(),
-                        })?;
-                let start_frame = args
-                    .get("start_frame")
-                    .and_then(|v| v.as_i64())
-                    .ok_or_else(|| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: "Missing 'start_frame'".into(),
-                    })?;
-
-                let track_id =
-                    TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: format!("Invalid track UUID: {e}"),
-                    })?;
-
-                let registry = TemplateRegistry::builtin();
-                let template =
-                    registry
-                        .get(template_id)
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: format!("Unknown template ID: '{template_id}'"),
-                        })?;
-
-                let comp_name = args
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&template.name);
-
-                let mut comp = Composition::new(template, comp_name);
-                if let Some(params_map) = args.get("parameters").and_then(|v| v.as_object()) {
-                    for (k, v) in params_map {
-                        comp.set_parameter(k, v.clone());
-                    }
-                }
-
-                let renderer = CompositionRenderer::new();
-                let tmp_dir = tempfile::tempdir().map_err(|e| {
-                    McpError::ExecutionFailed(format!("Failed to create temp dir: {e}"))
-                })?;
-                let asset_path = renderer
-                    .render_media_asset(&mut comp, &registry, tmp_dir.path())
-                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                let clip_id = ClipId::new();
-                let asset_id = AssetId::new();
-                let duration = comp.duration_frames;
-                let clip = Clip::new(
-                    clip_id,
-                    asset_id,
-                    track_id,
-                    comp_name,
-                    start_frame,
-                    0,
-                    duration,
-                )
-                .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                let cmd = EditorCommand::AddComposition(AddComposition {
-                    track_id,
-                    clip,
-                    composition_id: comp.id.to_string(),
-                    template_id: template.id.clone(),
-                });
-
-                history
-                    .execute(cmd, sequence)
-                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "clip_id": clip_id.to_string(),
-                    "composition_id": comp.id.to_string(),
-                    "template_id": template.id,
-                    "rendered_asset": asset_path.display().to_string(),
-                    "duration_frames": duration
-                }))
-            }
-
-            "set_clip_transform" => {
-                let clip_id_str =
-                    args.get("clip_id")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'clip_id'".into(),
-                        })?;
-                let clip_id =
-                    ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: format!("Invalid clip_id: {e}"),
-                    })?;
-
-                let track = sequence.find_track_for_clip(clip_id).ok_or_else(|| {
-                    McpError::ExecutionFailed(format!("Clip '{clip_id}' not found"))
-                })?;
-                let clip = track.get_clip(clip_id).ok_or_else(|| {
-                    McpError::ExecutionFailed(format!("Clip '{clip_id}' not found"))
-                })?;
-
-                let old_transform = clip.transform;
-                let mut new_transform = old_transform;
-
-                if let Some(px) = args.get("position_x").and_then(|v| v.as_f64()) {
-                    new_transform.position_x = px;
-                }
-                if let Some(py) = args.get("position_y").and_then(|v| v.as_f64()) {
-                    new_transform.position_y = py;
-                }
-                if let Some(sx) = args.get("scale_x").and_then(|v| v.as_f64()) {
-                    new_transform.scale_x = sx;
-                }
-                if let Some(sy) = args.get("scale_y").and_then(|v| v.as_f64()) {
-                    new_transform.scale_y = sy;
-                }
-                if let Some(rot) = args.get("rotation").and_then(|v| v.as_f64()) {
-                    new_transform.rotation_degrees = rot;
-                }
-                if let Some(op) = args.get("opacity").and_then(|v| v.as_f64()) {
-                    new_transform.opacity = op;
-                }
-                new_transform = new_transform.clamped();
-
-                let cmd = EditorCommand::SetClipTransform(SetClipTransform {
-                    clip_id,
-                    old_transform,
-                    new_transform,
-                });
-
-                history
-                    .execute(cmd, sequence)
-                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "clip_id": clip_id.to_string(),
-                    "transform": {
-                        "position_x": new_transform.position_x,
-                        "position_y": new_transform.position_y,
-                        "scale_x": new_transform.scale_x,
-                        "scale_y": new_transform.scale_y,
-                        "rotation": new_transform.rotation_degrees,
-                        "opacity": new_transform.opacity,
-                    }
-                }))
-            }
-
-            "set_clip_audio" => {
-                let clip_id_str =
-                    args.get("clip_id")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'clip_id'".into(),
-                        })?;
-                let clip_id =
-                    ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: format!("Invalid clip_id: {e}"),
-                    })?;
-
-                let track = sequence.find_track_for_clip(clip_id).ok_or_else(|| {
-                    McpError::ExecutionFailed(format!("Clip '{clip_id}' not found"))
-                })?;
-                let clip = track.get_clip(clip_id).ok_or_else(|| {
-                    McpError::ExecutionFailed(format!("Clip '{clip_id}' not found"))
-                })?;
-
-                let old_audio = clip.audio_params;
-                let mut new_audio = old_audio;
-
-                if let Some(vol) = args.get("volume_db").and_then(|v| v.as_f64()) {
-                    new_audio.volume_db = vol;
-                }
-                if let Some(pan) = args.get("pan").and_then(|v| v.as_f64()) {
-                    new_audio.pan = pan;
-                }
-                new_audio = new_audio.clamped();
-
-                let cmd = EditorCommand::SetClipAudio(SetClipAudio {
-                    clip_id,
-                    old_audio,
-                    new_audio,
-                });
-
-                history
-                    .execute(cmd, sequence)
-                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "clip_id": clip_id.to_string(),
-                    "audio": {
-                        "volume_db": new_audio.volume_db,
-                        "pan": new_audio.pan,
-                    }
-                }))
-            }
-
-            "add_transition" => {
-                let track_id_str =
-                    args.get("track_id")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'track_id'".into(),
-                        })?;
-                let from_clip_id_str = args
-                    .get("from_clip_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: "Missing 'from_clip_id'".into(),
-                    })?;
-                let to_clip_id_str =
-                    args.get("to_clip_id")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'to_clip_id'".into(),
-                        })?;
-
-                let track_id =
-                    TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: format!("Invalid track UUID: {e}"),
-                    })?;
-                let from_clip_id =
-                    ClipId::from_str(from_clip_id_str).map_err(|e| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: format!("Invalid from_clip_id: {e}"),
-                    })?;
-                let to_clip_id =
-                    ClipId::from_str(to_clip_id_str).map_err(|e| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: format!("Invalid to_clip_id: {e}"),
-                    })?;
-
-                let trans_type_str = args
-                    .get("transition_type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("crossfade");
-                let transition_type = match trans_type_str {
-                    "dissolve" => TransitionType::Dissolve,
-                    "fade_to_black" => TransitionType::FadeToBlack,
-                    "dip_to_white" => TransitionType::DipToWhite,
-                    "wipe_left" => TransitionType::WipeLeft,
-                    "wipe_right" => TransitionType::WipeRight,
-                    _ => TransitionType::Crossfade,
-                };
-
-                let alignment_str = args
-                    .get("alignment")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("centered");
-                let alignment = match alignment_str {
-                    "start_at_cut" => TransitionAlignment::StartAtCut,
-                    "end_at_cut" => TransitionAlignment::EndAtCut,
-                    _ => TransitionAlignment::Centered,
-                };
-
-                let duration_frames = args
-                    .get("duration_frames")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(24);
-
-                let track = sequence.get_track(track_id).ok_or_else(|| {
-                    McpError::ExecutionFailed(format!("Track '{track_id}' not found"))
-                })?;
-                let from_clip = track.get_clip(from_clip_id).ok_or_else(|| {
-                    McpError::ExecutionFailed(format!("Clip '{from_clip_id}' not found"))
-                })?;
-                let cut_frame = from_clip.end_frame();
-
-                let transition_id = TransitionId::new();
-                let transition = Transition::new(
-                    transition_id,
-                    transition_type,
-                    alignment,
-                    from_clip_id,
-                    to_clip_id,
-                    track_id,
-                    cut_frame,
-                    duration_frames,
-                )
-                .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                let cmd = EditorCommand::AddTransition(AddTransition {
-                    track_id,
-                    transition,
-                });
-
-                history
-                    .execute(cmd, sequence)
-                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "transition_id": transition_id.to_string(),
-                    "track_id": track_id.to_string(),
-                    "cut_frame": cut_frame,
-                    "duration_frames": duration_frames,
-                    "transition_type": trans_type_str,
-                }))
-            }
-
-            "add_text_overlay" => {
-                let track_id_str =
-                    args.get("track_id")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'track_id'".into(),
-                        })?;
-                let text = args.get("text").and_then(|v| v.as_str()).ok_or_else(|| {
-                    McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: "Missing 'text'".into(),
-                    }
-                })?;
-                let start_frame = args
-                    .get("start_frame")
-                    .and_then(|v| v.as_i64())
-                    .ok_or_else(|| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: "Missing 'start_frame'".into(),
-                    })?;
-                let duration_frames = args
-                    .get("duration_frames")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(72);
-
-                let track_id =
-                    TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: format!("Invalid track UUID: {e}"),
-                    })?;
-
-                let font_family = args
-                    .get("font_family")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Inter")
-                    .to_string();
-                let font_size = args.get("font_size").and_then(|v| v.as_u64()).unwrap_or(48) as u32;
-                let color = args
-                    .get("color")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("#ffffff")
-                    .to_string();
-                let background_color = args
-                    .get("background_color")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-
-                let alignment_str = args
-                    .get("alignment")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("bottom");
-                let alignment = match alignment_str {
-                    "top" => TextAlignment::Top,
-                    "center" => TextAlignment::Center,
-                    _ => TextAlignment::Bottom,
-                };
-
-                let style = TextStyle {
-                    font_family,
-                    font_size,
-                    color,
-                    background_color,
-                    stroke_color: Some("#000000".into()),
-                    stroke_width: 2,
-                    alignment,
-                };
-
-                let clip_id = ClipId::new();
-                let clip = Clip::new_text_overlay(
-                    clip_id,
-                    track_id,
-                    text,
-                    start_frame,
-                    duration_frames,
-                    style,
-                )
-                .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                let cmd = EditorCommand::AddTextOverlay(AddTextOverlay { track_id, clip });
-                history
-                    .execute(cmd, sequence)
-                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "clip_id": clip_id.to_string(),
-                    "track_id": track_id.to_string(),
-                    "start_frame": start_frame,
-                    "duration_frames": duration_frames,
-                    "text": text,
-                }))
-            }
-
-            "generate_captions" => {
-                let track_id_str =
-                    args.get("track_id")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'track_id'".into(),
-                        })?;
-                let track_id =
-                    TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
-                        tool: tool_name.into(),
-                        details: format!("Invalid track UUID: {e}"),
-                    })?;
-
-                let captions_arr =
-                    args.get("captions")
-                        .and_then(|v| v.as_array())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Missing 'captions' array".into(),
-                        })?;
-
-                let font_size = args.get("font_size").and_then(|v| v.as_u64()).unwrap_or(36) as u32;
-                let color = args
-                    .get("color")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("#ffffff")
-                    .to_string();
-
-                let mut clips = Vec::new();
-                for item in captions_arr {
-                    let text = item.get("text").and_then(|v| v.as_str()).ok_or_else(|| {
-                        McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Caption missing 'text'".into(),
-                        }
-                    })?;
-                    let start_frame = item
-                        .get("start_frame")
-                        .and_then(|v| v.as_i64())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: "Caption missing 'start_frame'".into(),
-                        })?;
-                    let end_frame =
-                        item.get("end_frame")
-                            .and_then(|v| v.as_i64())
-                            .ok_or_else(|| McpError::InvalidArguments {
-                                tool: tool_name.into(),
-                                details: "Caption missing 'end_frame'".into(),
-                            })?;
-                    let duration_frames = end_frame - start_frame;
-                    if duration_frames <= 0 {
-                        return Err(McpError::InvalidArguments {
-                            tool: tool_name.into(),
-                            details: format!("Invalid caption timing: {start_frame}..{end_frame}"),
+        if def.is_mutation {
+            match args.get("expected_revision") {
+                None | Some(Value::Null) => {}
+                Some(value) => {
+                    let Some(expected) = value.as_u64() else {
+                        return Err(invalid(
+                            tool_name,
+                            "expected_revision must be a non-negative integer",
+                        ));
+                    };
+                    if expected != self.revision {
+                        return Err(McpError::StaleRevision {
+                            expected,
+                            actual: self.revision,
                         });
                     }
-
-                    let style = TextStyle {
-                        font_family: "Inter".into(),
-                        font_size,
-                        color: color.clone(),
-                        background_color: Some("#000000b0".into()),
-                        stroke_color: Some("#000000".into()),
-                        stroke_width: 2,
-                        alignment: TextAlignment::Bottom,
-                    };
-                    let clip_id = ClipId::new();
-                    let clip = Clip::new_text_overlay(
-                        clip_id,
-                        track_id,
-                        text,
-                        start_frame,
-                        duration_frames,
-                        style,
-                    )
-                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                    clips.push(clip);
                 }
-
-                let clip_count = clips.len();
-                let cmd = EditorCommand::GenerateCaptions(GenerateCaptions { track_id, clips });
-
-                history
-                    .execute(cmd, sequence)
-                    .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "track_id": track_id.to_string(),
-                    "captions_generated": clip_count,
-                }))
             }
+        }
 
-            _ => Err(McpError::ToolNotFound(tool_name.to_string())),
+        let mut result = match tool_name {
+            "get_project" => Ok(self.project_summary()),
+            "get_timeline" => Ok(self.timeline_summary()),
+            "get_selected_clips" => Ok(self.selected_clips_summary()),
+            "get_media_items" => Ok(self.media_library_summary()),
+            "search_media" => self.search_media(args),
+            "analyze_media" => self.analyze_media(args),
+            "import_media" => self.import_media(args),
+            "remove_media" => self.remove_media(args),
+            "rename_media" => self.rename_media(args),
+            "add_clip" => self.add_clip(args),
+            "move_clip" => self.move_clip(args),
+            "trim_clip" => self.trim_clip(args),
+            "split_clip" => self.split_clip(args),
+            "delete_clip" => self.delete_clip(args),
+            "add_text_overlay" => self.add_text_overlay(args),
+            "generate_captions" => self.generate_captions(args),
+            "set_clip_transform" => self.set_clip_transform(args),
+            "set_clip_audio" => self.set_clip_audio(args),
+            "preview_changeset" => self.preview_changeset(args),
+            "propose_changeset" => self.propose_changeset(args),
+            "add_composition_to_timeline" => self.add_composition_to_timeline(args),
+            "list_composition_templates" => Ok(composition::list_templates()),
+            "list_compositions"
+            | "create_composition"
+            | "inspect_composition"
+            | "edit_composition"
+            | "render_composition"
+            | "validate_composition" => self.execute_composition_tool(tool_name, args),
+            "export_video" => Err(McpError::Unsupported {
+                tool: tool_name.to_string(),
+                reason:
+                    "export runs in the editor process; call it from the editor's export action"
+                        .to_string(),
+            }),
+            other => Err(McpError::ToolNotFound(other.to_string())),
+        }?;
+        if let Some(object) = result.as_object_mut() {
+            object.insert("project_revision".into(), json!(self.revision));
+        }
+        Ok(result)
+    }
+}
+
+// Private APIs only
+impl McpExecutor {
+    fn project_summary(&self) -> Value {
+        json!({
+            "timeline": self.timeline_summary(),
+            "assets": self
+                .timeline
+                .assets
+                .iter()
+                .map(asset_json)
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn media_library_summary(&self) -> Value {
+        json!({
+            "count": self.media_library.len(),
+            "assets": self
+                .media_library
+                .iter()
+                .map(asset_json)
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn import_media(&mut self, args: &Value) -> Result<Value, McpError> {
+        let Some(values) = args.get("paths").and_then(Value::as_array) else {
+            return Err(invalid(
+                "import_media",
+                "paths must be an array of file paths",
+            ));
+        };
+        if values.is_empty() {
+            return Err(invalid("import_media", "paths must not be empty"));
+        }
+        let mut paths = Vec::with_capacity(values.len());
+        for value in values {
+            let Some(text) = value.as_str() else {
+                return Err(invalid("import_media", "each path must be a string"));
+            };
+            let path = PathBuf::from(text);
+            if !path.is_absolute() {
+                return Err(invalid(
+                    "import_media",
+                    format!("path {text:?} must be absolute"),
+                ));
+            }
+            if !path.is_file() {
+                return Err(invalid(
+                    "import_media",
+                    format!("path {text:?} is not an existing file"),
+                ));
+            }
+            paths.push(path);
+        }
+        let reported = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        self.explorer_change = Some(ExplorerChange::Import { paths });
+        Ok(json!({ "status": "import_queued", "paths": reported }))
+    }
+
+    fn remove_media(&mut self, args: &Value) -> Result<Value, McpError> {
+        let asset_id = required_ulid("remove_media", args, "asset_id")?;
+        if !self
+            .media_library
+            .iter()
+            .any(|asset| asset.id() == asset_id)
+        {
+            return Err(invalid(
+                "remove_media",
+                format!("asset {asset_id} is not in the media library"),
+            ));
+        }
+        self.explorer_change = Some(ExplorerChange::Remove { asset_id });
+        Ok(json!({ "status": "removed", "asset_id": asset_id.to_string() }))
+    }
+
+    fn rename_media(&mut self, args: &Value) -> Result<Value, McpError> {
+        let asset_id = required_ulid("rename_media", args, "asset_id")?;
+        let name = required_str("rename_media", args, "name")?
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            return Err(invalid("rename_media", "name must not be empty"));
+        }
+        if !self
+            .media_library
+            .iter()
+            .any(|asset| asset.id() == asset_id)
+        {
+            return Err(invalid(
+                "rename_media",
+                format!("asset {asset_id} is not in the media library"),
+            ));
+        }
+        self.explorer_change = Some(ExplorerChange::Rename {
+            asset_id,
+            name: name.clone(),
+        });
+        Ok(json!({ "status": "renamed", "asset_id": asset_id.to_string(), "name": name }))
+    }
+
+    fn timeline_summary(&self) -> Value {
+        let frame_rate = self.timeline.settings.frame_rate;
+        let duration = self.timeline.content_duration();
+        json!({
+            "settings": {
+                "frame_rate": {
+                    "numerator": frame_rate.numerator,
+                    "denominator": frame_rate.denominator,
+                },
+                "width": self.timeline.settings.width,
+                "height": self.timeline.settings.height,
+                "audio_sample_rate": self.timeline.settings.audio_sample_rate,
+            },
+            "duration_frames": i64::from(duration),
+            "duration_seconds": frame_rate.seconds(duration),
+            "tracks": self
+                .timeline
+                .tracks
+                .iter()
+                .map(|track| {
+                    json!({
+                        "id": track.id.to_string(),
+                        "name": track.name,
+                        "kind": track_kind_name(track.kind),
+                        "locked": track.locked,
+                        "muted": track.muted,
+                        "visible": track.visible,
+                        "clip_count": self
+                            .timeline
+                            .clips_on_track(track.id)
+                            .count(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "clips": self
+                .timeline
+                .clips
+                .iter()
+                .map(|clip| clip_json(&self.timeline, clip))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn selected_clips_summary(&self) -> Value {
+        json!({
+            "clips": self
+                .timeline
+                .clips
+                .iter()
+                .filter(|clip| self.selected_clips.contains(&clip.id()))
+                .map(|clip| clip_json(&self.timeline, clip))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn search_media(&self, args: &Value) -> Result<Value, McpError> {
+        let query = optional_str(args, "query").map(str::to_lowercase);
+        let kind = match optional_str(args, "media_type") {
+            Some("video") => Some(MediaKind::Video),
+            Some("audio") => Some(MediaKind::Audio),
+            Some("image") => Some(MediaKind::Image),
+            Some(other) => {
+                return Err(invalid(
+                    "search_media",
+                    format!("unsupported media_type {other:?}"),
+                ));
+            }
+            None => None,
+        };
+        let assets = self
+            .timeline
+            .assets
+            .iter()
+            .filter(|asset| match kind {
+                Some(kind) => asset.kind() == kind,
+                None => true,
+            })
+            .filter(|asset| match &query {
+                Some(query) => asset.name().to_lowercase().contains(query),
+                None => true,
+            })
+            .map(asset_json)
+            .collect::<Vec<_>>();
+        Ok(json!({ "assets": assets }))
+    }
+
+    fn analyze_media(&mut self, args: &Value) -> Result<Value, McpError> {
+        let asset_id = required_ulid("analyze_media", args, "asset_id")?;
+        let asset = self
+            .media_library
+            .iter()
+            .find(|asset| asset.id() == asset_id)
+            .cloned()
+            .ok_or_else(|| {
+                invalid(
+                    "analyze_media",
+                    format!("asset {asset_id} is not in the media library"),
+                )
+            })?;
+        let summary = asset_json(&asset);
+        self.analysis_request = Some(MediaAnalysisRequest { asset });
+        Ok(json!({ "status": "analyzing", "asset": summary }))
+    }
+
+    fn add_clip(&mut self, args: &Value) -> Result<Value, McpError> {
+        let track_id = required_ulid("add_clip", args, "track_id")?;
+        let asset_id = required_ulid("add_clip", args, "asset_id")?;
+        let start = required_frame("add_clip", args, "start_frame")?;
+        let source_in = required_frame("add_clip", args, "source_in")?;
+        let source_out = required_frame("add_clip", args, "source_out")?;
+        if source_out <= source_in {
+            return Err(invalid(
+                "add_clip",
+                "source_out must be greater than source_in",
+            ));
+        }
+        let asset = self
+            .timeline
+            .asset(asset_id)
+            .cloned()
+            .ok_or_else(|| invalid("add_clip", format!("asset {asset_id} is not imported")))?;
+        let clip = match asset.kind() {
+            MediaKind::Audio => Clip::Audio(AudioClip::new(
+                Ulid::generate(),
+                track_id,
+                asset_id,
+                start,
+                source_in,
+                source_out,
+                AudioClipProperties::default(),
+            )),
+            MediaKind::Video | MediaKind::Image => Clip::Video(VideoClip::new(
+                Ulid::generate(),
+                track_id,
+                asset_id,
+                start,
+                source_in,
+                source_out,
+                VideoClipProperties::default(),
+                AudioClipProperties::default(),
+            )),
+        };
+        let clip_id = clip.id();
+        let mut new_timeline = self.timeline.clone();
+        new_timeline.clips.push(clip);
+        self.commit("add_clip", new_timeline)?;
+        Ok(json!({ "status": "added", "clip_id": clip_id.to_string() }))
+    }
+
+    fn move_clip(&mut self, args: &Value) -> Result<Value, McpError> {
+        let clip_id = required_ulid("move_clip", args, "clip_id")?;
+        let start = required_frame("move_clip", args, "new_start_frame")?;
+        let new_track_id = optional_ulid("move_clip", args, "new_track_id")?;
+        let mut new_timeline = self.timeline.clone();
+        let clip = new_timeline
+            .clip_mut(clip_id)
+            .ok_or_else(|| invalid("move_clip", format!("clip {clip_id} does not exist")))?;
+        clip.set_timeline_start(start);
+        if let Some(track_id) = new_track_id {
+            clip.set_track_id(track_id);
+        }
+        self.commit("move_clip", new_timeline)?;
+        Ok(json!({ "status": "moved", "clip_id": clip_id.to_string() }))
+    }
+
+    fn trim_clip(&mut self, args: &Value) -> Result<Value, McpError> {
+        let clip_id = required_ulid("trim_clip", args, "clip_id")?;
+        let start = required_frame("trim_clip", args, "new_start_frame")?;
+        let source_in = required_frame("trim_clip", args, "new_source_in")?;
+        let source_out = required_frame("trim_clip", args, "new_source_out")?;
+        if source_out <= source_in {
+            return Err(invalid(
+                "trim_clip",
+                "new_source_out must be greater than new_source_in",
+            ));
+        }
+        let frame_rate = self.timeline.settings.frame_rate;
+        let mut new_timeline = self.timeline.clone();
+        let clip = new_timeline
+            .clip_mut(clip_id)
+            .ok_or_else(|| invalid("trim_clip", format!("clip {clip_id} does not exist")))?;
+        match clip {
+            Clip::Video(media) => {
+                media.timeline_start = start;
+                media.source_in = source_in;
+                media.source_out = source_out;
+            }
+            Clip::Audio(media) => {
+                media.timeline_start = start;
+                media.source_in = source_in;
+                media.source_out = source_out;
+            }
+            Clip::Text(text) => {
+                text.timeline_start = start;
+                text.duration = frame_rate.duration(source_out - source_in);
+            }
+            Clip::Composition(composition) => {
+                composition.timeline_start = start;
+                composition.duration = frame_rate.duration(source_out - source_in);
+            }
+        }
+        self.commit("trim_clip", new_timeline)?;
+        Ok(json!({ "status": "trimmed", "clip_id": clip_id.to_string() }))
+    }
+
+    fn split_clip(&mut self, args: &Value) -> Result<Value, McpError> {
+        let clip_id = required_ulid("split_clip", args, "clip_id")?;
+        let split_frame = required_frame("split_clip", args, "split_frame")?;
+        let frame_rate = self.timeline.settings.frame_rate;
+        let clip = self
+            .timeline
+            .clip(clip_id)
+            .cloned()
+            .ok_or_else(|| invalid("split_clip", format!("clip {clip_id} does not exist")))?;
+        let local = split_frame - clip.timeline_start();
+        let length = clip.frame_length(frame_rate);
+        if local < TimelineFrameIndex::ONE_FRAME || local > length - TimelineFrameIndex::ONE_FRAME {
+            return Err(invalid(
+                "split_clip",
+                format!(
+                    "split_frame {} must fall strictly inside clip {clip_id} \
+                     (start {}, end {})",
+                    i64::from(split_frame),
+                    i64::from(clip.timeline_start()),
+                    i64::from(clip.timeline_start() + length)
+                ),
+            ));
+        }
+        let mut left = clip.clone();
+        let mut right = clip.copy(Ulid::generate());
+        right.set_timeline_start(split_frame);
+        match (&mut left, &mut right) {
+            (Clip::Video(left), Clip::Video(right)) => {
+                let source_split = left.source_in + local;
+                left.source_out = source_split;
+                right.source_in = source_split;
+            }
+            (Clip::Audio(left), Clip::Audio(right)) => {
+                let source_split = left.source_in + local;
+                left.source_out = source_split;
+                right.source_in = source_split;
+            }
+            (Clip::Text(left), Clip::Text(right)) => {
+                left.duration = frame_rate.duration(local);
+                right.duration = right.duration.saturating_sub(left.duration);
+            }
+            (Clip::Composition(left), Clip::Composition(right)) => {
+                left.duration = frame_rate.duration(local);
+                right.duration = right.duration.saturating_sub(left.duration);
+            }
+            (other_left, other_right) => {
+                return Err(McpError::ExecutionFailed(format!(
+                    "clip {clip_id} changed kind while splitting: {other_left:?} became {other_right:?}"
+                )));
+            }
+        }
+        let right_id = right.id();
+        let mut new_timeline = self.timeline.clone();
+        let index = new_timeline
+            .clip_index(clip_id)
+            .ok_or_else(|| invalid("split_clip", format!("clip {clip_id} does not exist")))?;
+        new_timeline.clips[index] = left;
+        new_timeline.clips.push(right);
+        self.commit("split_clip", new_timeline)?;
+        Ok(json!({
+            "status": "split",
+            "left_clip_id": clip_id.to_string(),
+            "right_clip_id": right_id.to_string(),
+        }))
+    }
+
+    fn delete_clip(&mut self, args: &Value) -> Result<Value, McpError> {
+        let clip_id = required_ulid("delete_clip", args, "clip_id")?;
+        if self.timeline.clip(clip_id).is_none() {
+            return Err(invalid(
+                "delete_clip",
+                format!("clip {clip_id} does not exist"),
+            ));
+        }
+        let mut new_timeline = self.timeline.clone();
+        new_timeline.clips.retain(|clip| clip.id() != clip_id);
+        self.commit("delete_clip", new_timeline)?;
+        Ok(json!({ "status": "deleted", "clip_id": clip_id.to_string() }))
+    }
+
+    fn add_text_overlay(&mut self, args: &Value) -> Result<Value, McpError> {
+        let track_id = required_ulid("add_text_overlay", args, "track_id")?;
+        let text = required_str("add_text_overlay", args, "text")?;
+        let start = required_frame("add_text_overlay", args, "start_frame")?;
+        let duration_frames =
+            optional_i64("add_text_overlay", args, "duration_frames")?.unwrap_or(72);
+        if duration_frames <= 0 {
+            return Err(invalid(
+                "add_text_overlay",
+                "duration_frames must be positive",
+            ));
+        }
+        let properties =
+            text_properties("add_text_overlay", args, text, 48.0, text_alignment_y(args))?;
+        let clip = Clip::Text(TextClip::new(
+            Ulid::generate(),
+            track_id,
+            start,
+            self.timeline
+                .settings
+                .frame_rate
+                .duration(duration_frames.into()),
+            properties,
+        ));
+        let clip_id = clip.id();
+        let mut new_timeline = self.timeline.clone();
+        new_timeline.clips.push(clip);
+        self.commit("add_text_overlay", new_timeline)?;
+        Ok(json!({ "status": "added", "clip_id": clip_id.to_string() }))
+    }
+
+    fn add_composition_to_timeline(&mut self, args: &Value) -> Result<Value, McpError> {
+        let composition_id = required_ulid("add_composition_to_timeline", args, "composition_id")?;
+        let start = required_frame("add_composition_to_timeline", args, "start_frame")?;
+        let requested_track_id = optional_ulid("add_composition_to_timeline", args, "track_id")?;
+        let duration_frames = optional_i64("add_composition_to_timeline", args, "duration_frames")?;
+        if let Some(frames) = duration_frames {
+            if frames <= 0 {
+                return Err(invalid(
+                    "add_composition_to_timeline",
+                    "duration_frames must be positive",
+                ));
+            }
+        }
+        let Some(project_root) = &self.project_root else {
+            return Err(McpError::Unsupported {
+                tool: "add_composition_to_timeline".to_string(),
+                reason: "placing a composition requires an open project directory".to_string(),
+            });
+        };
+        let asset = composition::find_composition(
+            "add_composition_to_timeline",
+            project_root,
+            composition_id,
+        )?;
+        let frame_rate = self.timeline.settings.frame_rate;
+        // 默认沿用合成自身时长（按墙钟换算）；显式 duration_frames 以时间线帧率计。
+        let duration = match duration_frames {
+            Some(frames) => frame_rate.duration(frames.into()),
+            None => asset.fps.duration(asset.duration_frames.into()),
+        };
+        let mut new_timeline = self.timeline.clone();
+        let track_id = if let Some(requested_id) = requested_track_id {
+            let track = new_timeline.track(requested_id).ok_or_else(|| {
+                invalid(
+                    "add_composition_to_timeline",
+                    format!("track {requested_id} does not exist"),
+                )
+            })?;
+            if track.kind != TrackKind::Video {
+                return Err(invalid(
+                    "add_composition_to_timeline",
+                    format!(
+                        "track {requested_id} is not a video track; compositions require a video track"
+                    ),
+                ));
+            }
+            requested_id
+        } else {
+            let number = new_timeline
+                .tracks
+                .iter()
+                .filter(|track| track.kind == TrackKind::Video)
+                .count()
+                + 1;
+            let new_track_id = Ulid::generate();
+            // 合成是覆盖层，新轨道置于最上方（设计页 24：Video 2 在 Video 1 之上）。
+            new_timeline.tracks.insert(
+                0,
+                Track {
+                    id: new_track_id,
+                    name: format!("Video {number}"),
+                    kind: TrackKind::Video,
+                    locked: false,
+                    muted: false,
+                    visible: true,
+                },
+            );
+            new_track_id
+        };
+        let clip = Clip::Composition(CompositionClip::new(
+            Ulid::generate(),
+            track_id,
+            composition_id,
+            start,
+            duration,
+        ));
+        let clip_id = clip.id();
+        new_timeline.clips.push(clip);
+        self.commit("add_composition_to_timeline", new_timeline)?;
+        Ok(json!({
+            "status": "added",
+            "clip_id": clip_id.to_string(),
+            "track_id": track_id.to_string(),
+        }))
+    }
+
+    fn generate_captions(&mut self, args: &Value) -> Result<Value, McpError> {
+        let track_id = required_ulid("generate_captions", args, "track_id")?;
+        let Some(captions) = args.get("captions").and_then(Value::as_array) else {
+            return Err(invalid("generate_captions", "captions must be an array"));
+        };
+        if captions.is_empty() {
+            return Err(invalid("generate_captions", "captions must not be empty"));
+        }
+        let frame_rate = self.timeline.settings.frame_rate;
+        let font_size = optional_i64("generate_captions", args, "font_size")?.unwrap_or(36) as f64;
+        let mut new_timeline = self.timeline.clone();
+        let mut clip_ids = Vec::with_capacity(captions.len());
+        for caption in captions {
+            let text = required_str("generate_captions", caption, "text")?;
+            let start = required_frame("generate_captions", caption, "start_frame")?;
+            let end = required_frame("generate_captions", caption, "end_frame")?;
+            if end <= start {
+                return Err(invalid(
+                    "generate_captions",
+                    "end_frame must be greater than start_frame",
+                ));
+            }
+            let properties = TextClipProperties {
+                text: text.to_string(),
+                font_size,
+                color: match optional_str(args, "color") {
+                    Some(color) => parse_argb_color("generate_captions", color)?,
+                    None => 0xffff_ffff,
+                },
+                position: gpui::point(0.5, 0.85),
+                ..TextClipProperties::default()
+            };
+            let clip = Clip::Text(TextClip::new(
+                Ulid::generate(),
+                track_id,
+                start,
+                frame_rate.duration(end - start),
+                properties,
+            ));
+            clip_ids.push(clip.id().to_string());
+            new_timeline.clips.push(clip);
+        }
+        self.commit("generate_captions", new_timeline)?;
+        Ok(json!({ "status": "added", "clip_ids": clip_ids }))
+    }
+
+    fn set_clip_transform(&mut self, args: &Value) -> Result<Value, McpError> {
+        let clip_id = required_ulid("set_clip_transform", args, "clip_id")?;
+        let position_x = optional_f64("set_clip_transform", args, "position_x")?;
+        let position_y = optional_f64("set_clip_transform", args, "position_y")?;
+        let scale = optional_f64("set_clip_transform", args, "scale")?;
+        if position_x.is_none() && position_y.is_none() && scale.is_none() {
+            return Err(invalid(
+                "set_clip_transform",
+                "provide at least one of position_x, position_y, scale",
+            ));
+        }
+        let mut new_timeline = self.timeline.clone();
+        let clip = new_timeline.clip_mut(clip_id).ok_or_else(|| {
+            invalid(
+                "set_clip_transform",
+                format!("clip {clip_id} does not exist"),
+            )
+        })?;
+        match clip {
+            Clip::Video(media) => {
+                if let Some(value) = position_x {
+                    media.video_properties.position_x = value;
+                }
+                if let Some(value) = position_y {
+                    media.video_properties.position_y = value;
+                }
+                if let Some(value) = scale {
+                    media.video_properties.scale = value;
+                }
+            }
+            Clip::Text(text) => {
+                if let Some(value) = position_x {
+                    text.properties.position.x = value;
+                }
+                if let Some(value) = position_y {
+                    text.properties.position.y = value;
+                }
+                if scale.is_some() {
+                    return Err(invalid(
+                        "set_clip_transform",
+                        "scale applies to video clips; text uses font_size",
+                    ));
+                }
+            }
+            Clip::Audio(_) => {
+                return Err(invalid(
+                    "set_clip_transform",
+                    format!("clip {clip_id} is an audio clip"),
+                ));
+            }
+            Clip::Composition(_) => {
+                return Err(invalid(
+                    "set_clip_transform",
+                    "composition clips are positioned through edit_composition parameters",
+                ));
+            }
+        }
+        self.commit("set_clip_transform", new_timeline)?;
+        Ok(json!({ "status": "updated", "clip_id": clip_id.to_string() }))
+    }
+
+    fn set_clip_audio(&mut self, args: &Value) -> Result<Value, McpError> {
+        let clip_id = required_ulid("set_clip_audio", args, "clip_id")?;
+        let gain_db = optional_f64("set_clip_audio", args, "gain_db")?;
+        let muted = optional_bool("set_clip_audio", args, "muted")?;
+        if gain_db.is_none() && muted.is_none() {
+            return Err(invalid("set_clip_audio", "provide gain_db and/or muted"));
+        }
+        let mut new_timeline = self.timeline.clone();
+        let clip = new_timeline
+            .clip_mut(clip_id)
+            .ok_or_else(|| invalid("set_clip_audio", format!("clip {clip_id} does not exist")))?;
+        match clip {
+            Clip::Video(media) => {
+                if let Some(value) = gain_db {
+                    media.audio_properties.gain_db = value;
+                }
+                if let Some(value) = muted {
+                    media.audio_properties.muted = value;
+                }
+            }
+            Clip::Audio(media) => {
+                if let Some(value) = gain_db {
+                    media.audio_properties.gain_db = value;
+                }
+                if let Some(value) = muted {
+                    media.audio_properties.muted = value;
+                }
+            }
+            Clip::Text(_) => {
+                return Err(invalid(
+                    "set_clip_audio",
+                    format!("clip {clip_id} is a text clip"),
+                ));
+            }
+            Clip::Composition(_) => {
+                return Err(invalid(
+                    "set_clip_audio",
+                    format!("clip {clip_id} is a composition clip"),
+                ));
+            }
+        }
+        self.commit("set_clip_audio", new_timeline)?;
+        Ok(json!({ "status": "updated", "clip_id": clip_id.to_string() }))
+    }
+
+    fn preview_changeset(&self, args: &Value) -> Result<Value, McpError> {
+        let title = optional_str(args, "title").unwrap_or("Proposed changes");
+        let commands = changeset_commands("preview_changeset", args)?;
+        let mut preview = Self::new(self.timeline.clone());
+        preview.selected_clips.clone_from(&self.selected_clips);
+        for command in commands {
+            preview.execute(&command.tool, &command.arguments, true)?;
+        }
+        let new_timeline = preview.into_timeline();
+        new_timeline
+            .validate()
+            .map_err(|error| McpError::ExecutionFailed(format!("{error}")))?;
+        Ok(json!({
+            "status": "preview",
+            "title": title,
+            "diff": diff_json(&self.timeline, &new_timeline),
+            "result": timeline_summary_json(&new_timeline),
+        }))
+    }
+
+    fn propose_changeset(&mut self, args: &Value) -> Result<Value, McpError> {
+        let title = required_str("propose_changeset", args, "title")?.to_string();
+        let commands = changeset_commands("propose_changeset", args)?;
+        let mut preview = Self::new(self.timeline.clone());
+        preview.selected_clips.clone_from(&self.selected_clips);
+        for command in commands {
+            preview.execute(&command.tool, &command.arguments, true)?;
+        }
+        let new_timeline = preview.into_timeline();
+        let diff = diff_json(&self.timeline, &new_timeline);
+        self.commit("propose_changeset", new_timeline)?;
+        Ok(json!({ "status": "applied", "title": title, "diff": diff }))
+    }
+
+    fn commit(&mut self, tool: &str, new_timeline: TimelineEditingState) -> Result<(), McpError> {
+        new_timeline
+            .validate()
+            .map_err(|error| McpError::ExecutionFailed(format!("{tool} rejected: {error}")))?;
+        self.timeline = new_timeline;
+        self.selected_clips
+            .retain(|clip_id| self.timeline.clip(*clip_id).is_some());
+        self.revision += 1;
+        Ok(())
+    }
+
+    fn execute_composition_tool(&self, tool_name: &str, args: &Value) -> Result<Value, McpError> {
+        let Some(project_root) = &self.project_root else {
+            return Err(McpError::Unsupported {
+                tool: tool_name.to_string(),
+                reason: "composition tools require an open project directory".to_string(),
+            });
+        };
+        match tool_name {
+            "list_compositions" => composition::list_compositions(project_root),
+            "create_composition" => composition::create_composition(project_root, args),
+            "inspect_composition" => composition::inspect_composition(project_root, args),
+            "edit_composition" => composition::edit_composition(project_root, args),
+            "render_composition" => composition::render_composition(project_root, args),
+            "validate_composition" => composition::validate_composition(project_root, args),
+            other => Err(McpError::ToolNotFound(other.to_string())),
         }
     }
 }
 
-fn parse_command_spec(
-    spec: &serde_json::Value,
-    sequence: &Sequence,
-) -> Result<EditorCommand, McpError> {
-    let tool = spec
-        .get("tool")
-        .or_else(|| spec.get("name"))
-        .or_else(|| spec.get("type"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| McpError::InvalidArguments {
-            tool: "propose_changeset".into(),
-            details: "Command spec missing 'tool'".into(),
-        })?;
+struct ChangesetCommand {
+    tool: String,
+    arguments: Value,
+}
 
-    match tool {
-        "add_clip" => {
-            let track_id_str = spec
-                .get("track_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "add_clip".into(),
-                    details: "Missing 'track_id'".into(),
+fn changeset_commands(tool: &str, args: &Value) -> Result<Vec<ChangesetCommand>, McpError> {
+    let Some(commands) = args.get("commands").and_then(Value::as_array) else {
+        return Err(invalid(tool, "commands must be an array"));
+    };
+    if commands.is_empty() {
+        return Err(invalid(tool, "commands must not be empty"));
+    }
+    commands
+        .iter()
+        .map(|command| {
+            let tool_name = ["tool", "name", "method"]
+                .iter()
+                .find_map(|key| command.get(*key).and_then(Value::as_str))
+                .ok_or_else(|| {
+                    invalid(
+                        tool,
+                        "each command needs a tool name under 'tool', 'name' or 'method'",
+                    )
                 })?;
-            let asset_id_str = spec
-                .get("asset_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "add_clip".into(),
-                    details: "Missing 'asset_id'".into(),
-                })?;
-            let start_frame = spec
-                .get("start_frame")
-                .and_then(|v| v.as_i64())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "add_clip".into(),
-                    details: "Missing 'start_frame'".into(),
-                })?;
-            let source_in = spec
-                .get("source_in")
-                .and_then(|v| v.as_i64())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "add_clip".into(),
-                    details: "Missing 'source_in'".into(),
-                })?;
-            let source_out = spec
-                .get("source_out")
-                .and_then(|v| v.as_i64())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "add_clip".into(),
-                    details: "Missing 'source_out'".into(),
-                })?;
-            let clip_name = spec.get("name").and_then(|v| v.as_str()).unwrap_or("Clip");
+            let arguments = ["arguments", "args", "params"]
+                .iter()
+                .find_map(|key| command.get(*key))
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            Ok(ChangesetCommand {
+                tool: tool_name.to_string(),
+                arguments,
+            })
+        })
+        .collect()
+}
 
-            let track_id =
-                TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "add_clip".into(),
-                    details: format!("Invalid track UUID: {e}"),
-                })?;
-            let asset_id =
-                AssetId::from_str(asset_id_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "add_clip".into(),
-                    details: format!("Invalid asset UUID: {e}"),
-                })?;
+fn diff_json(before: &TimelineEditingState, after: &TimelineEditingState) -> Value {
+    let before_ids = before.clips.iter().map(Clip::id).collect::<HashSet<_>>();
+    let after_ids = after.clips.iter().map(Clip::id).collect::<HashSet<_>>();
+    let added = after_ids
+        .difference(&before_ids)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let removed = before_ids
+        .difference(&after_ids)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let modified = after
+        .clips
+        .iter()
+        .filter(|clip| {
+            before_ids.contains(&clip.id()) && before.clip(clip.id()) != Some(*clip) // 逐字段比较，识别属性修改。
+        })
+        .map(|clip| clip.id().to_string())
+        .collect::<Vec<_>>();
+    json!({
+        "added_clip_ids": added,
+        "removed_clip_ids": removed,
+        "modified_clip_ids": modified,
+        "clip_count_before": before.clips.len(),
+        "clip_count_after": after.clips.len(),
+    })
+}
 
-            let clip_id = if let Some(id_str) = spec.get("clip_id").and_then(|v| v.as_str()) {
-                ClipId::from_str(id_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "add_clip".into(),
-                    details: format!("Invalid clip UUID: {e}"),
-                })?
-            } else {
-                ClipId::new()
-            };
+fn timeline_summary_json(timeline: &TimelineEditingState) -> Value {
+    let frame_rate = timeline.settings.frame_rate;
+    json!({
+        "duration_frames": i64::from(timeline.content_duration()),
+        "duration_seconds": frame_rate.seconds(timeline.content_duration()),
+        "track_count": timeline.tracks.len(),
+        "asset_count": timeline.assets.len(),
+        "clip_count": timeline.clips.len(),
+    })
+}
 
-            let clip = Clip::new(
-                clip_id,
-                asset_id,
-                track_id,
-                clip_name,
-                start_frame,
-                source_in,
-                source_out,
-            )
-            .map_err(|e| McpError::ExecutionFailed(format!("Invalid clip parameters: {e}")))?;
+fn asset_json(asset: &Asset) -> Value {
+    json!({
+        "id": asset.id().to_string(),
+        "name": asset.name(),
+        "kind": media_kind_name(asset.kind()),
+        "path": asset.path().to_string_lossy(),
+        "width": asset.width(),
+        "height": asset.height(),
+        "duration_seconds": asset.duration(),
+        "has_audio": asset.has_audio(),
+        "codec": asset.codec(),
+    })
+}
 
-            Ok(EditorCommand::AddClip(AddClip { track_id, clip }))
+fn clip_json(timeline: &TimelineEditingState, clip: &Clip) -> Value {
+    let frame_rate = timeline.settings.frame_rate;
+    let asset_name = clip
+        .asset_id()
+        .and_then(|asset_id| timeline.asset(asset_id))
+        .map(|asset| asset.name().clone());
+    let asset_id = clip.asset_id().map(|id| id.to_string());
+    json!({
+        "id": clip.id().to_string(),
+        "kind": clip_kind_name(clip),
+        "track_id": clip.track_id().to_string(),
+        "asset_id": asset_id,
+        "name": asset_name,
+        "start_frame": i64::from(clip.timeline_start()),
+        "end_frame": i64::from(clip.timeline_end(frame_rate)),
+        "source_in": clip.source_in().map(i64::from),
+        "source_out": clip.source_out().map(i64::from),
+    })
+}
+
+fn clip_kind_name(clip: &Clip) -> &'static str {
+    match clip {
+        Clip::Video(_) => "video",
+        Clip::Audio(_) => "audio",
+        Clip::Text(_) => "text",
+        Clip::Composition(_) => "composition",
+    }
+}
+
+fn media_kind_name(kind: MediaKind) -> &'static str {
+    match kind {
+        MediaKind::Video => "video",
+        MediaKind::Image => "image",
+        MediaKind::Audio => "audio",
+    }
+}
+
+fn track_kind_name(kind: TrackKind) -> &'static str {
+    match kind {
+        TrackKind::Video => "video",
+        TrackKind::Audio => "audio",
+        TrackKind::Text => "text",
+    }
+}
+
+fn text_properties(
+    tool: &str,
+    args: &Value,
+    text: &str,
+    default_font_size: f64,
+    position_y: f64,
+) -> Result<TextClipProperties, McpError> {
+    let properties = TextClipProperties {
+        text: text.to_string(),
+        font: optional_str(args, "font_family")
+            .unwrap_or("Sans")
+            .to_string(),
+        font_size: optional_f64(tool, args, "font_size")?.unwrap_or(default_font_size),
+        color: match optional_str(args, "color") {
+            Some(color) => parse_argb_color(tool, color)?,
+            None => 0xffff_ffff,
+        },
+        background: match optional_str(args, "background_color") {
+            Some(color) => Some(parse_background_color(tool, color)?),
+            None => None,
+        },
+        position: gpui::point(0.5, position_y),
+    };
+    Ok(properties)
+}
+
+fn text_alignment_y(args: &Value) -> f64 {
+    match optional_str(args, "alignment") {
+        Some("top") => 0.15,
+        Some("center") => 0.5,
+        Some("bottom") | None => 0.85,
+        Some(other) => {
+            log::debug!("unknown text alignment {other:?}; using bottom");
+            0.85
         }
+    }
+}
 
-        "move_clip" => {
-            let clip_id_str = spec
-                .get("clip_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "move_clip".into(),
-                    details: "Missing 'clip_id'".into(),
-                })?;
-            let to_track_str = spec
-                .get("to_track_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "move_clip".into(),
-                    details: "Missing 'to_track_id'".into(),
-                })?;
-            let new_start_frame = spec
-                .get("new_start_frame")
-                .and_then(|v| v.as_i64())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "move_clip".into(),
-                    details: "Missing 'new_start_frame'".into(),
-                })?;
+fn parse_argb_color(tool: &str, value: &str) -> Result<u32, McpError> {
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    let parsed = match hex.len() {
+        6 => u32::from_str_radix(hex, 16)
+            .ok()
+            .map(|rgb| 0xff00_0000 | rgb),
+        8 => u32::from_str_radix(hex, 16).ok(),
+        _ => None,
+    };
+    match parsed {
+        Some(argb) => Ok(argb),
+        None => Err(invalid(
+            tool,
+            format!("color {value:?} must be #RRGGBB or #RRGGBBAA"),
+        )),
+    }
+}
 
-            let clip_id =
-                ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "move_clip".into(),
-                    details: format!("Invalid clip UUID: {e}"),
-                })?;
-            let to_track =
-                TrackId::from_str(to_track_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "move_clip".into(),
-                    details: format!("Invalid track UUID: {e}"),
-                })?;
+fn parse_background_color(tool: &str, value: &str) -> Result<TextBackground, McpError> {
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    let parsed = match hex.len() {
+        6 | 8 => u32::from_str_radix(hex, 16).ok(),
+        _ => None,
+    };
+    let Some(rgba) = parsed else {
+        return Err(invalid(
+            tool,
+            format!("background_color {value:?} must be #RRGGBB or #RRGGBBAA"),
+        ));
+    };
+    let red = (rgba >> 16) as u8;
+    let green = (rgba >> 8) as u8;
+    let blue = rgba as u8;
+    let alpha = match hex.len() {
+        8 => (rgba >> 24) as u8,
+        6 => 0xff,
+        _ => unreachable!("length was checked above"),
+    };
+    Ok(TextBackground {
+        red,
+        green,
+        blue,
+        alpha,
+    })
+}
 
-            let (from_track, old_start_frame) = {
-                let track = sequence.find_track_for_clip(clip_id).ok_or_else(|| {
-                    McpError::ExecutionFailed(format!("Clip '{clip_id}' not found on any track"))
-                })?;
-                let clip = sequence.get_clip(clip_id).unwrap();
-                (track.id, clip.start_frame)
-            };
+pub(crate) fn invalid(tool: &str, details: impl Into<String>) -> McpError {
+    McpError::InvalidArguments {
+        tool: tool.to_string(),
+        details: details.into(),
+    }
+}
 
-            Ok(EditorCommand::MoveClip(MoveClip {
-                clip_id,
-                from_track,
-                to_track,
-                old_start_frame,
-                new_start_frame,
-            }))
-        }
+pub(crate) fn required_ulid(tool: &str, args: &Value, field: &str) -> Result<Ulid, McpError> {
+    let Some(value) = args.get(field).and_then(Value::as_str) else {
+        return Err(invalid(tool, format!("{field} must be a string")));
+    };
+    Ulid::from_string(value)
+        .map_err(|error| invalid(tool, format!("{field} is not a valid ULID: {error}")))
+}
 
-        "trim_clip" => {
-            let clip_id_str = spec
-                .get("clip_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "trim_clip".into(),
-                    details: "Missing 'clip_id'".into(),
-                })?;
-            let new_start_frame = spec
-                .get("new_start_frame")
-                .and_then(|v| v.as_i64())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "trim_clip".into(),
-                    details: "Missing 'new_start_frame'".into(),
-                })?;
-            let new_source_in = spec
-                .get("new_source_in")
-                .and_then(|v| v.as_i64())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "trim_clip".into(),
-                    details: "Missing 'new_source_in'".into(),
-                })?;
-            let new_source_out = spec
-                .get("new_source_out")
-                .and_then(|v| v.as_i64())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "trim_clip".into(),
-                    details: "Missing 'new_source_out'".into(),
-                })?;
+fn optional_ulid(tool: &str, args: &Value, field: &str) -> Result<Option<Ulid>, McpError> {
+    match args.get(field) {
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => required_ulid(tool, args, field).map(Some),
+    }
+}
 
-            let clip_id =
-                ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "trim_clip".into(),
-                    details: format!("Invalid clip UUID: {e}"),
-                })?;
+fn required_frame(tool: &str, args: &Value, field: &str) -> Result<TimelineFrameIndex, McpError> {
+    let Some(value) = args.get(field).and_then(Value::as_i64) else {
+        return Err(invalid(tool, format!("{field} must be an integer")));
+    };
+    if value < 0 {
+        return Err(invalid(tool, format!("{field} must not be negative")));
+    }
+    Ok(TimelineFrameIndex::from(value))
+}
 
-            let (track_id, old_start_frame, old_source_in, old_source_out) = {
-                let track = sequence.find_track_for_clip(clip_id).ok_or_else(|| {
-                    McpError::ExecutionFailed(format!("Clip '{clip_id}' not found on any track"))
-                })?;
-                let clip = sequence.get_clip(clip_id).unwrap();
-                (track.id, clip.start_frame, clip.source_in, clip.source_out)
-            };
+pub(crate) fn required_str<'a>(
+    tool: &str,
+    args: &'a Value,
+    field: &str,
+) -> Result<&'a str, McpError> {
+    match args.get(field).and_then(Value::as_str) {
+        Some(value) => Ok(value),
+        None => Err(invalid(tool, format!("{field} must be a string"))),
+    }
+}
 
-            Ok(EditorCommand::TrimClip(TrimClip {
-                clip_id,
-                track_id,
-                old_start_frame,
-                new_start_frame,
-                old_source_in,
-                new_source_in,
-                old_source_out,
-                new_source_out,
-            }))
-        }
+pub(crate) fn optional_str<'a>(args: &'a Value, field: &str) -> Option<&'a str> {
+    args.get(field).and_then(Value::as_str)
+}
 
-        "split_clip" => {
-            let clip_id_str = spec
-                .get("clip_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "split_clip".into(),
-                    details: "Missing 'clip_id'".into(),
-                })?;
-            let split_frame = spec
-                .get("split_frame")
-                .and_then(|v| v.as_i64())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "split_clip".into(),
-                    details: "Missing 'split_frame'".into(),
-                })?;
+fn optional_i64(tool: &str, args: &Value, field: &str) -> Result<Option<i64>, McpError> {
+    match args.get(field) {
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => match value.as_i64() {
+            Some(number) => Ok(Some(number)),
+            None => Err(invalid(tool, format!("{field} must be an integer"))),
+        },
+    }
+}
 
-            let clip_id =
-                ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "split_clip".into(),
-                    details: format!("Invalid clip UUID: {e}"),
-                })?;
+fn optional_f64(tool: &str, args: &Value, field: &str) -> Result<Option<f64>, McpError> {
+    match args.get(field) {
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => match value.as_f64() {
+            Some(number) => Ok(Some(number)),
+            None => Err(invalid(tool, format!("{field} must be a number"))),
+        },
+    }
+}
 
-            let (track_id, original_source_out) = {
-                let track = sequence.find_track_for_clip(clip_id).ok_or_else(|| {
-                    McpError::ExecutionFailed(format!("Clip '{clip_id}' not found on any track"))
-                })?;
-                let clip = sequence.get_clip(clip_id).unwrap();
-                (track.id, clip.source_out)
-            };
-
-            let new_clip_id = if let Some(id_str) = spec.get("new_clip_id").and_then(|v| v.as_str())
-            {
-                ClipId::from_str(id_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "split_clip".into(),
-                    details: format!("Invalid new_clip_id UUID: {e}"),
-                })?
-            } else {
-                ClipId::new()
-            };
-
-            Ok(EditorCommand::SplitClip(SplitClip {
-                original_clip_id: clip_id,
-                track_id,
-                split_frame,
-                new_clip_id,
-                original_source_out,
-            }))
-        }
-
-        "delete_clip" => {
-            let clip_id_str = spec
-                .get("clip_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "delete_clip".into(),
-                    details: "Missing 'clip_id'".into(),
-                })?;
-
-            let clip_id =
-                ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "delete_clip".into(),
-                    details: format!("Invalid clip UUID: {e}"),
-                })?;
-
-            let (track_id, clip) = {
-                let track = sequence.find_track_for_clip(clip_id).ok_or_else(|| {
-                    McpError::ExecutionFailed(format!("Clip '{clip_id}' not found on any track"))
-                })?;
-                let clip = sequence.get_clip(clip_id).unwrap().clone();
-                (track.id, clip)
-            };
-
-            Ok(EditorCommand::DeleteClip(DeleteClip { track_id, clip }))
-        }
-
-        "add_composition" => {
-            let template_id = spec
-                .get("template_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "add_composition".into(),
-                    details: "Missing 'template_id'".into(),
-                })?;
-            let track_id_str = spec
-                .get("track_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "add_composition".into(),
-                    details: "Missing 'track_id'".into(),
-                })?;
-            let start_frame = spec
-                .get("start_frame")
-                .and_then(|v| v.as_i64())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "add_composition".into(),
-                    details: "Missing 'start_frame'".into(),
-                })?;
-
-            let track_id =
-                TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "add_composition".into(),
-                    details: format!("Invalid track UUID: {e}"),
-                })?;
-
-            let registry = TemplateRegistry::builtin();
-            let template = registry
-                .get(template_id)
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "add_composition".into(),
-                    details: format!("Unknown template ID: '{template_id}'"),
-                })?;
-
-            let comp_name = spec
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&template.name);
-
-            let mut comp = Composition::new(template, comp_name);
-            if let Some(params_map) = spec.get("parameters").and_then(|v| v.as_object()) {
-                for (k, v) in params_map {
-                    comp.set_parameter(k, v.clone());
-                }
-            }
-
-            let clip_id = ClipId::new();
-            let asset_id = AssetId::new();
-            let duration = comp.duration_frames;
-            let clip = Clip::new(
-                clip_id,
-                asset_id,
-                track_id,
-                comp_name,
-                start_frame,
-                0,
-                duration,
-            )
-            .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-            Ok(EditorCommand::AddComposition(AddComposition {
-                track_id,
-                clip,
-                composition_id: comp.id.to_string(),
-                template_id: template.id.clone(),
-            }))
-        }
-
-        "set_clip_transform" => {
-            let clip_id_str = spec
-                .get("clip_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "set_clip_transform".into(),
-                    details: "Missing 'clip_id'".into(),
-                })?;
-            let clip_id =
-                ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "set_clip_transform".into(),
-                    details: format!("Invalid clip_id: {e}"),
-                })?;
-            let track = sequence
-                .find_track_for_clip(clip_id)
-                .ok_or_else(|| McpError::ExecutionFailed(format!("Clip '{clip_id}' not found")))?;
-            let clip = track
-                .get_clip(clip_id)
-                .ok_or_else(|| McpError::ExecutionFailed(format!("Clip '{clip_id}' not found")))?;
-
-            let old_transform = clip.transform;
-            let mut new_transform = old_transform;
-
-            if let Some(px) = spec.get("position_x").and_then(|v| v.as_f64()) {
-                new_transform.position_x = px;
-            }
-            if let Some(py) = spec.get("position_y").and_then(|v| v.as_f64()) {
-                new_transform.position_y = py;
-            }
-            if let Some(sx) = spec.get("scale_x").and_then(|v| v.as_f64()) {
-                new_transform.scale_x = sx;
-            }
-            if let Some(sy) = spec.get("scale_y").and_then(|v| v.as_f64()) {
-                new_transform.scale_y = sy;
-            }
-            if let Some(rot) = spec.get("rotation").and_then(|v| v.as_f64()) {
-                new_transform.rotation_degrees = rot;
-            }
-            if let Some(op) = spec.get("opacity").and_then(|v| v.as_f64()) {
-                new_transform.opacity = op;
-            }
-            new_transform = new_transform.clamped();
-
-            Ok(EditorCommand::SetClipTransform(SetClipTransform {
-                clip_id,
-                old_transform,
-                new_transform,
-            }))
-        }
-
-        "set_clip_audio" => {
-            let clip_id_str = spec
-                .get("clip_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "set_clip_audio".into(),
-                    details: "Missing 'clip_id'".into(),
-                })?;
-            let clip_id =
-                ClipId::from_str(clip_id_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "set_clip_audio".into(),
-                    details: format!("Invalid clip_id: {e}"),
-                })?;
-            let track = sequence
-                .find_track_for_clip(clip_id)
-                .ok_or_else(|| McpError::ExecutionFailed(format!("Clip '{clip_id}' not found")))?;
-            let clip = track
-                .get_clip(clip_id)
-                .ok_or_else(|| McpError::ExecutionFailed(format!("Clip '{clip_id}' not found")))?;
-
-            let old_audio = clip.audio_params;
-            let mut new_audio = old_audio;
-            if let Some(vol) = spec.get("volume_db").and_then(|v| v.as_f64()) {
-                new_audio.volume_db = vol;
-            }
-            if let Some(pan) = spec.get("pan").and_then(|v| v.as_f64()) {
-                new_audio.pan = pan;
-            }
-            new_audio = new_audio.clamped();
-
-            Ok(EditorCommand::SetClipAudio(SetClipAudio {
-                clip_id,
-                old_audio,
-                new_audio,
-            }))
-        }
-
-        "add_transition" => {
-            let track_id_str = spec
-                .get("track_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "add_transition".into(),
-                    details: "Missing 'track_id'".into(),
-                })?;
-            let from_clip_id_str = spec
-                .get("from_clip_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "add_transition".into(),
-                    details: "Missing 'from_clip_id'".into(),
-                })?;
-            let to_clip_id_str =
-                spec.get("to_clip_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| McpError::InvalidArguments {
-                        tool: "add_transition".into(),
-                        details: "Missing 'to_clip_id'".into(),
-                    })?;
-
-            let track_id =
-                TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "add_transition".into(),
-                    details: format!("Invalid track UUID: {e}"),
-                })?;
-            let from_clip_id =
-                ClipId::from_str(from_clip_id_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "add_transition".into(),
-                    details: format!("Invalid from_clip_id: {e}"),
-                })?;
-            let to_clip_id =
-                ClipId::from_str(to_clip_id_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "add_transition".into(),
-                    details: format!("Invalid to_clip_id: {e}"),
-                })?;
-
-            let trans_type_str = spec
-                .get("transition_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("crossfade");
-            let transition_type = match trans_type_str {
-                "dissolve" => TransitionType::Dissolve,
-                "fade_to_black" => TransitionType::FadeToBlack,
-                "dip_to_white" => TransitionType::DipToWhite,
-                "wipe_left" => TransitionType::WipeLeft,
-                "wipe_right" => TransitionType::WipeRight,
-                _ => TransitionType::Crossfade,
-            };
-
-            let alignment_str = spec
-                .get("alignment")
-                .and_then(|v| v.as_str())
-                .unwrap_or("centered");
-            let alignment = match alignment_str {
-                "start_at_cut" => TransitionAlignment::StartAtCut,
-                "end_at_cut" => TransitionAlignment::EndAtCut,
-                _ => TransitionAlignment::Centered,
-            };
-
-            let duration_frames = spec
-                .get("duration_frames")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(24);
-
-            let track = sequence.get_track(track_id).ok_or_else(|| {
-                McpError::ExecutionFailed(format!("Track '{track_id}' not found"))
-            })?;
-            let from_clip = track.get_clip(from_clip_id).ok_or_else(|| {
-                McpError::ExecutionFailed(format!("Clip '{from_clip_id}' not found"))
-            })?;
-            let cut_frame = from_clip.end_frame();
-
-            let transition = Transition::new(
-                TransitionId::new(),
-                transition_type,
-                alignment,
-                from_clip_id,
-                to_clip_id,
-                track_id,
-                cut_frame,
-                duration_frames,
-            )
-            .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-            Ok(EditorCommand::AddTransition(AddTransition {
-                track_id,
-                transition,
-            }))
-        }
-
-        "add_text_overlay" => {
-            let track_id_str = spec
-                .get("track_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "add_text_overlay".into(),
-                    details: "Missing 'track_id'".into(),
-                })?;
-            let text = spec.get("text").and_then(|v| v.as_str()).ok_or_else(|| {
-                McpError::InvalidArguments {
-                    tool: "add_text_overlay".into(),
-                    details: "Missing 'text'".into(),
-                }
-            })?;
-            let start_frame = spec
-                .get("start_frame")
-                .and_then(|v| v.as_i64())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "add_text_overlay".into(),
-                    details: "Missing 'start_frame'".into(),
-                })?;
-            let duration_frames = spec
-                .get("duration_frames")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(72);
-
-            let track_id =
-                TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "add_text_overlay".into(),
-                    details: format!("Invalid track UUID: {e}"),
-                })?;
-
-            let font_family = spec
-                .get("font_family")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Inter")
-                .to_string();
-            let font_size = spec.get("font_size").and_then(|v| v.as_u64()).unwrap_or(48) as u32;
-            let color = spec
-                .get("color")
-                .and_then(|v| v.as_str())
-                .unwrap_or("#ffffff")
-                .to_string();
-            let background_color = spec
-                .get("background_color")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            let alignment_str = spec
-                .get("alignment")
-                .and_then(|v| v.as_str())
-                .unwrap_or("bottom");
-            let alignment = match alignment_str {
-                "top" => TextAlignment::Top,
-                "center" => TextAlignment::Center,
-                _ => TextAlignment::Bottom,
-            };
-
-            let style = TextStyle {
-                font_family,
-                font_size,
-                color,
-                background_color,
-                stroke_color: Some("#000000".into()),
-                stroke_width: 2,
-                alignment,
-            };
-
-            let clip_id = ClipId::new();
-            let clip = Clip::new_text_overlay(
-                clip_id,
-                track_id,
-                text,
-                start_frame,
-                duration_frames,
-                style,
-            )
-            .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-            Ok(EditorCommand::AddTextOverlay(AddTextOverlay {
-                track_id,
-                clip,
-            }))
-        }
-
-        "generate_captions" => {
-            let track_id_str = spec
-                .get("track_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| McpError::InvalidArguments {
-                    tool: "generate_captions".into(),
-                    details: "Missing 'track_id'".into(),
-                })?;
-            let track_id =
-                TrackId::from_str(track_id_str).map_err(|e| McpError::InvalidArguments {
-                    tool: "generate_captions".into(),
-                    details: format!("Invalid track UUID: {e}"),
-                })?;
-
-            let captions_arr =
-                spec.get("captions")
-                    .and_then(|v| v.as_array())
-                    .ok_or_else(|| McpError::InvalidArguments {
-                        tool: "generate_captions".into(),
-                        details: "Missing 'captions' array".into(),
-                    })?;
-
-            let font_size = spec.get("font_size").and_then(|v| v.as_u64()).unwrap_or(36) as u32;
-            let color = spec
-                .get("color")
-                .and_then(|v| v.as_str())
-                .unwrap_or("#ffffff")
-                .to_string();
-
-            let mut clips = Vec::new();
-            for item in captions_arr {
-                let text = item.get("text").and_then(|v| v.as_str()).ok_or_else(|| {
-                    McpError::InvalidArguments {
-                        tool: "generate_captions".into(),
-                        details: "Caption missing 'text'".into(),
-                    }
-                })?;
-                let start_frame = item
-                    .get("start_frame")
-                    .and_then(|v| v.as_i64())
-                    .ok_or_else(|| McpError::InvalidArguments {
-                        tool: "generate_captions".into(),
-                        details: "Caption missing 'start_frame'".into(),
-                    })?;
-                let end_frame =
-                    item.get("end_frame")
-                        .and_then(|v| v.as_i64())
-                        .ok_or_else(|| McpError::InvalidArguments {
-                            tool: "generate_captions".into(),
-                            details: "Caption missing 'end_frame'".into(),
-                        })?;
-                let duration_frames = end_frame - start_frame;
-                if duration_frames <= 0 {
-                    return Err(McpError::InvalidArguments {
-                        tool: "generate_captions".into(),
-                        details: format!("Invalid caption timing: {start_frame}..{end_frame}"),
-                    });
-                }
-
-                let style = TextStyle {
-                    font_family: "Inter".into(),
-                    font_size,
-                    color: color.clone(),
-                    background_color: Some("#000000b0".into()),
-                    stroke_color: Some("#000000".into()),
-                    stroke_width: 2,
-                    alignment: TextAlignment::Bottom,
-                };
-                let clip_id = ClipId::new();
-                let clip = Clip::new_text_overlay(
-                    clip_id,
-                    track_id,
-                    text,
-                    start_frame,
-                    duration_frames,
-                    style,
-                )
-                .map_err(|e| McpError::ExecutionFailed(e.to_string()))?;
-
-                clips.push(clip);
-            }
-
-            Ok(EditorCommand::GenerateCaptions(GenerateCaptions {
-                track_id,
-                clips,
-            }))
-        }
-
-        other => Err(McpError::ToolNotFound(format!(
-            "Unsupported changeset command tool: {other}"
-        ))),
+fn optional_bool(tool: &str, args: &Value, field: &str) -> Result<Option<bool>, McpError> {
+    match args.get(field) {
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => match value.as_bool() {
+            Some(flag) => Ok(Some(flag)),
+            None => Err(invalid(tool, format!("{field} must be a boolean"))),
+        },
     }
 }

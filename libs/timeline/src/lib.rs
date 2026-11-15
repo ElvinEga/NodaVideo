@@ -1,0 +1,39 @@
+//! Timeline file persistence and shared value types; no runtime-only state.
+
+use serde::{Deserialize, Serialize};
+mod serialization;
+pub use serialization::TimelineSerialization;
+mod asset;
+mod clip;
+mod editing_state;
+mod gaps;
+mod text_sections;
+mod time;
+mod track;
+pub use asset::*;
+pub use clip::*;
+pub use editing_state::TimelineEditingState;
+pub use gaps::remove_gaps;
+pub use text_sections::compact_text_sections;
+pub use time::*;
+pub use track::*;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "timeline-schema", derive(schemars::JsonSchema))]
+pub struct TimelineSettings {
+    pub frame_rate: FrameRate,
+    pub width: u32,
+    pub height: u32,
+    pub audio_sample_rate: u32,
+}
+
+impl Default for TimelineSettings {
+    fn default() -> Self {
+        Self {
+            frame_rate: FrameRate::default(),
+            width: 1920,
+            height: 1080,
+            audio_sample_rate: 48_000,
+        }
+    }
+}

@@ -1,0 +1,642 @@
+use std::{
+    collections::{HashMap, HashSet, hash_map::Entry},
+    fs,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicI64, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+use gpui::{
+    AppContext as _, Context, HeadlessAppContext, IntoElement, Render, Window, div, px, size,
+};
+use media_backend::{AudioBackend, AudioDecoder, AudioSamples, PcmFormat};
+use timeline::{
+    Clip, FrameRate, MediaKind, TimelineEditingState, TimelineFrameIndex, TimelineSerialization,
+    TrackKind,
+};
+use ulid::Ulid;
+
+use crate::{
+    export_encoder::ExportEncoder,
+    timeline_decoder::{TimelineDecoder, TimelineFrameComposition},
+};
+use anyhow::{Context as _, Result, bail};
+
+pub struct ExportOption {
+    /// Relative asset paths are resolved against this directory, normally the timeline file's directory.
+    pub project_root: PathBuf,
+    /// H.264 target bitrate in bits per second.
+    pub video_bitrate: u64,
+    /// Replace an existing output file. Source media is never replaced.
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct ExportControl {
+    completed_frames: AtomicI64,
+    stop_requested: AtomicBool,
+}
+
+impl ExportControl {
+    pub fn completed_frames(&self) -> i64 {
+        self.completed_frames.load(Ordering::Relaxed)
+    }
+
+    pub fn request_stop(&self) {
+        self.stop_requested.store(true, Ordering::Relaxed);
+    }
+
+    pub fn stop_requested(&self) -> bool {
+        self.stop_requested.load(Ordering::Relaxed)
+    }
+}
+
+pub enum ExportCompletion {
+    Completed,
+    Stopped,
+}
+
+/// The text system to pass to [`export_timeline`]. Call on the main thread.
+pub fn export_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
+    // Windows 的 headless 平台只有 NoopTextSystem；完整平台才创建 DirectWrite。
+    let headless = !cfg!(target_os = "windows");
+    gpui_platform::current_platform(headless).text_system()
+}
+
+/// The platform text system must be initialized on the main thread before exporting on a worker.
+pub fn export_timeline(
+    timeline_serialization: &TimelineSerialization,
+    output_path: &Path,
+    option: &ExportOption,
+    platform_text_system: Arc<dyn gpui::PlatformTextSystem>,
+    control: &ExportControl,
+) -> Result<ExportCompletion> {
+    validate_export(timeline_serialization, output_path, option)?;
+    if control.stop_requested() {
+        return Ok(ExportCompletion::Stopped);
+    }
+
+    // Convenient Variables
+    let editing_state = Arc::new(timeline_serialization.editing_state.clone());
+    let timeline_settings = editing_state.settings;
+    let frame_count = timeline_serialization.frame_count();
+
+    // Init the decoder and encoder
+    let mut decoder = TimelineDecoder::new(&option.project_root);
+    let mut encoder = ExportEncoder::open(
+        output_path,
+        timeline_serialization.editing_state.settings,
+        option.video_bitrate,
+    )?;
+
+    // ----------------------------------|
+    // creating the headless GPUI window |
+    // ----------------------------------|
+    // GPUI 只为 Metal 提供离屏渲染器；Windows 用从不显示的 DirectX 窗口代替。
+    #[cfg(target_os = "windows")]
+    let renderer_factory = crate::offscreen_windows::offscreen_renderer;
+    #[cfg(not(target_os = "windows"))]
+    let renderer_factory = gpui_platform::current_headless_renderer;
+    let mut cx =
+        HeadlessAppContext::with_platform(platform_text_system, Arc::new(()), renderer_factory);
+    let window = cx
+        .open_window(
+            size(
+                px(timeline_settings.width as f32),
+                px(timeline_settings.height as f32),
+            ),
+            |_, cx| {
+                cx.new(|_| ExportCanvas {
+                    frame: None,
+                    timeline: Arc::clone(&editing_state),
+                })
+            },
+        )
+        .context("Creating export canvas")?;
+
+    window.update(&mut cx, |_, window, cx| {
+        let scale = window.scale_factor();
+        let width = timeline_settings.width as f32 / scale;
+        let height = timeline_settings.height as f32 / scale;
+
+        window.resize(size(px(width), px(height)));
+        window.bounds_changed(cx);
+    })?;
+
+    // variables needed by audio handling
+    let rate = timeline_settings.frame_rate;
+    let sample_rate = timeline_settings.audio_sample_rate;
+    let total_samples = i64::try_from(rate.audio_samples(frame_count.into(), sample_rate))
+        .context("Timeline audio sample count exceeds i64")?;
+    let mut audio_position = 0_i64;
+    let mut audio_readers = HashMap::new();
+
+    // --------------- //
+    // The Render Loop //
+    // --------------- //
+    for i in 0..frame_count {
+        if control.stop_requested() {
+            drop(encoder);
+            fs::remove_file(output_path).context("Removing stopped export output")?;
+            return Ok(ExportCompletion::Stopped);
+        }
+        let export_frame = || -> Result<()> {
+            let started = Instant::now();
+            // Video Handling
+            {
+                // get frame compositions from the decoder
+                let frame = decoder.frame_at(&editing_state, i.into())?;
+                let decoded = Instant::now();
+
+                // convert the GPUI element to image buffer, aka raw frame data
+                let image = cx.update_window(window.into(), |root, window, cx| {
+                    let view = root.downcast::<ExportCanvas>().unwrap();
+                    view.update(cx, |view, _| {
+                        view.frame = Some(frame);
+                    });
+
+                    window.refresh();
+                    let arena = window.draw(cx);
+                    let image = window.render_to_image();
+                    arena.clear(cx);
+                    image
+                })??;
+                let rendered = Instant::now();
+
+                // send to encoder
+                encoder.video(&image, i)?;
+                let encoded = Instant::now();
+                eprintln!(
+                    "Export frame {i}: decode={:?}, render_to_image={:?}, encode={:?}, total={:?}",
+                    decoded.duration_since(started),
+                    rendered.duration_since(decoded),
+                    encoded.duration_since(rendered),
+                    encoded.duration_since(started),
+                );
+            }
+            // Audio Handling
+            {
+                // 使用绝对帧边界计算采样位置，避免逐帧取整产生累计误差。
+                let audio_end = i64::try_from(rate.audio_samples((i + 1).into(), sample_rate))
+                    .context("Audio frame boundary exceeds i64")?
+                    .min(total_samples);
+
+                // 按编码器块大小提交；允许领先视频边界一个块，最后一块止于时间线末尾。
+                while audio_position < audio_end {
+                    let count = i64::from(encoder.audio_frame_size())
+                        .max(1)
+                        .min(total_samples - audio_position)
+                        as usize;
+                    let samples = mix_timeline_audio(
+                        &editing_state,
+                        &option.project_root,
+                        &mut audio_readers,
+                        audio_position,
+                        count,
+                        sample_rate,
+                    )?;
+                    encoder.audio(&samples, audio_position, total_samples)?;
+                    audio_position += count as i64;
+                }
+            }
+            Ok(())
+        };
+        // Metal 的 autoreleased command buffer 会持有纹理；每帧排空，避免长导出耗尽 surface。
+        #[cfg(target_os = "macos")]
+        objc::rc::autoreleasepool(export_frame)?;
+        #[cfg(not(target_os = "macos"))]
+        {
+            let mut run_export_frame = export_frame;
+            run_export_frame()?;
+        }
+        control.completed_frames.store(i + 1, Ordering::Relaxed);
+    }
+    if control.stop_requested() {
+        drop(encoder);
+        fs::remove_file(output_path).context("Removing stopped export output")?;
+        return Ok(ExportCompletion::Stopped);
+    }
+    encoder.finish(total_samples)?;
+    Ok(ExportCompletion::Completed)
+}
+
+struct ExportCanvas {
+    frame: Option<TimelineFrameComposition>,
+    timeline: Arc<TimelineEditingState>,
+}
+
+impl Render for ExportCanvas {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let Some(frame) = self.frame.take() else {
+            return div().into_any_element();
+        };
+        let size = window.viewport_size();
+        // 必须在 draw 的 arena 内创建元素，才能随每帧 arena.clear 释放 surface。
+        frame.render_frame(size.width.into(), size.height.into(), &self.timeline)
+    }
+}
+
+/// One audio reader per track and asset, as for video: a track plays at most one clip at a time.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AudioReaderKey {
+    track_id: Ulid,
+    asset_id: Ulid,
+}
+
+pub struct AudioReader {
+    decoder: AudioDecoder,
+    pending: Option<AudioSamples>, // 已解码但未完全消费的 PCM 块。
+}
+
+/// Mixes an interval of timeline audio into interleaved stereo samples at `rate`.
+/// `start` and `count` are sample indices at `rate`. Readers are cached by track and asset and
+/// are never released; each read continues decoding or seeks, so intervals need not be
+/// sequential, though sequential intervals avoid seeks. Every call with the same `readers`
+/// must pass the same timeline.
+pub fn mix_timeline_audio(
+    timeline: &TimelineEditingState,
+    timeline_directory: &Path,
+    readers: &mut HashMap<AudioReaderKey, AudioReader>,
+    start: i64,
+    count: usize,
+    rate: u32,
+) -> Result<Vec<[f32; 2]>> {
+    let mut mixed = vec![[0.0_f32; 2]; count];
+    let fps = timeline.settings.frame_rate;
+    let end = start
+        .checked_add(i64::try_from(count)?)
+        .context("Audio interval overflow")?;
+    for clip in &timeline.clips {
+        let (asset_id, source_in, source_out, audio_properties) = match clip {
+            Clip::Video(media) => (
+                media.asset_id,
+                media.source_in,
+                media.source_out,
+                media.audio_properties,
+            ),
+            Clip::Audio(media) => (
+                media.asset_id,
+                media.source_in,
+                media.source_out,
+                media.audio_properties,
+            ),
+            Clip::Text(_) => continue,
+            Clip::Composition(_) => continue,
+        };
+        let track = timeline
+            .tracks
+            .iter()
+            .find(|track| track.id == clip.track_id())
+            .context("Missing audio track")?;
+        let asset = timeline.asset(asset_id).context("Missing audio asset")?;
+        if track.muted || audio_properties.muted || !asset.has_audio() {
+            continue;
+        }
+        let clip_start = i64::try_from(fps.audio_samples(clip.timeline_start(), rate))?;
+        let clip_end = i64::try_from(fps.audio_samples(clip.timeline_end(fps), rate))?;
+        let from = start.max(clip_start);
+        let to = end.min(clip_end);
+        if from >= to {
+            continue;
+        }
+        let source_start = i64::try_from(fps.audio_samples(source_in, rate))?
+            .checked_add(from - clip_start)
+            .context("Audio source interval overflow")?;
+        let source_end = i64::try_from(fps.audio_samples(source_out, rate))?;
+        // 两端独立取整可能相差一个采样，不读取 source_out 之后的声音。
+        let sample_count = (to - from).min(source_end - source_start).max(0) as usize;
+        if sample_count == 0 {
+            continue;
+        }
+        let key = AudioReaderKey {
+            track_id: track.id,
+            asset_id: asset.id(),
+        };
+        let reader = match readers.entry(key) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let open_started = Instant::now();
+                let path = timeline_directory.join(asset.path());
+                let mut backend = AudioBackend::open(&path)
+                    .context(format!("Opening timeline audio {}", path.display()))?;
+                backend
+                    .audio
+                    .configure_output(&PcmFormat::default_layout(rate, 2)?)?;
+                eprintln!(
+                    "[clip-switch] open audio {}: open={:?}",
+                    path.display(),
+                    open_started.elapsed(),
+                );
+                // 不在此 seek：首次 read 没有待用的块，会从请求位置 seek。
+                entry.insert(AudioReader {
+                    decoder: backend.audio,
+                    pending: None,
+                })
+            }
+        };
+        let samples = reader
+            .read(source_start, sample_count, rate)
+            .context(format!("Reading audio for clip {}", clip.id()))?;
+        let gain = 10.0_f32.powf(audio_properties.gain_db.clamp(-96.0, 24.0) as f32 / 20.0);
+        for (index, sample) in samples.iter().enumerate() {
+            let target = &mut mixed[(from - start) as usize + index];
+            target[0] += sample[0] * gain;
+            target[1] += sample[1] * gain;
+        }
+    }
+    for sample in &mut mixed {
+        for channel in sample {
+            *channel = channel.clamp(-1.0, 1.0);
+        }
+    }
+    Ok(mixed)
+}
+
+/// Mixes the whole timeline, from frame zero to the latest clip end, into mono 16-bit PCM at
+/// `rate`.
+pub fn mix_timeline_audio_mono(
+    timeline: &TimelineEditingState,
+    timeline_directory: &Path,
+    rate: u32,
+) -> Result<Vec<i16>> {
+    let frame_count = timeline.content_duration().max(TimelineFrameIndex::ZERO);
+    let total_samples = i64::try_from(
+        timeline
+            .settings
+            .frame_rate
+            .audio_samples(frame_count, rate),
+    )
+    .context("Timeline audio sample count exceeds i64")?;
+    let mut readers = HashMap::new();
+    let mut pcm = Vec::with_capacity(usize::try_from(total_samples)?);
+    let mut position = 0_i64;
+    while position < total_samples {
+        let count = (total_samples - position).min(i64::from(rate)) as usize;
+        let samples = mix_timeline_audio(
+            timeline,
+            timeline_directory,
+            &mut readers,
+            position,
+            count,
+            rate,
+        )?;
+        for [left, right] in samples {
+            let mono = (left + right) * 0.5;
+            pcm.push((mono * i16::MAX as f32).round() as i16);
+        }
+        position += count as i64;
+    }
+    Ok(pcm)
+}
+
+impl AudioReader {
+    /// Reads source samples `start..start + count` at `rate`. Continues decoding when `start`
+    /// lies at most one second past the pending block, as video readers do; otherwise seeks.
+    fn read(&mut self, start: i64, count: usize, rate: u32) -> Result<Vec<[f32; 2]>> {
+        let end = start
+            .checked_add(count as i64)
+            .context("Audio source interval overflow")?;
+        let continues = match &self.pending {
+            Some(block) => {
+                let pending_start = block_start_sample(block, rate)?;
+                pending_start <= start.saturating_add(i64::from(rate) / 1_000) // 1 ms：吸收块时间戳取整。
+                    && start - pending_start <= i64::from(rate) // 1 s：更远的前跳改为 seek。
+            }
+            None => false, // 新开或已到 EOF：没有可接续的位置。
+        };
+        if !continues {
+            let seek_nanos = start.max(0) as u128 * 1_000_000_000 / u128::from(rate);
+            self.decoder.seek(Duration::from_nanos(seek_nanos as u64))?;
+            self.pending = None;
+        }
+        let mut result = vec![[0.0; 2]; count];
+        loop {
+            if self.pending.is_none() {
+                self.pending = self.decoder.next_samples()?;
+            }
+            let Some(block) = &self.pending else {
+                break;
+            };
+            let block_start = block_start_sample(block, rate)?;
+            let block_end = block_start
+                .checked_add(block.frame_count as i64)
+                .context("Decoded audio interval overflow")?;
+            if block_start >= end {
+                break;
+            }
+            for sample in start.max(block_start)..end.min(block_end) {
+                let source = (sample - block_start) as usize * 2;
+                result[(sample - start) as usize] =
+                    [block.samples[source], block.samples[source + 1]];
+            }
+            if block_end > end {
+                break;
+            }
+            self.pending = None;
+        }
+        Ok(result)
+    }
+}
+
+fn validate_export(
+    timeline: &TimelineSerialization,
+    output: &Path,
+    option: &ExportOption,
+) -> Result<()> {
+    if !cfg!(any(target_os = "macos", target_os = "windows")) {
+        bail!("Timeline export currently requires macOS or Windows");
+    }
+    let data = &timeline.editing_state;
+    let settings = data.settings;
+    if settings.width == 0
+        || settings.height == 0
+        || !settings.width.is_multiple_of(2)
+        || !settings.height.is_multiple_of(2)
+    {
+        bail!("H.264 export requires positive, even canvas dimensions");
+    }
+    if settings.frame_rate.numerator == 0
+        || settings.frame_rate.denominator == 0
+        || settings.audio_sample_rate == 0
+    {
+        bail!("Export frame rate and audio sample rate must be positive");
+    }
+    i32::try_from(settings.width).context("Export width is too large")?;
+    i32::try_from(settings.height).context("Export height is too large")?;
+    i32::try_from(settings.frame_rate.numerator).context("Export frame rate is too large")?;
+    i32::try_from(settings.frame_rate.denominator).context("Export frame rate is too large")?;
+    i32::try_from(settings.audio_sample_rate).context("Export audio sample rate is too large")?;
+    if option.video_bitrate == 0 || option.video_bitrate > i64::MAX as u64 {
+        bail!("Export video bitrate must be positive and fit in a signed 64-bit integer");
+    }
+    if data.clips.is_empty() {
+        bail!("Cannot export an empty timeline");
+    }
+    if !option.project_root.is_dir() {
+        bail!(
+            "Export project root is not a directory: {}",
+            option.project_root.display()
+        );
+    }
+    if output.extension().and_then(|value| value.to_str()) != Some("mp4") {
+        bail!("Export output must have an .mp4 extension");
+    }
+    match fs::symlink_metadata(output) {
+        Ok(_) if !option.overwrite => {
+            bail!("Export output already exists: {}", output.display())
+        }
+        Ok(_) => {
+            let target = fs::canonicalize(output).context("Resolving export output")?;
+            for asset in &timeline.editing_state.assets {
+                if fs::canonicalize(option.project_root.join(asset.path()))
+                    .is_ok_and(|source| source == target)
+                {
+                    bail!(
+                        "Export output would replace source media: {}",
+                        output.display()
+                    );
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("Inspecting export output"),
+    }
+    let mut ids = HashSet::new();
+    for track in &data.tracks {
+        if !ids.insert(track.id) {
+            bail!("Duplicate export track {}", track.id);
+        }
+    }
+    ids.clear();
+    for asset in &data.assets {
+        if !ids.insert(asset.id()) {
+            bail!("Duplicate export asset {}", asset.id());
+        }
+    }
+    ids.clear();
+    for clip in &data.clips {
+        if !ids.insert(clip.id()) {
+            bail!("Duplicate export clip {}", clip.id());
+        }
+        let track = data
+            .tracks
+            .iter()
+            .find(|track| track.id == clip.track_id())
+            .context("Export clip references a missing track")?;
+        if clip.timeline_start() < TimelineFrameIndex::ZERO
+            || clip.timeline_end(settings.frame_rate) <= clip.timeline_start()
+        {
+            bail!("Clip {} has an invalid timeline interval", clip.id());
+        }
+        match clip {
+            Clip::Video(media) => {
+                let asset = data
+                    .assets
+                    .iter()
+                    .find(|asset| asset.id() == media.asset_id)
+                    .context("Export clip references a missing asset")?;
+
+                if track.kind != TrackKind::Video || asset.kind() == MediaKind::Audio {
+                    bail!(
+                        "Video clip {} requires a video track and visual asset",
+                        media.id()
+                    );
+                }
+                let properties = media.video_properties;
+                if !properties.position_x.is_finite()
+                    || !properties.position_y.is_finite()
+                    || !properties.scale.is_finite()
+                    || properties.scale < 0.0
+                {
+                    bail!("Clip {} has invalid visual properties", media.id());
+                }
+                if media.source_in < TimelineFrameIndex::ZERO
+                    || media.source_out <= media.source_in
+                    || !media.audio_properties.gain_db.is_finite()
+                {
+                    bail!("Clip {} has an invalid trim or audio gain", media.id());
+                }
+                i64::from(media.timeline_start)
+                    .checked_add(i64::from(media.source_out - media.source_in))
+                    .context("Export clip end exceeds the timeline range")?;
+                i64::try_from(frame_units(
+                    media.source_out.into(),
+                    settings.frame_rate,
+                    settings.audio_sample_rate,
+                ))
+                .context("Export source audio position is too large")?;
+            }
+            Clip::Audio(media) => {
+                let asset = data
+                    .assets
+                    .iter()
+                    .find(|asset| asset.id() == media.asset_id)
+                    .context("Export clip references a missing asset")?;
+
+                if track.kind != TrackKind::Audio || matches!(asset, timeline::Asset::Image(_)) {
+                    bail!(
+                        "Audio clip {} requires an audio track and audio or video asset",
+                        media.id()
+                    );
+                }
+                if media.source_in < TimelineFrameIndex::ZERO
+                    || media.source_out <= media.source_in
+                    || !media.audio_properties.gain_db.is_finite()
+                {
+                    bail!("Clip {} has an invalid trim or audio gain", media.id());
+                }
+                i64::from(media.timeline_start)
+                    .checked_add(i64::from(media.source_out - media.source_in))
+                    .context("Export clip end exceeds the timeline range")?;
+                i64::try_from(frame_units(
+                    media.source_out.into(),
+                    settings.frame_rate,
+                    settings.audio_sample_rate,
+                ))
+                .context("Export source audio position is too large")?;
+            }
+            Clip::Text(text) => {
+                let properties = &text.properties;
+                if track.kind != TrackKind::Text
+                    || !properties.position.x.is_finite()
+                    || !properties.position.y.is_finite()
+                    || !properties.font_size.is_finite()
+                    || properties.font_size <= 0.0
+                {
+                    bail!("Text clip {} has an invalid track or layout", text.id());
+                }
+            }
+            Clip::Composition(composition) => {
+                if track.kind != TrackKind::Video {
+                    bail!(
+                        "Composition clip {} requires a video track",
+                        composition.id()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// 用绝对帧边界换算采样数或纳秒，四舍五入；不逐帧累加误差。
+fn frame_units(frame_index: i64, fps: FrameRate, units_per_second: u32) -> u64 {
+    let numerator =
+        frame_index.max(0) as u128 * u128::from(fps.denominator) * u128::from(units_per_second);
+    let denominator = u128::from(fps.numerator);
+    ((numerator + denominator / 2) / denominator).min(u64::MAX as u128) as u64
+}
+
+/// The decoded block's first sample index at `rate`, rounding its microsecond timestamp.
+fn block_start_sample(block: &AudioSamples, rate: u32) -> Result<i64> {
+    let numerator = i128::from(block.timestamp.0) * i128::from(rate);
+    let rounded = if numerator < 0 {
+        numerator - 500_000
+    } else {
+        numerator + 500_000
+    };
+    i64::try_from(rounded / 1_000_000).context("Decoded audio timestamp overflow")
+}

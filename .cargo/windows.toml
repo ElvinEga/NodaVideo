@@ -1,0 +1,5 @@
+[env]
+FFMPEG_DIR = { value = "vendor/ffmpeg-8.1.2", relative = true }
+
+[target.'cfg(target_os = "windows")']
+runner = ["scripts/cargo-ffmpeg-windows.cmd", "--exec"]

@@ -1,0 +1,311 @@
+use crate::actions::{OpenInDefaultApp, RevealInFinder};
+use crate::context_menu::{ContextMenu, FileContextMenu};
+use crate::edit_action::{EditAction, edit_timeline};
+use crate::editor::Editor;
+use crate::explorer::{
+    NewTimelineDialogState, RenameDialogState, remap_relative_path, renamed_relative_path,
+};
+use crate::preview::PreviewTarget;
+use crate::project_settings::{load_project_local_settings, save_project_local_settings};
+use crate::property_panel::current_property_panel;
+use crate::timeline_document;
+use crate::timeline_document::{relative_asset_path, resolve_asset_path};
+use crate::ui_components::TextInput;
+use anyhow::{Context as _, Result, anyhow, bail};
+use gpui::Window;
+use gpui::prelude::*;
+use platform_fs::move_to_trash;
+use std::path::{Path, PathBuf};
+
+impl Editor {
+    /// Opens the new-timeline dialog for `relative_directory`, pre-filled with the next
+    /// unused default name so the user can accept it without typing.
+    pub(crate) fn begin_create_timeline(
+        &mut self,
+        relative_directory: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dismiss_context_menu();
+        let default_name =
+            timeline_document::default_timeline_name(&self.project_root, &relative_directory);
+        let input = cx.new(|cx| {
+            TextInput::new_field(
+                "new-timeline-name",
+                default_name,
+                "Timeline name",
+                self.focus_handle.clone(),
+                cx,
+            )
+        });
+        input.update(cx, |input, cx| input.focus_and_select_all(window, cx));
+        self.explorer.new_timeline_dialog = Some(NewTimelineDialogState {
+            relative_directory,
+            input,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn finish_create_timeline(&mut self, cx: &mut Context<Self>) -> Result<()> {
+        let Some(state) = self.explorer.new_timeline_dialog.as_ref() else {
+            return Ok(());
+        };
+        let relative_directory = state.relative_directory.clone();
+        let name = state.input.read(cx).text().trim().to_string();
+        let (relative_path, timeline) =
+            timeline_document::create(&self.project_root, &relative_directory, &name)
+                .map_err(|error| anyhow!("Could not create timeline: {error}"))?;
+        self.explorer.new_timeline_dialog = None;
+        self.activate_created_timeline(relative_directory, relative_path, timeline, cx)
+    }
+
+    pub(crate) fn begin_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ContextMenu::File(menu) = &self.context_menu else {
+            return;
+        };
+        let relative_path = menu.relative_path.clone();
+        self.dismiss_context_menu();
+        let Some(name) = relative_path
+            .file_name()
+            .map(|name: &std::ffi::OsStr| name.to_string_lossy().into_owned())
+        else {
+            eprintln!("The project folder cannot be renamed here.");
+            return;
+        };
+        let input = cx.new(|cx| {
+            TextInput::new_field(
+                "rename-project-entry",
+                name,
+                "New name",
+                self.focus_handle.clone(),
+                cx,
+            )
+        });
+        input.update(cx, |input, cx| input.focus_and_select_all(window, cx));
+        self.explorer.rename_dialog = Some(RenameDialogState {
+            relative_path,
+            input,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn finish_rename(&mut self, cx: &mut Context<Self>) -> Result<()> {
+        let Some(state) = self.explorer.rename_dialog.as_ref() else {
+            return Ok(());
+        };
+        let old_relative = state.relative_path.clone();
+        let new_name = state.input.read(cx).text().trim().to_string();
+        let Some(new_relative) = renamed_relative_path(&old_relative, &new_name) else {
+            bail!("Enter a single non-empty file or folder name.");
+        };
+        if new_relative == old_relative {
+            self.explorer.rename_dialog = None;
+            return Ok(());
+        }
+
+        let old_path = self.project_root.join(&old_relative);
+        let new_path = self.project_root.join(&new_relative);
+        if new_path.exists() {
+            return Err(anyhow!(
+                "Cannot rename: {} already exists.",
+                new_relative.display()
+            ));
+        }
+        std::fs::rename(&old_path, &new_path)
+            .map_err(|error| anyhow!("Could not rename {}: {error}", old_relative.display()))?;
+
+        if let Some(timeline) = self.timeline.as_mut() {
+            // 素材路径相对于时间线文件所在目录；重命名可能移动素材，也可能移动时间线文件本身。
+            let old_directory = timeline
+                .path
+                .parent()
+                .context("Timeline path has no parent directory")?
+                .to_path_buf();
+            let renamed_timeline = remap_relative_path(&timeline.path, &old_path, &new_path)
+                .unwrap_or_else(|| timeline.path.clone());
+            let new_directory = renamed_timeline
+                .parent()
+                .context("Timeline path has no parent directory")?
+                .to_path_buf();
+            let renamed_asset_path = |asset_path: &Path| -> Option<PathBuf> {
+                let media_path = resolve_asset_path(&old_directory, asset_path);
+                let renamed_media =
+                    remap_relative_path(&media_path, &old_path, &new_path).unwrap_or(media_path);
+                let renamed_asset = if asset_path.is_absolute() {
+                    renamed_media // 绝对路径保持绝对。
+                } else {
+                    relative_asset_path(&new_directory, &renamed_media)
+                };
+                (renamed_asset != asset_path).then_some(renamed_asset)
+            };
+            let paths = timeline
+                .editing_state
+                .assets
+                .iter()
+                .filter_map(|asset| renamed_asset_path(asset.path()).map(|path| (asset.id(), path)))
+                .collect();
+            edit_timeline(timeline, EditAction::UpdateAssetPaths { paths })?;
+            for snapshot in timeline
+                .undo_stack
+                .iter_mut()
+                .chain(timeline.redo_stack.iter_mut())
+            {
+                for asset in &mut snapshot.assets {
+                    if let Some(path) = renamed_asset_path(asset.path()) {
+                        asset.set_path(path);
+                    }
+                }
+            }
+        }
+        self.explorer.expanded_directories = self
+            .explorer
+            .expanded_directories
+            .iter()
+            .map(|path| {
+                remap_relative_path(path, &old_relative, &new_relative)
+                    .unwrap_or_else(|| path.clone())
+            })
+            .collect();
+        if let Some(selected) = self.explorer.selected_file.as_mut()
+            && let Some(path) = remap_relative_path(selected, &old_relative, &new_relative)
+        {
+            *selected = path;
+        }
+        match &mut self.preview.target {
+            PreviewTarget::VideoFile { path, .. }
+            | PreviewTarget::AudioFile { path, .. }
+            | PreviewTarget::Error { path, .. }
+            | PreviewTarget::ImageFile(path) => {
+                if let Some(new_path) = remap_relative_path(path, &old_relative, &new_relative) {
+                    *path = new_path;
+                }
+            }
+            PreviewTarget::None | PreviewTarget::Timeline { .. } | PreviewTarget::TextTitle(_) => {}
+        }
+
+        let renamed_active_timeline = self.timeline.as_ref().and_then(|timeline| {
+            remap_relative_path(
+                &timeline.path,
+                &self.project_root.join(&old_relative),
+                &self.project_root.join(&new_relative),
+            )
+        });
+        if let Some(renamed_active_timeline) = renamed_active_timeline
+            && let Some(timeline) = self.timeline.as_mut()
+        {
+            timeline.path = renamed_active_timeline;
+            timeline.refresh_offline_asset_ids()?;
+            let mut settings = load_project_local_settings(&self.project_root);
+            settings.active_timeline = Some(
+                timeline
+                    .path
+                    .strip_prefix(&self.project_root)?
+                    .to_path_buf(),
+            );
+            save_project_local_settings(&self.project_root, &settings)?;
+        }
+        if let Some(timeline) = self.timeline.as_ref() {
+            timeline.save()?;
+        }
+
+        self.explorer.rename_dialog = None;
+        self.explorer.search_query = None;
+        self.explorer.search_results.clear();
+        self.explorer.search_pending = false;
+        self.explorer.refresh_file_tree(&self.project_root)?;
+        self.save_explorer_expansion()?;
+        self.schedule_explorer_search(cx);
+
+        Ok(())
+    }
+
+    pub(crate) fn reveal_selected_file(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = file_action_path(
+            match &self.context_menu {
+                ContextMenu::File(menu) => Some(menu),
+                ContextMenu::None | ContextMenu::TimelineClip(_) | ContextMenu::TextTrack(_) => {
+                    None
+                }
+            },
+            self.explorer.selected_file.as_deref(),
+            &self.project_root,
+        ) else {
+            return;
+        };
+        self.dismiss_context_menu();
+        cx.reveal_path(&path);
+    }
+
+    pub(crate) fn open_selected_file_in_default_app(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = file_action_path(
+            match &self.context_menu {
+                ContextMenu::File(menu) => Some(menu),
+                ContextMenu::None | ContextMenu::TimelineClip(_) | ContextMenu::TextTrack(_) => {
+                    None
+                }
+            },
+            self.explorer.selected_file.as_deref(),
+            &self.project_root,
+        ) else {
+            return;
+        };
+        self.dismiss_context_menu();
+        cx.open_with_system(&path);
+    }
+
+    pub(crate) fn trash_active_timeline(&mut self, cx: &mut Context<Self>) -> Result<()> {
+        let Some(timeline) = self.timeline.as_ref() else {
+            bail!("No timeline is open to move to Trash.");
+        };
+        let path = timeline.path.clone();
+        let mut new_settings = load_project_local_settings(&self.project_root);
+        new_settings.active_timeline = None;
+        if let Err(error) = move_to_trash(&path) {
+            return Err(anyhow!(
+                "Could not move {} to Trash: {error}",
+                path.display()
+            ));
+        }
+        save_project_local_settings(&self.project_root, &new_settings)?;
+
+        self.timeline = None;
+        self.preview.target = PreviewTarget::None;
+        // 先清除选中项再重建属性面板：选中的仍是刚移走的时间线，面板会要求它存在。
+        self.explorer.selected_file = None;
+        self.property_panel = current_property_panel(self);
+        self.explorer.refresh_file_tree(&self.project_root)?;
+        self.schedule_explorer_search(cx);
+        Ok(())
+    }
+
+    pub(crate) fn action_reveal_in_finder(
+        &mut self,
+        _: &RevealInFinder,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reveal_selected_file(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn action_open_in_default_app(
+        &mut self,
+        _: &OpenInDefaultApp,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_selected_file_in_default_app(cx);
+        cx.notify();
+    }
+}
+
+fn file_action_path(
+    context_menu: Option<&FileContextMenu>,
+    selected_file: Option<&Path>,
+    project_root: &Path,
+) -> Option<PathBuf> {
+    let relative_path = context_menu
+        .map(|menu| menu.relative_path.as_path())
+        .or(selected_file)?;
+    Some(project_root.join(relative_path))
+}

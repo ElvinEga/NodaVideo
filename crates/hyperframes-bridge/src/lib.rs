@@ -6,12 +6,16 @@
 pub mod composition;
 pub mod error;
 pub mod id;
+pub mod project;
 pub mod renderer;
 pub mod template;
 
 pub use composition::Composition;
 pub use error::HyperframesError;
 pub use id::CompositionId;
+pub use project::{
+    CompositionAsset, load_compositions, save_composition, template_registry, unique_folder,
+};
 pub use renderer::CompositionRenderer;
 pub use template::{ParameterType, TemplateDefinition, TemplateParameter, TemplateRegistry};
 

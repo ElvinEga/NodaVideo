@@ -37,6 +37,9 @@ pub struct TemplateDefinition {
     pub default_duration_frames: i64,
     pub parameters: Vec<TemplateParameter>,
     pub html_template: String,
+    /// SVG source of truth for native rendering; empty when a template only ships HTML.
+    #[serde(default)]
+    pub svg_template: String,
 }
 
 impl TemplateDefinition {
@@ -98,8 +101,24 @@ impl TemplateDefinition {
 
     /// Substitute parameter values into the template HTML/SVG markup.
     pub fn render_html(&self, params: &HashMap<String, serde_json::Value>) -> String {
-        let mut html = self.html_template.clone();
-        for p in &self.parameters {
+        Self::substitute(&self.html_template, &self.parameters, params)
+    }
+
+    /// Substitute parameter values into the template SVG markup (native render source).
+    pub fn render_svg(&self, params: &HashMap<String, serde_json::Value>) -> String {
+        Self::substitute(&self.svg_template, &self.parameters, params)
+    }
+}
+
+// Private APIs only
+impl TemplateDefinition {
+    fn substitute(
+        markup: &str,
+        parameters: &[TemplateParameter],
+        params: &HashMap<String, serde_json::Value>,
+    ) -> String {
+        let mut out = markup.to_string();
+        for p in parameters {
             let val = params.get(&p.name).unwrap_or(&p.default_value);
 
             let val_str = match val {
@@ -110,9 +129,9 @@ impl TemplateDefinition {
             };
 
             let token = format!("{{{{{}}}}}", p.name);
-            html = html.replace(&token, &val_str);
+            out = out.replace(&token, &val_str);
         }
-        html
+        out
     }
 }
 
@@ -163,6 +182,9 @@ impl TemplateRegistry {
     <span style="font-size: 16px; font-weight: 500; color: #94a3b8; text-shadow: 0 1px 2px rgba(0,0,0,0.6);">{{subtitle}}</span>
   </div>
 </div>"#.into(),
+            svg_template: r##"<rect x="80" y="944" width="6" height="56" rx="3" fill="{{accent_color}}"/>
+<text x="102" y="968" font-family="sans-serif" font-size="28" font-weight="bold" fill="#ffffff">{{title}}</text>
+<text x="102" y="994" font-family="sans-serif" font-size="16" fill="#94a3b8">{{subtitle}}</text>"##.into(),
         });
 
         // 2. Title Minimal
@@ -191,6 +213,8 @@ impl TemplateRegistry {
   <h1 style="font-size: 48px; font-weight: 800; letter-spacing: 0.15em; color: #ffffff; margin: 0; text-shadow: 0 4px 8px rgba(0,0,0,0.8);">{{headline}}</h1>
   <p style="font-size: 20px; font-weight: 400; letter-spacing: 0.05em; color: #cbd5e1; margin-top: 12px; text-shadow: 0 2px 4px rgba(0,0,0,0.8);">{{subheadline}}</p>
 </div>"#.into(),
+            svg_template: r##"<text x="960" y="520" text-anchor="middle" font-family="sans-serif" font-size="48" font-weight="800" letter-spacing="7" fill="#ffffff">{{headline}}</text>
+<text x="960" y="562" text-anchor="middle" font-family="sans-serif" font-size="20" letter-spacing="1" fill="#cbd5e1">{{subheadline}}</text>"##.into(),
         });
 
         // 3. Social Caption Card
@@ -220,6 +244,10 @@ impl TemplateRegistry {
     <span style="font-size: 36px; font-weight: 900; color: #000000; letter-spacing: 0.05em;">{{text}}</span>
   </div>
 </div>"#.into(),
+            svg_template: r##"<g transform="rotate(-1 960 800)">
+<rect x="460" y="760" width="1000" height="72" rx="8" fill="{{highlight_color}}"/>
+<text x="960" y="808" text-anchor="middle" font-family="sans-serif" font-size="36" font-weight="900" letter-spacing="2" fill="#000000">{{text}}</text>
+</g>"##.into(),
         });
 
         // 4. Branded Transition Stinger
@@ -247,6 +275,8 @@ impl TemplateRegistry {
             html_template: r#"<div style="position: absolute; inset: 0; background-color: {{fill_color}}; display: flex; align-items: center; justify-content: center; font-family: sans-serif;">
   <span style="font-size: 64px; font-weight: 900; letter-spacing: 0.2em; color: #ffffff;">{{brand_name}}</span>
 </div>"#.into(),
+            svg_template: r##"<rect x="0" y="0" width="1920" height="1080" fill="{{fill_color}}"/>
+<text x="960" y="560" text-anchor="middle" font-family="sans-serif" font-size="64" font-weight="900" letter-spacing="13" fill="#ffffff">{{brand_name}}</text>"##.into(),
         });
 
         reg

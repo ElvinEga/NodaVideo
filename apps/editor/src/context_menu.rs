@@ -1,0 +1,751 @@
+use crate::edit_action::EditAction;
+use crate::editor::Editor;
+use crate::event_bus::AppEvent;
+use crate::layout::{TIMELINE_PADDING, TRACK_HEADER_WIDTH};
+use crate::theme::{BORDER, ERROR, MUTED, TEXT};
+use crate::timeline::TimelineFrameIndex;
+use crate::timeline_clip::Clip;
+use crate::timeline_clip_menu::clip_property_targets;
+use crate::timeline_document;
+use crate::timeline_document::resolve_asset_path;
+use crate::track::TrackKind;
+use crate::transcription_window::{ClipRange, TranscriptionScope};
+use ::timeline::TimelineEditingState;
+use engine::media_asset::{is_audio_path, is_image_path, is_video_path};
+use gpui::prelude::*;
+use gpui::{CursorStyle, MouseButton, MouseDownEvent, div, px, rgb};
+use std::path::PathBuf;
+use ulid::Ulid;
+
+pub(super) enum ContextMenu {
+    None,
+    File(FileContextMenu),
+    TimelineClip(TimelineClipContextMenu),
+    TextTrack(TextTrackContextMenu),
+}
+
+#[derive(Clone)]
+pub(crate) struct FileContextMenu {
+    pub(super) relative_path: PathBuf,
+    is_directory: bool,
+    x: f32,
+    y: f32,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct TimelineClipContextMenu {
+    pub(super) clip_id: Ulid,
+    x: f32,
+    y: f32,
+}
+
+impl Editor {
+    pub(super) fn context_menu_overlay(
+        &self,
+        viewport: gpui::Size<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        match &self.context_menu {
+            ContextMenu::None => None,
+            ContextMenu::File(menu) => Some(self.file_menu_overlay(menu, viewport, cx)),
+            ContextMenu::TimelineClip(menu) => {
+                Some(self.timeline_clip_menu_overlay(menu, viewport, cx))
+            }
+            ContextMenu::TextTrack(menu) => Some(self.text_track_menu_overlay(menu, viewport, cx)),
+        }
+    }
+
+    fn file_menu_overlay(
+        &self,
+        menu: &FileContextMenu,
+        viewport: gpui::Size<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let width = 224.0;
+        let can_create_timeline = menu.is_directory;
+        let is_timeline_file =
+            !menu.is_directory && timeline_document::is_timeline_path(&menu.relative_path);
+        let is_media = !menu.is_directory
+            && (is_video_path(&menu.relative_path)
+                || is_audio_path(&menu.relative_path)
+                || is_image_path(&menu.relative_path));
+        let can_transcribe = !menu.is_directory
+            && (is_video_path(&menu.relative_path) || is_audio_path(&menu.relative_path));
+        let can_rename = !menu.relative_path.as_os_str().is_empty();
+        let absolute_path = self.project_root.join(&menu.relative_path);
+        let is_active_timeline = self
+            .timeline
+            .as_ref()
+            .is_some_and(|timeline| timeline.path == absolute_path);
+        let contains_active_timeline = self
+            .timeline
+            .as_ref()
+            .is_some_and(|timeline| timeline.path.starts_with(&absolute_path));
+        let can_trash = can_rename && (is_active_timeline || !contains_active_timeline);
+        let trash_relative_path = menu.relative_path.clone();
+        // Reveal in Finder, Open in Default App and Copy Path, plus the conditional entries.
+        let item_count = 3
+            + usize::from(can_create_timeline)
+            + if is_media {
+                2
+            } else {
+                0
+            }
+            + usize::from(can_transcribe)
+            + if is_timeline_file {
+                4
+            } else {
+                0
+            }
+            + usize::from(can_rename)
+            + usize::from(can_trash);
+        let height = menu_height(item_count);
+        let left = menu
+            .x
+            .clamp(8.0, (f32::from(viewport.width) - width - 8.0).max(8.0));
+        let top = menu
+            .y
+            .clamp(8.0, (f32::from(viewport.height) - height - 8.0).max(8.0));
+
+        div()
+            .id("file-context-menu-overlay")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|editor, _, _, cx| {
+                    editor.dismiss_context_menu();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|editor, _, _, cx| {
+                    editor.dismiss_context_menu();
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .id("file-context-menu")
+                    .absolute()
+                    .left(px(left))
+                    .top(px(top))
+                    .w(px(width))
+                    .p(px(MENU_PADDING))
+                    .flex()
+                    .flex_col()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(0x1b1b1e))
+                    .shadow_lg()
+                    .occlude()
+                    .when(can_create_timeline, |this| {
+                        let directory = menu.relative_path.clone();
+                        this.child(
+                            file_menu_item("Create New Timeline", "").on_click(cx.listener(
+                                move |editor, _, window, cx| {
+                                    editor.begin_create_timeline(directory.clone(), window, cx);
+                                },
+                            )),
+                        )
+                    })
+                    .when(is_media, |this| {
+                        let media_path = self.project_root.join(&menu.relative_path);
+                        let media_path_2 = media_path.clone();
+                        this.child(file_menu_item("Create Timeline from Clip", "").on_click(
+                            cx.listener(move |editor, _, _, cx| {
+                                editor.dismiss_context_menu();
+                                if let Err(error) =
+                                    editor.auto_create_timeline_and_insert_asset(&media_path, cx)
+                                {
+                                    log::error!("Failed to create timeline from clip: {error:?}");
+                                }
+                                cx.notify();
+                            }),
+                        ))
+                        .child(
+                            file_menu_item("Insert into Timeline", "").on_click(cx.listener(
+                                move |editor, _, _, cx| {
+                                    editor.dismiss_context_menu();
+                                    if editor.timeline.is_some() {
+                                        editor.handle_timeline_tracks_external_drop(
+                                            std::slice::from_ref(&media_path_2),
+                                            cx,
+                                        );
+                                    } else if let Err(error) = editor
+                                        .auto_create_timeline_and_insert_asset(&media_path_2, cx)
+                                    {
+                                        log::error!(
+                                            "Failed to insert clip into timeline: {error:?}"
+                                        );
+                                    }
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                    })
+                    .when(can_transcribe, |this| {
+                        let source_path = self.project_root.join(&menu.relative_path);
+                        let project_root = self.project_root.clone();
+                        this.child(file_menu_item("Generate SRT", "").on_click(cx.listener(
+                            move |editor, _, _, cx| {
+                                editor.dismiss_context_menu();
+                                cx.notify();
+                                editor.emit_event(
+                                    cx,
+                                    AppEvent::OpenTranscribeWindow {
+                                        audio_source_path: source_path.clone(),
+                                        scope: TranscriptionScope::File,
+                                        project_root: project_root.clone(),
+                                    },
+                                );
+                            },
+                        )))
+                    })
+                    .when(is_timeline_file, |this| {
+                        let timeline_path = menu.relative_path.clone();
+                        this.child(file_menu_item("Settings", "").on_click(cx.listener(
+                            move |editor, _, _, cx| {
+                                editor.dismiss_context_menu();
+                                if let Err(error) = editor.open_timeline(timeline_path.clone(), cx)
+                                {
+                                    eprintln!("{error}");
+                                    return;
+                                }
+                                if editor.timeline.as_ref().is_some_and(|timeline| {
+                                    timeline.path == editor.project_root.join(&timeline_path)
+                                }) {
+                                    editor.settings_open = true;
+                                }
+                                cx.notify();
+                            },
+                        )))
+                    })
+                    .when(is_timeline_file, |this| {
+                        let timeline_path = self.project_root.join(&menu.relative_path);
+                        let project_root = self.project_root.clone();
+                        this.child(file_menu_item("Generate SRT", "").on_click(cx.listener(
+                            move |editor, _, _, cx| {
+                                editor.dismiss_context_menu();
+                                cx.notify();
+                                editor.emit_event(
+                                    cx,
+                                    AppEvent::OpenTranscribeWindow {
+                                        audio_source_path: timeline_path.clone(),
+                                        scope: TranscriptionScope::Timeline,
+                                        project_root: project_root.clone(),
+                                    },
+                                );
+                            },
+                        )))
+                    })
+                    .when(is_timeline_file, |this| {
+                        let timeline_path = menu.relative_path.clone();
+                        this.child(
+                            file_menu_item("Keep Text Sections", "").on_click(cx.listener(
+                                move |editor, _, _, cx| {
+                                    editor.dismiss_context_menu();
+                                    cx.notify();
+                                    if let Err(error) =
+                                        editor.open_timeline(timeline_path.clone(), cx)
+                                    {
+                                        log::error!("Could not open timeline: {error:?}");
+                                        return;
+                                    }
+                                    editor.emit_event(
+                                        cx,
+                                        AppEvent::Edit(EditAction::KeepTextSections),
+                                    );
+                                },
+                            )),
+                        )
+                    })
+                    .when(is_timeline_file, |this| {
+                        let timeline_path = menu.relative_path.clone();
+                        this.child(file_menu_item("Remove Gaps", "").on_click(cx.listener(
+                            move |editor, _, _, cx| {
+                                editor.dismiss_context_menu();
+                                cx.notify();
+                                if let Err(error) = editor.open_timeline(timeline_path.clone(), cx)
+                                {
+                                    log::error!("Could not open timeline: {error:?}");
+                                    return;
+                                }
+                                editor.emit_event(cx, AppEvent::Edit(EditAction::RemoveGaps));
+                            },
+                        )))
+                    })
+                    .child(
+                        file_menu_item("Reveal in Finder", "⌥⌘R").on_click(cx.listener(
+                            |editor, _, _, cx| {
+                                editor.reveal_selected_file(cx);
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        file_menu_item("Open in Default App", "⌃⇧↵").on_click(cx.listener(
+                            |editor, _, _, cx| {
+                                editor.open_selected_file_in_default_app(cx);
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(file_menu_item("Copy Path", "").on_click(cx.listener(
+                        move |editor, _, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                absolute_path.to_string_lossy().into_owned(),
+                            ));
+                            editor.dismiss_context_menu();
+                            cx.notify();
+                        },
+                    )))
+                    .when(can_rename, |this| {
+                        this.child(file_menu_item("Rename", "").on_click(cx.listener(
+                            |editor, _, window, cx| {
+                                editor.begin_rename(window, cx);
+                            },
+                        )))
+                    })
+                    .when(can_trash, |this| {
+                        this.child(
+                            file_menu_item("Move to Trash", "")
+                                .text_color(rgb(ERROR))
+                                .on_click(cx.listener(move |editor, _, _, cx| {
+                                    editor.dismiss_context_menu();
+                                    if is_active_timeline {
+                                        editor.explorer.trash_timeline_dialog_open = true;
+                                    } else {
+                                        editor.emit_event(
+                                            cx,
+                                            AppEvent::MoveToTrash {
+                                                relative_path: trash_relative_path.clone(),
+                                            },
+                                        );
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    pub(crate) fn show_file_context_menu(
+        &mut self,
+        relative_path: PathBuf,
+        is_directory: bool,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = ContextMenu::File(FileContextMenu {
+            relative_path,
+            is_directory,
+            x: event.position.x.into(),
+            y: event.position.y.into(),
+        });
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(crate) fn dismiss_context_menu(&mut self) {
+        self.context_menu = ContextMenu::None;
+    }
+}
+
+/// Native macOS context menus use compact rows of 13px regular text.
+const MENU_TEXT_SIZE: f32 = 13.0;
+const MENU_ITEM_HEIGHT: f32 = 24.0;
+const MENU_PADDING: f32 = 4.0;
+
+fn menu_height(item_count: usize) -> f32 {
+    MENU_PADDING * 2.0 + MENU_ITEM_HEIGHT * item_count as f32
+}
+
+fn menu_row(id: impl Into<gpui::ElementId>, enabled: bool) -> gpui::Stateful<gpui::Div> {
+    let row = div()
+        .id(id)
+        .h(px(MENU_ITEM_HEIGHT))
+        .px_2()
+        .flex()
+        .items_center()
+        .rounded_md()
+        .text_size(px(MENU_TEXT_SIZE))
+        .font_weight(gpui::FontWeight::NORMAL)
+        .cursor(if enabled {
+            CursorStyle::PointingHand
+        } else {
+            CursorStyle::Arrow
+        })
+        .text_color(rgb(if enabled {
+            TEXT
+        } else {
+            MUTED
+        }));
+    if enabled {
+        row.hover(|style| style.bg(rgb(0x34343a)))
+    } else {
+        row
+    }
+}
+
+fn file_menu_item(label: &'static str, shortcut: &'static str) -> gpui::Stateful<gpui::Div> {
+    menu_row(label, true)
+        .justify_between()
+        .gap_2()
+        .child(label)
+        .child(
+            div()
+                .text_size(px(MENU_TEXT_SIZE))
+                .text_color(rgb(MUTED))
+                .child(shortcut),
+        )
+}
+
+impl Editor {
+    fn timeline_clip_menu_overlay(
+        &self,
+        menu: &TimelineClipContextMenu,
+        viewport: gpui::Size<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        // 素材找不到时只能 Relink；其余项禁用
+        let (offline, image) = self
+            .timeline
+            .as_ref()
+            .and_then(|timeline| {
+                let asset_id = timeline.editing_state.clip(menu.clip_id)?.asset_id()?;
+                let image = timeline
+                    .editing_state
+                    .asset(asset_id)
+                    .is_some_and(|asset| matches!(asset, timeline::Asset::Image(_)));
+                Some((timeline.offline_asset_ids.contains(&asset_id), image))
+            })
+            .unwrap_or_default();
+        let item_count = match (offline, image) {
+            (true, true) => 2,
+            (true, false) => 3,
+            (false, _) => 2,
+        };
+        let width = 240.0;
+        let height = menu_height(item_count);
+        let left = menu
+            .x
+            .clamp(8.0, (f32::from(viewport.width) - width - 8.0).max(8.0));
+        let top = menu
+            .y
+            .clamp(8.0, (f32::from(viewport.height) - height - 8.0).max(8.0));
+        let enabled = self
+            .timeline
+            .as_ref()
+            .and_then(|timeline| clip_property_targets(&timeline.editing_state, menu.clip_id))
+            .is_some_and(|(_, _, targets)| !targets.is_empty())
+            && !offline;
+        let clip_id = menu.clip_id;
+
+        div()
+            .id("timeline-clip-context-menu-overlay")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|editor, _, _, cx| {
+                    editor.dismiss_context_menu();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|editor, _, _, cx| {
+                    editor.dismiss_context_menu();
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .id("timeline-clip-context-menu")
+                    .absolute()
+                    .left(px(left))
+                    .top(px(top))
+                    .w(px(width))
+                    .p(px(MENU_PADDING))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(0x1b1b1e))
+                    .shadow_lg()
+                    .occlude()
+                    .when(offline, |this| {
+                        this.child(file_menu_item("Relink Media…", "").on_click(cx.listener(
+                            move |editor, _, _, cx| {
+                                editor.dismiss_context_menu();
+                                editor.emit_event(cx, AppEvent::RelinkMediaRequested);
+                                cx.notify();
+                            },
+                        )))
+                    })
+                    .when(offline && !image, |this| {
+                        this.child(disabled_menu_item("Transcribe the Clip"))
+                    })
+                    .when(!offline, |this| {
+                        this.child(
+                            file_menu_item("Transcribe the Clip", "").on_click(cx.listener(
+                                move |editor, _, _, cx| {
+                                    editor.dismiss_context_menu();
+                                    cx.notify();
+                                    let Some(timeline) = editor.timeline.as_ref() else {
+                                        return;
+                                    };
+                                    let state = &timeline.editing_state;
+                                    let Some(clip) = state.clip(clip_id) else {
+                                        return;
+                                    };
+                                    let (Some(asset_id), Some(source_in), Some(source_out)) =
+                                        (clip.asset_id(), clip.source_in(), clip.source_out())
+                                    else {
+                                        return;
+                                    };
+                                    let Some(asset) = state.asset(asset_id) else {
+                                        return;
+                                    };
+                                    let Some(timeline_directory) = timeline.path.parent() else {
+                                        return;
+                                    };
+                                    let event = AppEvent::OpenTranscribeWindow {
+                                        audio_source_path: resolve_asset_path(
+                                            timeline_directory,
+                                            asset.path(),
+                                        ),
+                                        scope: TranscriptionScope::Clip(ClipRange {
+                                            clip_id,
+                                            start: state.position_at_frame(source_in),
+                                            end: state.position_at_frame(source_out),
+                                        }),
+                                        project_root: editor.project_root.clone(),
+                                    };
+                                    editor.emit_event(cx, event);
+                                },
+                            )),
+                        )
+                    })
+                    .child(
+                        menu_row("apply-properties-to-track-clips", enabled)
+                            .when(enabled, |this| {
+                                this.on_click(cx.listener(|editor, _, _, cx| {
+                                    editor.apply_properties_to_track_clips(cx);
+                                    cx.notify();
+                                }))
+                            })
+                            .child("Apply Properties to All Other Clips"),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn show_timeline_clip_context_menu(
+        &mut self,
+        clip_id: Ulid,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        self.explorer.selected_file = None;
+        self.select_only_clip(Some(clip_id));
+        let Some(_) = self.timeline.as_ref() else {
+            return;
+        };
+        self.context_menu = ContextMenu::TimelineClip(TimelineClipContextMenu {
+            clip_id,
+            x: event.position.x.into(),
+            y: event.position.y.into(),
+        });
+        cx.stop_propagation();
+        cx.notify();
+    }
+}
+
+pub(super) struct TextTrackContextMenu {
+    track_id: Ulid,
+    pub(super) position: TimelineFrameIndex,
+    x: f32,
+    y: f32,
+}
+
+impl Editor {
+    fn text_track_menu_overlay(
+        &self,
+        menu: &TextTrackContextMenu,
+        viewport: gpui::Size<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        // A text clip under the pointer offers "Apply style to track"; empty space offers "Add text".
+        let (on_text_clip, source_clip_id) = match self.timeline.as_ref() {
+            Some(timeline) => {
+                let data = &timeline.editing_state;
+                (
+                    text_clip_at(data, menu.track_id, menu.position).is_some(),
+                    style_source_clip(data, menu.track_id, menu.position),
+                )
+            }
+            None => (false, None),
+        };
+        let width = 176.0;
+        let height = menu_height(1);
+        let left = menu
+            .x
+            .clamp(8.0, (f32::from(viewport.width) - width - 8.0).max(8.0));
+        let top = menu
+            .y
+            .clamp(8.0, (f32::from(viewport.height) - height - 8.0).max(8.0));
+        let track_id = menu.track_id;
+        let position = menu.position;
+
+        div()
+            .id("text-track-context-menu-overlay")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|editor, _, _, cx| {
+                    editor.dismiss_context_menu();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|editor, _, _, cx| {
+                    editor.dismiss_context_menu();
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .id("text-track-context-menu")
+                    .absolute()
+                    .left(px(left))
+                    .top(px(top))
+                    .w(px(width))
+                    .p(px(MENU_PADDING))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(0x1b1b1e))
+                    .shadow_lg()
+                    .occlude()
+                    .when(!on_text_clip, |this| {
+                        this.child(
+                            menu_row(
+                                gpui::SharedString::from(format!(
+                                    "add-text-to-track-{}",
+                                    menu.track_id
+                                )),
+                                true,
+                            )
+                            .on_click(cx.listener(move |editor, _, _, cx| {
+                                if let Err(error) = editor.add_text(track_id, position, cx) {
+                                    log::error!("{error:?}");
+                                    cx.notify();
+                                }
+                            }))
+                            .child("Add text"),
+                        )
+                    })
+                    .when_some(source_clip_id, |menu, clip_id| {
+                        menu.child(
+                            menu_row("apply-text-style-to-track", true)
+                                .on_click(cx.listener(move |editor, _, _, cx| {
+                                    editor.dismiss_context_menu();
+                                    editor.emit_event(
+                                        cx,
+                                        AppEvent::Edit(EditAction::ApplyTextStyleToTrack {
+                                            clip_id,
+                                            project_root: editor.project_root.clone(),
+                                        }),
+                                    );
+                                    cx.notify();
+                                }))
+                                .child("Apply style to track"),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn show_text_track_context_menu(
+        &mut self,
+        track_id: Ulid,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(timeline) = self.timeline.as_ref() else {
+            return;
+        };
+        if !timeline
+            .editing_state
+            .track(track_id)
+            .is_some_and(|track| track.kind == TrackKind::Text)
+        {
+            return;
+        }
+        let scroll_x: f32 = timeline.h_scroll.offset().x.into();
+        let content_x =
+            f32::from(event.position.x) - TRACK_HEADER_WIDTH - scroll_x - TIMELINE_PADDING;
+        let position = timeline
+            .editing_state
+            .nearest_time(content_x as f64 / timeline.pixels_per_second as f64)
+            .max(TimelineFrameIndex::ZERO);
+        let data = &timeline.editing_state;
+        if text_clip_at(data, track_id, position).is_some()
+            && style_source_clip(data, track_id, position).is_none()
+        {
+            // A text clip offers only "Apply style to track", so without it there is no menu.
+            return;
+        }
+        self.context_menu = ContextMenu::TextTrack(TextTrackContextMenu {
+            track_id,
+            position,
+            x: event.position.x.into(),
+            y: event.position.y.into(),
+        });
+        cx.stop_propagation();
+        cx.notify();
+    }
+}
+
+/// The text clip on the track that contains `position`, if any.
+fn text_clip_at(
+    data: &TimelineEditingState,
+    track_id: Ulid,
+    position: TimelineFrameIndex,
+) -> Option<&Clip> {
+    data.clips_on_track(track_id).find(|clip| {
+        matches!(clip, Clip::Text(_))
+            && clip.timeline_start() <= position
+            && position < clip.timeline_end(data.settings.frame_rate)
+    })
+}
+
+/// The text clip whose style "Apply style to track" would copy: the clip under `position`,
+/// on an unlocked track that has other text clips.
+fn style_source_clip(
+    data: &TimelineEditingState,
+    track_id: Ulid,
+    position: TimelineFrameIndex,
+) -> Option<Ulid> {
+    let track = data.track(track_id)?;
+    if track.locked {
+        return None;
+    }
+    let source = text_clip_at(data, track_id, position)?;
+    data.clips_on_track(track_id)
+        .any(|clip| matches!(clip, Clip::Text(_)) && clip.id() != source.id())
+        .then_some(source.id())
+}
+
+fn disabled_menu_item(label: &'static str) -> gpui::Stateful<gpui::Div> {
+    menu_row(label, false).child(label)
+}

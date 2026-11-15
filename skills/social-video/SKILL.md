@@ -4,7 +4,7 @@ id: social-video
 version: 1.0.0
 description: Reframe landscape 16:9 timelines into vertical 9:16 or square 1:1 formats optimized for TikTok, Reels, and Shorts.
 tags: [social, vertical-video, reframe, 9-16, aspect-ratio, mobile]
-recommended_tools: [get_project, get_timeline, preview_changeset, propose_changeset, trim_clip]
+tools: [get_project, get_timeline, preview_changeset, propose_changeset, trim_clip]
 ---
 
 # Social Video Skill

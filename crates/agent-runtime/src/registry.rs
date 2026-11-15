@@ -120,6 +120,31 @@ impl AgentRuntime {
             .await
     }
 
+    /// Feed an editor-executed tool result back into the session's provider.
+    pub async fn submit_tool_result(
+        &self,
+        session: SessionId,
+        call_id: String,
+        result: serde_json::Value,
+        is_error: bool,
+    ) -> Result<(), AgentRuntimeError> {
+        let provider_id = {
+            let lock = self.session_providers.read().await;
+            lock.get(&session)
+                .cloned()
+                .ok_or(AgentRuntimeError::SessionNotFound(session))?
+        };
+
+        let provider = self
+            .get_provider(&provider_id)
+            .await
+            .ok_or(AgentRuntimeError::SessionNotFound(session))?;
+
+        provider
+            .submit_tool_result(session, call_id, result, is_error)
+            .await
+    }
+
     /// Cancel an active session.
     pub async fn cancel(&self, session: SessionId) -> Result<(), AgentRuntimeError> {
         let provider_id = {

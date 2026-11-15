@@ -17,6 +17,10 @@ pub enum HyperframesError {
     #[error("Failed to render composition: {0}")]
     RenderFailed(String),
 
+    /// A project composition file could not be parsed.
+    #[error("Could not parse composition '{path}': {reason}")]
+    CompositionParse { path: String, reason: String },
+
     /// File I/O failure.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
