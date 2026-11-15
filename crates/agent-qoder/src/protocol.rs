@@ -68,6 +68,48 @@ pub fn control_request(request_id: &str, subtype: &str, params: Value) -> Value 
     })
 }
 
+/// Build a session-scoped `control_request` (e.g. `set_model`, `interrupt`). The
+/// subtype is not `daemon.`-prefixed and the envelope routes by `session_id`.
+pub fn session_control_request(
+    request_id: &str,
+    subtype: &str,
+    session_id: &str,
+    params: Value,
+) -> Value {
+    let mut request = params;
+    request["type"] = json!(subtype);
+    request["subtype"] = json!(subtype);
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "session_id": session_id,
+        "request": request,
+    })
+}
+
+/// Build a user-input frame for an open session. Text streams back as
+/// `stream_event` deltas; the frame itself expects no control_response.
+pub fn user_message(session_id: &str, text: &str) -> Value {
+    json!({
+        "type": "user",
+        "session_id": session_id,
+        "parent_tool_use_id": Value::Null,
+        "message": {
+            "role": "user",
+            "content": [{ "type": "text", "text": text }],
+        },
+    })
+}
+
+/// The inner payload of a successful `control_response` (`response.response`).
+pub fn response_payload(frame: &Value) -> Value {
+    frame
+        .get("response")
+        .and_then(|response| response.get("response"))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
 /// Decode a `control_response`; returns None for frames that are not responses.
 pub fn parse_control_response(value: &Value) -> Option<ControlResponse> {
     if value.get("type").and_then(Value::as_str) != Some("control_response") {
@@ -236,7 +278,8 @@ pub fn parse_version(output: &str) -> Option<String> {
 mod tests {
     use crate::protocol::{
         ControlResponse, control_request, parse_account, parse_control_response, parse_initialize,
-        parse_models, parse_sessions, parse_version, response_request_id,
+        parse_models, parse_sessions, parse_version, response_payload, response_request_id,
+        session_control_request, user_message,
     };
     use serde_json::json;
 
@@ -252,6 +295,47 @@ mod tests {
         assert_eq!(envelope["request"]["type"], "daemon.initialize");
         assert_eq!(envelope["request"]["subtype"], "daemon.initialize");
         assert_eq!(envelope["request"]["sdk_version"], "1.0.59");
+    }
+
+    #[test]
+    fn session_control_request_routes_by_session_id() {
+        let envelope = session_control_request(
+            "req-9",
+            "set_model",
+            "sess-1",
+            json!({"model": "efficient"}),
+        );
+        assert_eq!(envelope["type"], "control_request");
+        assert_eq!(envelope["session_id"], "sess-1");
+        assert_eq!(envelope["request"]["type"], "set_model");
+        assert_eq!(envelope["request"]["subtype"], "set_model");
+        assert_eq!(envelope["request"]["model"], "efficient");
+    }
+
+    #[test]
+    fn user_message_frame_matches_wire_shape() {
+        let frame = user_message("sess-1", "hello");
+        assert_eq!(frame["type"], "user");
+        assert_eq!(frame["session_id"], "sess-1");
+        assert!(frame["parent_tool_use_id"].is_null());
+        assert_eq!(frame["message"]["role"], "user");
+        assert_eq!(frame["message"]["content"][0]["type"], "text");
+        assert_eq!(frame["message"]["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn response_payload_extracts_inner_response() {
+        let frame = json!({
+            "type": "control_response",
+            "session_id": "sess-1",
+            "response": {"subtype": "success", "request_id": "r1", "response": {"models": []}}
+        });
+        assert!(response_payload(&frame).get("models").is_some());
+        let empty = json!({
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": "r2"}
+        });
+        assert!(response_payload(&empty).is_null());
     }
 
     #[test]

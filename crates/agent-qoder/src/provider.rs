@@ -1,9 +1,11 @@
 //! Qoder CLI AgentProvider adapter: drives the SDK daemon over NDJSON stdio.
 //!
-//! Discovery (availability, version, model catalog, account, sessions) is
-//! implemented here. Session messaging, streaming, permissions and MCP wiring
-//! land in subsequent slices; the provider is not registered with the editor
-//! until those are in place.
+//! Discovery (availability, version, model catalog, account, sessions) and the
+//! session plane (open, messaging, streaming, cancellation) are implemented here.
+//! Each NodaVideo session owns one daemon process hosting one Qoder session, so
+//! the reader can route every session frame straight to that session's events.
+//! Tool approvals and MCP wiring land in a subsequent slice; the provider is not
+//! registered with the editor until those are in place.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,10 +30,11 @@ use crate::protocol::{
     ENV_SDK_DAEMON, ENV_SDK_ENTRYPOINT, ENV_SDK_VERSION, InitializeInfo, MULTI_SESSION_CAPABILITY,
     QoderAccount, QoderSession, SDK_ENTRYPOINT, SDK_VERSION, control_request, parse_account,
     parse_control_response, parse_initialize, parse_models, parse_sessions, parse_version,
-    response_request_id,
+    response_payload, response_request_id, session_control_request, user_message,
 };
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
+const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Correlates daemon control requests with their responses; shared with the reader task.
 #[derive(Clone)]
@@ -41,11 +44,22 @@ struct DaemonConnection {
     next_id: Arc<AtomicU64>,
 }
 
+/// One live NodaVideo session backed by a Qoder daemon. The auth dir guard lives
+/// here so the payload file survives for the whole session and is removed on drop.
+struct ActiveQoderSession {
+    native_id: String,
+    tx: broadcast::Sender<AgentEvent>,
+    child: Option<Child>,
+    connection: Option<DaemonConnection>,
+    _auth_dir: Option<TempDir>,
+}
+
 /// AgentProvider adapter for the Qoder CLI SDK daemon.
 pub struct QoderAgentProvider {
     id: String,
     display_name: String,
     binary: String,
+    sessions: Arc<Mutex<HashMap<SessionId, ActiveQoderSession>>>,
 }
 
 impl std::fmt::Debug for QoderAgentProvider {
@@ -76,6 +90,7 @@ impl QoderAgentProvider {
             id: id.into(),
             display_name: display_name.into(),
             binary: binary.into(),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -85,6 +100,7 @@ impl QoderAgentProvider {
             id: "qoder-simulated".into(),
             display_name: "Qoder (Offline Simulation)".into(),
             binary: String::new(),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -131,7 +147,7 @@ impl QoderAgentProvider {
                 format!("'{}' was not found on PATH", self.binary),
             ));
         }
-        let mut process = connect(&self.binary, &AgentConfig::default()).await?;
+        let mut process = connect(&self.binary, &AgentConfig::default(), None).await?;
         let info = process
             .connection
             .request("daemon.account_info", json!({}))
@@ -151,7 +167,7 @@ impl QoderAgentProvider {
                 format!("'{}' was not found on PATH", self.binary),
             ));
         }
-        let mut process = connect(&self.binary, &AgentConfig::default()).await?;
+        let mut process = connect(&self.binary, &AgentConfig::default(), None).await?;
         let listed = process
             .connection
             .request("daemon.list_sessions", json!({}))
@@ -185,7 +201,7 @@ impl AgentProvider for QoderAgentProvider {
                 format!("'{}' was not found on PATH", self.binary),
             ));
         }
-        let mut process = connect(&self.binary, &AgentConfig::default()).await?;
+        let mut process = connect(&self.binary, &AgentConfig::default(), None).await?;
         let listed = process
             .connection
             .request("daemon.get_models", json!({ "fetchStrategy": "live" }))
@@ -194,20 +210,121 @@ impl AgentProvider for QoderAgentProvider {
         Ok(parse_models(&listed?))
     }
 
-    async fn start_session(&self, _config: AgentConfig) -> Result<SessionId, AgentRuntimeError> {
-        Err(AgentRuntimeError::Other(
-            "Qoder session transport is not implemented in this build yet".into(),
-        ))
+    async fn start_session(&self, config: AgentConfig) -> Result<SessionId, AgentRuntimeError> {
+        let session_id = SessionId::new();
+        let (tx, _) = broadcast::channel(128);
+
+        if self.binary.is_empty() || !Self::probe_binary_exists(&self.binary) {
+            self.sessions.lock().unwrap().insert(
+                session_id,
+                ActiveQoderSession {
+                    native_id: String::new(),
+                    tx,
+                    child: None,
+                    connection: None,
+                    _auth_dir: None,
+                },
+            );
+            return Ok(session_id);
+        }
+
+        let mut process = connect(&self.binary, &config, Some(tx.clone())).await?;
+        let connection = process.connection.clone();
+        let opened = async {
+            // Land the local login on the daemon before opening a session, otherwise
+            // the worker's ModelProvider stays empty and every model is "unavailable".
+            connection.request("daemon.authenticate", json!({})).await?;
+            // The daemon has no default working directory; open_session rejects an
+            // empty cwd, so fall back to the process working directory.
+            let cwd = match &config.working_dir {
+                Some(dir) => dir.clone(),
+                None => std::env::current_dir().map_err(|source| AgentRuntimeError::Io {
+                    path: PathBuf::from("."),
+                    source,
+                })?,
+            };
+            let params = json!({
+                "worker_args": worker_args(&config),
+                "cwd": cwd.to_string_lossy(),
+            });
+            let frame = connection
+                .request_frame("daemon.open_session", params)
+                .await?;
+            let native_id = frame
+                .get("session_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    AgentRuntimeError::ProtocolError(
+                        "Qoder open_session returned no session id".into(),
+                    )
+                })?
+                .to_string();
+            let model = resolve_session_model(&connection, config.model.as_deref()).await?;
+            connection
+                .request_session(&native_id, "set_model", json!({ "model": model }))
+                .await?;
+            Ok::<String, AgentRuntimeError>(native_id)
+        }
+        .await;
+
+        let native_id = match opened {
+            Ok(native_id) => native_id,
+            Err(error) => {
+                let _ = process.child.kill().await;
+                return Err(error);
+            }
+        };
+
+        self.sessions.lock().unwrap().insert(
+            session_id,
+            ActiveQoderSession {
+                native_id,
+                tx,
+                child: Some(process.child),
+                connection: Some(process.connection),
+                _auth_dir: Some(process._auth_dir),
+            },
+        );
+        Ok(session_id)
     }
 
     async fn send_message(
         &self,
-        _session: SessionId,
-        _message: String,
+        session: SessionId,
+        message: String,
     ) -> Result<(), AgentRuntimeError> {
-        Err(AgentRuntimeError::Other(
-            "Qoder session transport is not implemented in this build yet".into(),
-        ))
+        let (connection, tx, native_id) = {
+            let map = self.sessions.lock().unwrap();
+            let state = map
+                .get(&session)
+                .ok_or(AgentRuntimeError::SessionNotFound(session))?;
+            (
+                state.connection.clone(),
+                state.tx.clone(),
+                state.native_id.clone(),
+            )
+        };
+
+        let Some(connection) = connection else {
+            tokio::spawn(async move {
+                let _ = tx.send(AgentEvent::ThoughtChunk(
+                    "Qoder analyzing the request...".into(),
+                ));
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let _ = tx.send(AgentEvent::MessageChunk(format!(
+                    "Qoder offline response to: '{message}'"
+                )));
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                let _ = tx.send(AgentEvent::SessionCompleted {
+                    summary: Some("Qoder offline task finished.".into()),
+                });
+            });
+            return Ok(());
+        };
+
+        connection
+            .send_frame(user_message(&native_id, &message))
+            .await
     }
 
     async fn submit_approval(
@@ -221,27 +338,84 @@ impl AgentProvider for QoderAgentProvider {
         ))
     }
 
-    async fn cancel(&self, _session: SessionId) -> Result<(), AgentRuntimeError> {
-        Err(AgentRuntimeError::Other(
-            "Qoder session transport is not implemented in this build yet".into(),
-        ))
+    async fn cancel(&self, session: SessionId) -> Result<(), AgentRuntimeError> {
+        let (connection, tx, native_id, child) = {
+            let mut map = self.sessions.lock().unwrap();
+            let state = map
+                .get_mut(&session)
+                .ok_or(AgentRuntimeError::SessionNotFound(session))?;
+            (
+                state.connection.clone(),
+                state.tx.clone(),
+                state.native_id.clone(),
+                state.child.take(),
+            )
+        };
+
+        if let Some(connection) = connection {
+            if !native_id.is_empty() {
+                let interrupted = tokio::time::timeout(
+                    INTERRUPT_TIMEOUT,
+                    connection.request_session(&native_id, "interrupt", json!({})),
+                )
+                .await;
+                match interrupted {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        log::debug!("Could not interrupt the Qoder turn: {error:?}");
+                    }
+                    Err(_) => {
+                        log::debug!("Qoder did not acknowledge the interrupt in time");
+                    }
+                }
+            }
+        }
+        if let Some(mut child) = child {
+            let _ = child.kill().await;
+        }
+        let _ = tx.send(AgentEvent::SessionCompleted {
+            summary: Some("Session cancelled by user".into()),
+        });
+        Ok(())
     }
 
     fn subscribe(
         &self,
         session: SessionId,
     ) -> Result<broadcast::Receiver<AgentEvent>, AgentRuntimeError> {
-        Err(AgentRuntimeError::SessionNotFound(session))
+        let map = self.sessions.lock().unwrap();
+        let state = map
+            .get(&session)
+            .ok_or(AgentRuntimeError::SessionNotFound(session))?;
+        Ok(state.tx.subscribe())
     }
 }
 
 // Private APIs only
 impl DaemonConnection {
-    async fn request(&self, subtype: &str, params: Value) -> Result<Value, AgentRuntimeError> {
-        let id = format!("nodavideo-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+    fn next_request_id(&self) -> String {
+        format!("nodavideo-{}", self.next_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Send a pre-built envelope and await its `control_response`, returning the
+    /// full frame on success so callers can read envelope-level fields.
+    async fn call(&self, envelope: Value) -> Result<Value, AgentRuntimeError> {
+        let id = envelope
+            .get("request_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AgentRuntimeError::ProtocolError("Qoder request envelope has no request_id".into())
+            })?
+            .to_string();
+        let method = envelope
+            .get("request")
+            .and_then(|request| request.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("request")
+            .to_string();
         let (reply_tx, reply_rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id.clone(), reply_tx);
-        let mut line = serde_json::to_string(&control_request(&id, subtype, params))?;
+        let mut line = serde_json::to_string(&envelope)?;
         line.push('\n');
         if self.stdin_tx.send(line).await.is_err() {
             self.pending.lock().unwrap().remove(&id);
@@ -253,26 +427,71 @@ impl DaemonConnection {
             Ok(Ok(reply)) => reply,
             Ok(Err(_)) => {
                 return Err(AgentRuntimeError::ProtocolError(format!(
-                    "Qoder dropped the reply to '{subtype}'"
+                    "Qoder dropped the reply to '{method}'"
                 )));
             }
             Err(_) => {
                 self.pending.lock().unwrap().remove(&id);
                 return Err(AgentRuntimeError::ProtocolError(format!(
-                    "Qoder did not answer '{subtype}' within {}s",
+                    "Qoder did not answer '{method}' within {}s",
                     RPC_TIMEOUT.as_secs()
                 )));
             }
         };
         match parse_control_response(&reply) {
-            Some(ControlResponse::Success { response }) => Ok(response),
+            Some(ControlResponse::Success { .. }) => Ok(reply),
             Some(ControlResponse::Error { code, message }) => Err(AgentRuntimeError::Other(
-                format!("Qoder '{subtype}' failed ({code}): {message}"),
+                format!("Qoder '{method}' failed ({code}): {message}"),
             )),
             None => Err(AgentRuntimeError::ProtocolError(
                 "Qoder sent an unrecognized control_response".into(),
             )),
         }
+    }
+
+    async fn request(&self, subtype: &str, params: Value) -> Result<Value, AgentRuntimeError> {
+        let frame = self
+            .call(control_request(&self.next_request_id(), subtype, params))
+            .await?;
+        Ok(response_payload(&frame))
+    }
+
+    async fn request_frame(
+        &self,
+        subtype: &str,
+        params: Value,
+    ) -> Result<Value, AgentRuntimeError> {
+        self.call(control_request(&self.next_request_id(), subtype, params))
+            .await
+    }
+
+    async fn request_session(
+        &self,
+        session_id: &str,
+        subtype: &str,
+        params: Value,
+    ) -> Result<Value, AgentRuntimeError> {
+        let frame = self
+            .call(session_control_request(
+                &self.next_request_id(),
+                subtype,
+                session_id,
+                params,
+            ))
+            .await?;
+        Ok(response_payload(&frame))
+    }
+
+    /// Write a session frame that expects no reply (a user message).
+    async fn send_frame(&self, frame: Value) -> Result<(), AgentRuntimeError> {
+        let mut line = serde_json::to_string(&frame)?;
+        line.push('\n');
+        if self.stdin_tx.send(line).await.is_err() {
+            return Err(AgentRuntimeError::ProtocolError(
+                "Qoder stdin channel closed".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -283,12 +502,17 @@ struct DaemonProcess {
     _auth_dir: TempDir,
 }
 
-/// Launch the daemon, wire its stdio, and complete the handshake.
-async fn connect(binary: &str, config: &AgentConfig) -> Result<DaemonProcess, AgentRuntimeError> {
+/// Launch the daemon, wire its stdio, and complete the handshake. `tx` is Some for
+/// a session (frames stream to it) and None for one-shot discovery calls.
+async fn connect(
+    binary: &str,
+    config: &AgentConfig,
+    tx: Option<broadcast::Sender<AgentEvent>>,
+) -> Result<DaemonProcess, AgentRuntimeError> {
     let auth_dir = write_auth_payload()?;
     let payload_path = auth_dir.path().join("payload.json");
     let (mut child, connection, stdout) = launch(binary, config, &payload_path)?;
-    spawn_reader(stdout, connection.pending.clone());
+    spawn_reader(stdout, connection.pending.clone(), tx);
     match initialize(&connection).await {
         Ok(_info) => Ok(DaemonProcess {
             child,
@@ -336,17 +560,10 @@ fn launch(
     auth_payload_path: &Path,
 ) -> Result<(Child, DaemonConnection, ChildStdout), AgentRuntimeError> {
     let mut command = Command::new(binary);
+    // The daemon speaks NDJSON from `--sdk` plus the env markers; per-session flags
+    // (print/stream-json/permission-mode) travel in open_session's worker_args.
     command
-        .args([
-            "--sdk",
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--input-format",
-            "stream-json",
-            "--permission-mode",
-            permission_mode_flag(config.permission_mode),
-        ])
+        .arg("--sdk")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -355,7 +572,7 @@ fn launch(
         .env(ENV_SDK_ENTRYPOINT, SDK_ENTRYPOINT)
         .env(ENV_SDK_AUTH_PAYLOAD_FILE, auth_payload_path);
     if let Some(dir) = &config.working_dir {
-        command.current_dir(dir).arg("--cwd").arg(dir);
+        command.current_dir(dir);
     }
     for (key, value) in &config.environment {
         command.env(key, value);
@@ -429,8 +646,13 @@ async fn initialize(connection: &DaemonConnection) -> Result<InitializeInfo, Age
     Ok(info)
 }
 
-fn spawn_reader(stdout: ChildStdout, pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>) {
+fn spawn_reader(
+    stdout: ChildStdout,
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
+    tx: Option<broadcast::Sender<AgentEvent>>,
+) {
     tokio::spawn(async move {
+        let mut tool_names: HashMap<String, String> = HashMap::new();
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let trimmed = line.trim();
@@ -440,15 +662,212 @@ fn spawn_reader(stdout: ChildStdout, pending: Arc<Mutex<HashMap<String, oneshot:
             let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
                 continue;
             };
-            let Some(request_id) = response_request_id(&value) else {
+            if value.get("type").and_then(Value::as_str) == Some("control_response") {
+                if let Some(request_id) = response_request_id(&value) {
+                    let reply = pending.lock().unwrap().remove(request_id);
+                    if let Some(reply) = reply {
+                        let _ = reply.send(value);
+                    }
+                }
                 continue;
-            };
-            let reply = pending.lock().unwrap().remove(request_id);
-            if let Some(reply) = reply {
-                let _ = reply.send(value);
+            }
+            if let Some(tx) = &tx {
+                map_session_frame(&value, tx, &mut tool_names);
             }
         }
     });
+}
+
+/// Translate one Qoder session frame into NodaVideo events. Text and thinking
+/// stream from `stream_event` deltas; `assistant` frames contribute only tool_use
+/// blocks (their text would duplicate the deltas). `tool_names` correlates a
+/// tool_result back to the tool_use that requested it.
+fn map_session_frame(
+    value: &Value,
+    tx: &broadcast::Sender<AgentEvent>,
+    tool_names: &mut HashMap<String, String>,
+) {
+    let Some(kind) = value.get("type").and_then(Value::as_str) else {
+        return;
+    };
+    match kind {
+        "stream_event" => {
+            let Some(event) = value.get("event") else {
+                return;
+            };
+            if event.get("type").and_then(Value::as_str) != Some("content_block_delta") {
+                return;
+            }
+            let Some(delta) = event.get("delta") else {
+                return;
+            };
+            match delta.get("type").and_then(Value::as_str) {
+                Some("text_delta") => {
+                    if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                        let _ = tx.send(AgentEvent::MessageChunk(text.to_string()));
+                    }
+                }
+                Some("thinking_delta") => {
+                    if let Some(thinking) = delta.get("thinking").and_then(Value::as_str) {
+                        let _ = tx.send(AgentEvent::ThoughtChunk(thinking.to_string()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        "assistant" => {
+            let Some(content) = value
+                .get("message")
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_array)
+            else {
+                return;
+            };
+            for block in content {
+                if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                    continue;
+                }
+                let call_id = block
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let tool_name = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool")
+                    .to_string();
+                tool_names.insert(call_id.clone(), tool_name.clone());
+                let _ = tx.send(AgentEvent::ToolCallRequested {
+                    call_id,
+                    tool_name,
+                    arguments: block.get("input").cloned().unwrap_or_else(|| json!({})),
+                });
+            }
+        }
+        "user" => {
+            let Some(content) = value
+                .get("message")
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_array)
+            else {
+                return;
+            };
+            for block in content {
+                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                    continue;
+                }
+                let call_id = block
+                    .get("tool_use_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let tool_name = tool_names
+                    .get(&call_id)
+                    .cloned()
+                    .unwrap_or_else(|| "tool".to_string());
+                let _ = tx.send(AgentEvent::ToolCallResult {
+                    call_id,
+                    tool_name,
+                    result: block.get("content").cloned().unwrap_or(Value::Null),
+                    is_error: block
+                        .get("is_error")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                });
+            }
+        }
+        "result" => {
+            let subtype = value.get("subtype").and_then(Value::as_str).unwrap_or("");
+            if subtype == "success" {
+                let _ = tx.send(AgentEvent::SessionCompleted { summary: None });
+                return;
+            }
+            let errors_text = value.get("errors").and_then(Value::as_array).map(|errors| {
+                errors
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<&str>>()
+                    .join("; ")
+            });
+            let message = match errors_text {
+                Some(text) if !text.is_empty() => text,
+                _ => value
+                    .get("error_message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Qoder turn failed")
+                    .to_string(),
+            };
+            let _ = tx.send(AgentEvent::SessionError {
+                code: format!("QODER_{subtype}"),
+                message,
+            });
+        }
+        "status_event" => {
+            if value.get("status").and_then(Value::as_str) != Some("daemon.session_updated") {
+                return;
+            }
+            let Some(data) = value.get("data") else {
+                return;
+            };
+            if data.get("state").and_then(Value::as_str) != Some("failed") {
+                return;
+            }
+            let message = match data.get("error") {
+                Some(error) => error.to_string(),
+                None => "Qoder session failed".to_string(),
+            };
+            let _ = tx.send(AgentEvent::SessionError {
+                code: "QODER_SESSION_FAILED".into(),
+                message,
+            });
+        }
+        _ => {}
+    }
+}
+
+/// The per-session worker flags. The model is chosen with a `set_model` control
+/// request after open_session; `--model` here is ignored by the daemon worker.
+fn worker_args(config: &AgentConfig) -> Vec<String> {
+    vec![
+        "--print".into(),
+        "--output-format".into(),
+        "stream-json".into(),
+        "--input-format".into(),
+        "stream-json".into(),
+        "--tools".into(),
+        "default".into(),
+        "--disable-builtin-skills".into(),
+        "--include-partial-messages".into(),
+        "--permission-mode".into(),
+        permission_mode_flag(config.permission_mode).into(),
+    ]
+}
+
+/// Resolve a concrete session model. The catalog default "auto" is a client-side
+/// meta-selector the worker rejects, so an unset or "auto" choice falls back to the
+/// first concrete model the daemon reports.
+async fn resolve_session_model(
+    connection: &DaemonConnection,
+    requested: Option<&str>,
+) -> Result<String, AgentRuntimeError> {
+    match requested {
+        Some(model) if model != "auto" => Ok(model.to_string()),
+        _ => {
+            let catalog = connection
+                .request("daemon.get_models", json!({ "fetchStrategy": "cache" }))
+                .await?;
+            match parse_models(&catalog)
+                .iter()
+                .find(|model| model.id != "auto")
+            {
+                Some(model) => Ok(model.id.clone()),
+                None => Err(AgentRuntimeError::Other(
+                    "Qoder reported no concrete session model".into(),
+                )),
+            }
+        }
+    }
 }
 
 /// Map NodaVideo's permission mode to a Qoder CLI mode. Never `yolo`.
@@ -509,9 +928,13 @@ fn newest_installed_binary() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use nodavideo_agent_runtime::AgentProvider;
+    use std::collections::HashMap;
 
-    use crate::provider::QoderAgentProvider;
+    use nodavideo_agent_runtime::{AgentConfig, AgentEvent, AgentProvider, PermissionMode};
+    use serde_json::json;
+    use tokio::sync::broadcast;
+
+    use crate::provider::{QoderAgentProvider, map_session_frame, worker_args};
 
     #[test]
     fn probe_rejects_empty_and_missing() {
@@ -548,5 +971,185 @@ mod tests {
         assert!(provider.cli_version().await.is_none());
         assert!(provider.account_info().await.unwrap().is_none());
         assert!(provider.list_sessions().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn worker_args_request_streaming_and_supervised_mode() {
+        let args = worker_args(&AgentConfig::default());
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--input-format", "stream-json"])
+        );
+        assert!(args.contains(&"--include-partial-messages".to_string()));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--permission-mode", "default"])
+        );
+        let full = worker_args(&AgentConfig {
+            permission_mode: PermissionMode::FullAccess,
+            ..AgentConfig::default()
+        });
+        assert!(
+            full.windows(2)
+                .any(|pair| pair == ["--permission-mode", "bypassPermissions"])
+        );
+        assert!(!full.contains(&"--yolo".to_string()));
+    }
+
+    #[tokio::test]
+    async fn simulated_session_streams_then_completes() {
+        let provider = QoderAgentProvider::simulated();
+        let session = provider
+            .start_session(AgentConfig::default())
+            .await
+            .unwrap();
+        let mut events = provider.subscribe(session).unwrap();
+        provider
+            .send_message(session, "hello".into())
+            .await
+            .unwrap();
+        let mut saw_message = false;
+        let mut saw_completed = false;
+        for _ in 0..8 {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), events.recv()).await {
+                Ok(Ok(AgentEvent::MessageChunk(_))) => saw_message = true,
+                Ok(Ok(AgentEvent::SessionCompleted { .. })) => {
+                    saw_completed = true;
+                    break;
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
+        assert!(saw_message);
+        assert!(saw_completed);
+    }
+
+    #[tokio::test]
+    async fn simulated_cancel_completes_session() {
+        let provider = QoderAgentProvider::simulated();
+        let session = provider
+            .start_session(AgentConfig::default())
+            .await
+            .unwrap();
+        let mut events = provider.subscribe(session).unwrap();
+        provider.cancel(session).await.unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event, AgentEvent::SessionCompleted { .. }));
+    }
+
+    #[tokio::test]
+    async fn subscribe_unknown_session_errors() {
+        let provider = QoderAgentProvider::simulated();
+        let unknown = nodavideo_agent_runtime::SessionId::new();
+        assert!(provider.subscribe(unknown).is_err());
+        assert!(provider.cancel(unknown).await.is_err());
+        assert!(provider.send_message(unknown, "hi".into()).await.is_err());
+    }
+
+    fn drain(rx: &mut broadcast::Receiver<AgentEvent>) -> Vec<AgentEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    #[test]
+    fn stream_deltas_map_to_message_and_thought_chunks() {
+        let (tx, mut rx) = broadcast::channel(16);
+        let mut names = HashMap::new();
+        map_session_frame(
+            &json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}}),
+            &tx,
+            &mut names,
+        );
+        map_session_frame(
+            &json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}}}),
+            &tx,
+            &mut names,
+        );
+        map_session_frame(
+            &json!({"type":"stream_event","event":{"type":"message_stop"}}),
+            &tx,
+            &mut names,
+        );
+        let events = drain(&mut rx);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], AgentEvent::MessageChunk(text) if text == "ok"));
+        assert!(matches!(&events[1], AgentEvent::ThoughtChunk(text) if text == "hmm"));
+    }
+
+    #[test]
+    fn assistant_tool_use_and_user_tool_result_correlate() {
+        let (tx, mut rx) = broadcast::channel(16);
+        let mut names = HashMap::new();
+        map_session_frame(
+            &json!({"type":"assistant","message":{"content":[
+                {"type":"text","text":"ignored"},
+                {"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"ls"}}
+            ]}}),
+            &tx,
+            &mut names,
+        );
+        map_session_frame(
+            &json!({"type":"user","message":{"content":[
+                {"type":"tool_result","tool_use_id":"tu1","content":"file.txt","is_error":false}
+            ]}}),
+            &tx,
+            &mut names,
+        );
+        let events = drain(&mut rx);
+        assert_eq!(events.len(), 2);
+        assert!(
+            matches!(&events[0], AgentEvent::ToolCallRequested { call_id, tool_name, .. } if call_id == "tu1" && tool_name == "Bash")
+        );
+        assert!(
+            matches!(&events[1], AgentEvent::ToolCallResult { call_id, tool_name, is_error, .. } if call_id == "tu1" && tool_name == "Bash" && !is_error)
+        );
+    }
+
+    #[test]
+    fn result_success_completes_and_error_reports() {
+        let (tx, mut rx) = broadcast::channel(16);
+        let mut names = HashMap::new();
+        map_session_frame(
+            &json!({"type":"result","subtype":"success","result":"ok"}),
+            &tx,
+            &mut names,
+        );
+        map_session_frame(
+            &json!({"type":"result","subtype":"error_during_execution","errors":["boom"]}),
+            &tx,
+            &mut names,
+        );
+        let events = drain(&mut rx);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            AgentEvent::SessionCompleted { summary: None }
+        ));
+        assert!(
+            matches!(&events[1], AgentEvent::SessionError { message, .. } if message == "boom")
+        );
+    }
+
+    #[test]
+    fn session_failed_status_maps_to_error() {
+        let (tx, mut rx) = broadcast::channel(16);
+        let mut names = HashMap::new();
+        map_session_frame(
+            &json!({"type":"status_event","status":"daemon.session_updated","data":{"state":"failed","error":{"reason":"crash"}}}),
+            &tx,
+            &mut names,
+        );
+        let events = drain(&mut rx);
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], AgentEvent::SessionError { code, .. } if code == "QODER_SESSION_FAILED")
+        );
     }
 }
