@@ -7,6 +7,7 @@ pub(crate) enum IconName {
     App,
     ArrowDown,
     ArrowUp,
+    Edit,
     Expand,
     Eye,
     EyeOff,
@@ -48,6 +49,7 @@ impl IconName {
             Self::App => "icons/app-icon.svg",
             Self::ArrowDown => "icons/arrow-down.svg",
             Self::ArrowUp => "icons/arrow-up.svg",
+            Self::Edit => "icons/edit.svg",
             Self::Expand => "icons/expand.svg",
             Self::Eye => "icons/eye.svg",
             Self::EyeOff => "icons/eye-off.svg",
@@ -106,11 +108,12 @@ impl AssetSource for EditorAssets {
 
 // Private APIs only
 impl IconName {
-    const ALL: [Self; 35] = [
+    const ALL: [Self; 36] = [
         Self::AlertTriangle,
         Self::App,
         Self::ArrowDown,
         Self::ArrowUp,
+        Self::Edit,
         Self::Expand,
         Self::Eye,
         Self::EyeOff,
@@ -150,6 +153,7 @@ impl IconName {
             Self::App => include_bytes!("../../../icons/app-icon.svg"),
             Self::ArrowDown => include_bytes!("../../../icons/arrow-down.svg"),
             Self::ArrowUp => include_bytes!("../../../icons/arrow-up.svg"),
+            Self::Edit => include_bytes!("../../../icons/edit.svg"),
             Self::Expand => include_bytes!("../../../icons/expand.svg"),
             Self::Eye => include_bytes!("../../../icons/eye.svg"),
             Self::EyeOff => include_bytes!("../../../icons/eye-off.svg"),

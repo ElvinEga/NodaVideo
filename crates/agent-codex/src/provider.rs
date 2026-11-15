@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use nodavideo_agent_runtime::{
-    AgentConfig, AgentEvent, AgentModel, AgentProvider, AgentRuntimeError, SessionId,
+    AgentConfig, AgentEvent, AgentModel, AgentProvider, AgentRuntimeError, PermissionMode,
+    SessionId,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -210,9 +211,15 @@ impl AgentProvider for CodexAgentProvider {
                 Some(model) => Some(model),
                 None => Some(default_model_id(&rpc).await?),
             };
+            let (sandbox, approval_policy) = match config.permission_mode {
+                PermissionMode::ReadOnly => ("read-only", "never"),
+                PermissionMode::Supervised => ("workspace-write", "on-request"),
+                PermissionMode::AutoAcceptEdits => ("workspace-write", "untrusted"),
+                PermissionMode::FullAccess => ("danger-full-access", "never"),
+            };
             let mut thread_params = json!({
-                "sandbox": "workspace-write",
-                "approvalPolicy": "on-request",
+                "sandbox": sandbox,
+                "approvalPolicy": approval_policy,
             });
             if let Some(dir) = &config.working_dir {
                 thread_params["cwd"] = json!(dir.to_string_lossy());

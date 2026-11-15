@@ -29,7 +29,7 @@ use nodavideo_agent_claude::ClaudeAgentProvider;
 use nodavideo_agent_codex::CodexAgentProvider;
 use nodavideo_agent_opencode::OpenCodeAgentProvider;
 use nodavideo_agent_runtime::{
-    AgentConfig, AgentEvent, AgentModel, AgentRuntime, MockAgentProvider, SessionId,
+    AgentConfig, AgentEvent, AgentModel, AgentRuntime, MockAgentProvider, PermissionMode, SessionId,
 };
 use nodavideo_hyperframes_bridge::{CompositionAsset, load_compositions};
 use nodavideo_mcp_server::{ExplorerChange, McpError, McpExecutor};
@@ -65,6 +65,9 @@ pub(crate) struct AssistantState {
     effort_choices: Vec<Option<String>>,
     model_menu_open: bool,
     effort_menu_open: bool,
+    /// How much freedom the agent has to act without approval; applied at session start.
+    permission_mode: PermissionMode,
+    permission_menu_open: bool,
     /// Production skills discovered from `skills/`; the enabled set is the source of truth
     /// for the active skill, so the composer button never stores a duplicate copy.
     skills: SkillRegistry,
@@ -131,6 +134,8 @@ impl AssistantState {
             effort_choices: vec![None; ASSISTANT_PROVIDERS.len()],
             model_menu_open: false,
             effort_menu_open: false,
+            permission_mode: PermissionMode::default(),
+            permission_menu_open: false,
             skills: SkillRegistry::new(),
             skill_menu_open: false,
             sessions_sidebar_open: true,
@@ -383,6 +388,9 @@ impl Editor {
                     .when(!assistant.effort_options().is_empty(), |this| {
                         this.child(assistant_effort_picker_view(assistant, cx))
                     })
+                    .when(assistant.provider().supports_permissions, |this| {
+                        this.child(assistant_permission_picker_view(assistant, cx))
+                    })
                     .child(div().flex_1())
                     .child(if assistant.busy {
                         button_cyberpunk_secondary("assistant-stop", "Stop", true, window, cx)
@@ -533,6 +541,9 @@ impl Editor {
             .when(assistant.effort_menu_open, |this| {
                 this.child(assistant_effort_menu_view(assistant, cx))
             })
+            .when(assistant.permission_menu_open, |this| {
+                this.child(assistant_permission_menu_view(assistant, cx))
+            })
             .into_any_element()
     }
 
@@ -559,6 +570,7 @@ impl Editor {
         let working_dir = self.project_root.clone();
         let model = self.assistant.active_model().map(|model| model.id.clone());
         let effort = self.assistant.active_effort().map(str::to_string);
+        let permission_mode = self.assistant.permission_mode;
 
         // Providers deliver only the message string, so the active skill's instructions ride
         // along on the first message of a session. A reused session already carries them; a
@@ -578,6 +590,7 @@ impl Editor {
                         provider_id,
                         model,
                         effort,
+                        permission_mode,
                         working_dir: Some(working_dir),
                         ..AgentConfig::default()
                     };
@@ -789,6 +802,38 @@ impl Editor {
         };
         self.assistant
             .push_entry(AssistantEntry::Info(format!("Reasoning effort: {label}")));
+        self.assistant.scroll.scroll_to_bottom();
+        self.persist_assistant_transcript(cx);
+        cx.notify();
+        if let Some(session) = previous_session {
+            let runtime = self.assistant.runtime.clone();
+            gpui_tokio::Tokio::spawn(cx, async move {
+                if let Err(error) = runtime.cancel(session).await {
+                    log::debug!("Could not cancel the previous agent session: {error:?}");
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// Choosing a permission mode resets the live session so the next message starts the
+    /// agent with the new permissions; providers fix them at session creation.
+    pub(super) fn select_assistant_permission_mode(
+        &mut self,
+        mode: PermissionMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.assistant.permission_menu_open = false;
+        if self.assistant.permission_mode == mode {
+            cx.notify();
+            return;
+        }
+        self.assistant.permission_mode = mode;
+        let previous_session = self.assistant.reset_session();
+        self.assistant.push_entry(AssistantEntry::Info(format!(
+            "Permissions: {}",
+            permission_mode_label(mode)
+        )));
         self.assistant.scroll.scroll_to_bottom();
         self.persist_assistant_transcript(cx);
         cx.notify();
@@ -1447,16 +1492,57 @@ impl AssistantState {
                 command_summary,
                 parameters,
             } => {
-                self.push_entry(AssistantEntry::Info(format!(
-                    "Approval requested for {tool_name}: {parameters}"
-                )));
-                self.pending_approval = Some(AssistantApproval {
-                    request_id,
-                    title,
-                    description,
-                    tool_name,
-                    command_summary,
-                });
+                // In-process providers have no permission backend of their own, so the
+                // editor applies the selected mode here instead of showing a card.
+                let auto_decision = if self.provider_executes_in_process() {
+                    match self.permission_mode {
+                        PermissionMode::Supervised => None,
+                        PermissionMode::ReadOnly => Some(false),
+                        PermissionMode::FullAccess => Some(true),
+                        PermissionMode::AutoAcceptEdits => {
+                            Some(in_process_tool_is_edit(&tool_name))
+                        }
+                    }
+                } else {
+                    None
+                };
+                match auto_decision {
+                    Some(approved) => {
+                        self.push_entry(AssistantEntry::Info(format!(
+                            "{}: {title} ({tool_name})",
+                            if approved {
+                                "Auto-approved"
+                            } else {
+                                "Auto-rejected"
+                            }
+                        )));
+                        if let Some(session) = self.session {
+                            let runtime = self.runtime.clone();
+                            gpui_tokio::Tokio::spawn(cx, async move {
+                                if let Err(error) =
+                                    runtime.submit_approval(session, request_id, approved).await
+                                {
+                                    log::error!(
+                                        "Could not submit the automatic approval decision: {error:?}"
+                                    );
+                                }
+                            })
+                            .detach();
+                        }
+                    }
+                    None => {
+                        self.push_entry(AssistantEntry::Info(format!(
+                            "Approval requested for {tool_name}: {parameters}"
+                        )));
+                        self.pending_approval = Some(AssistantApproval {
+                            request_id,
+                            title,
+                            description,
+                            tool_name,
+                            command_summary,
+                        });
+                    }
+                }
             }
             AgentEvent::ApprovalDecision {
                 request_id,
@@ -1558,6 +1644,8 @@ struct AssistantProvider {
     /// True when the editor executes the provider's tool calls in-process (offline Mock).
     /// Self-executing providers (ACP/Codex/Claude) run their own tools and only stream results.
     executes_in_process: bool,
+    /// True when the provider has a real permission backend the mode picker can drive.
+    supports_permissions: bool,
 }
 
 const ASSISTANT_PROVIDERS: [AssistantProvider; 6] = [
@@ -1567,6 +1655,7 @@ const ASSISTANT_PROVIDERS: [AssistantProvider; 6] = [
         transport: "Offline",
         hue: 0x8a90a2,
         executes_in_process: true,
+        supports_permissions: true,
     },
     AssistantProvider {
         id: "acp-antigravity",
@@ -1574,6 +1663,7 @@ const ASSISTANT_PROVIDERS: [AssistantProvider; 6] = [
         transport: "ACP",
         hue: 0xa5b4fc,
         executes_in_process: false,
+        supports_permissions: false,
     },
     AssistantProvider {
         id: "acp-gemini",
@@ -1581,6 +1671,7 @@ const ASSISTANT_PROVIDERS: [AssistantProvider; 6] = [
         transport: "ACP",
         hue: 0x4285f4,
         executes_in_process: false,
+        supports_permissions: false,
     },
     AssistantProvider {
         id: "codex-app-server",
@@ -1588,6 +1679,7 @@ const ASSISTANT_PROVIDERS: [AssistantProvider; 6] = [
         transport: "App-Server",
         hue: 0x10a37f,
         executes_in_process: false,
+        supports_permissions: true,
     },
     AssistantProvider {
         id: "claude-cli",
@@ -1595,6 +1687,7 @@ const ASSISTANT_PROVIDERS: [AssistantProvider; 6] = [
         transport: "CLI",
         hue: 0xd97757,
         executes_in_process: false,
+        supports_permissions: false,
     },
     AssistantProvider {
         id: "opencode",
@@ -1602,6 +1695,7 @@ const ASSISTANT_PROVIDERS: [AssistantProvider; 6] = [
         transport: "HTTP",
         hue: 0x22d3ee,
         executes_in_process: false,
+        supports_permissions: true,
     },
 ];
 
@@ -2179,6 +2273,7 @@ fn assistant_model_button_view(
             editor.assistant.model_menu_open = false;
             editor.assistant.effort_menu_open = false;
             editor.assistant.skill_menu_open = false;
+            editor.assistant.permission_menu_open = false;
             if opening {
                 editor.probe_assistant_providers(cx);
             }
@@ -2227,6 +2322,7 @@ fn assistant_model_picker_view(
             editor.assistant.provider_menu_open = false;
             editor.assistant.effort_menu_open = false;
             editor.assistant.skill_menu_open = false;
+            editor.assistant.permission_menu_open = false;
             if opening {
                 editor.probe_assistant_models(cx);
             }
@@ -2268,6 +2364,7 @@ fn assistant_effort_picker_view(
             editor.assistant.provider_menu_open = false;
             editor.assistant.model_menu_open = false;
             editor.assistant.skill_menu_open = false;
+            editor.assistant.permission_menu_open = false;
             cx.notify();
         }))
         .child(
@@ -2518,6 +2615,233 @@ fn assistant_effort_menu_view(assistant: &AssistantState, cx: &mut Context<Edito
                 })),
         )
         .child(menu)
+}
+
+/// The permission chip: shows the active mode with its icon and opens the mode menu.
+/// Only mounted for providers with a real permission backend.
+fn assistant_permission_picker_view(
+    assistant: &AssistantState,
+    cx: &mut Context<Editor>,
+) -> Stateful<gpui::Div> {
+    let mode = assistant.permission_mode;
+    div()
+        .id("assistant-permission-picker")
+        .h(px(28.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .rounded(px(3.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .px(px(8.0))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+        .on_click(cx.listener(|editor, _, _, cx| {
+            let opening = !editor.assistant.permission_menu_open;
+            editor.assistant.permission_menu_open = opening;
+            editor.assistant.provider_menu_open = false;
+            editor.assistant.model_menu_open = false;
+            editor.assistant.effort_menu_open = false;
+            editor.assistant.skill_menu_open = false;
+            cx.notify();
+        }))
+        .child(
+            svg()
+                .path(permission_mode_icon(mode).path())
+                .size(px(13.0))
+                .text_color(rgb(permission_mode_hue(mode))),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(TEXT))
+                .child(permission_mode_label(mode)),
+        )
+        .child(
+            svg()
+                .path(IconName::ArrowDown.path())
+                .size(px(11.0))
+                .text_color(rgb(MUTED)),
+        )
+}
+
+/// The permission dropdown: a click-away backdrop plus the four real modes. Choosing a
+/// row emits one AssistantPermissionModeSelected and restarts the agent session.
+fn assistant_permission_menu_view(
+    assistant: &AssistantState,
+    cx: &mut Context<Editor>,
+) -> gpui::Div {
+    let modes = [
+        PermissionMode::ReadOnly,
+        PermissionMode::Supervised,
+        PermissionMode::AutoAcceptEdits,
+        PermissionMode::FullAccess,
+    ];
+    let menu = div()
+        .absolute()
+        .bottom(px(96.0))
+        .left(px(if assistant.sessions_sidebar_open {
+            252.0
+        } else {
+            12.0
+        }))
+        .right(px(12.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .p(px(3.0))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px(px(12.0))
+                .pt(px(8.0))
+                .pb(px(4.0))
+                .text_size(px(10.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(MUTED))
+                .child("PERMISSIONS"),
+        )
+        .child(
+            div()
+                .id("assistant-permission-menu-rows")
+                .max_h(px(320.0))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .children(modes.into_iter().map(|mode| {
+                    assistant_permission_row_view(mode, mode == assistant.permission_mode, cx)
+                })),
+        )
+        .child(assistant_menu_note_view(
+            "Changing mode starts a fresh agent session.",
+            MUTED,
+        ));
+
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            div()
+                .id("assistant-permission-backdrop")
+                .absolute()
+                .inset_0()
+                .on_click(cx.listener(|editor, _, _, cx| {
+                    editor.assistant.permission_menu_open = false;
+                    cx.notify();
+                })),
+        )
+        .child(menu)
+}
+
+fn assistant_permission_row_view(
+    mode: PermissionMode,
+    selected: bool,
+    cx: &mut Context<Editor>,
+) -> Stateful<gpui::Div> {
+    div()
+        .id(format!(
+            "assistant-permission-{}",
+            permission_mode_label(mode)
+        ))
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .rounded(px(6.0))
+        .px(px(12.0))
+        .py(px(8.0))
+        .when(selected, |this| this.bg(rgb(SURFACE_HOVER)))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+        .on_click(cx.listener(move |editor, _, _, cx| {
+            editor.emit_event(cx, AppEvent::AssistantPermissionModeSelected { mode });
+        }))
+        .child(
+            svg()
+                .path(permission_mode_icon(mode).path())
+                .size(px(13.0))
+                .flex_shrink_0()
+                .text_color(rgb(permission_mode_hue(mode))),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(TEXT))
+                        .child(permission_mode_label(mode)),
+                )
+                .child(
+                    div()
+                        .mt(px(2.0))
+                        .text_size(px(10.0))
+                        .text_color(rgb(MUTED))
+                        .child(permission_mode_description(mode)),
+                ),
+        )
+        .when(selected, |this| {
+            this.child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(13.0))
+                    .text_color(rgb(LINK))
+                    .child("✓"),
+            )
+        })
+}
+
+fn permission_mode_label(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::ReadOnly => "Read-only",
+        PermissionMode::Supervised => "Supervised",
+        PermissionMode::AutoAcceptEdits => "Auto-accept edits",
+        PermissionMode::FullAccess => "Full access",
+    }
+}
+
+fn permission_mode_description(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::ReadOnly => "Inspect without changing files.",
+        PermissionMode::Supervised => "Ask before commands and file changes.",
+        PermissionMode::AutoAcceptEdits => "Auto-approve edits, ask before other actions.",
+        PermissionMode::FullAccess => "Allow commands and edits without prompts.",
+    }
+}
+
+fn permission_mode_icon(mode: PermissionMode) -> IconName {
+    match mode {
+        PermissionMode::ReadOnly => IconName::Eye,
+        PermissionMode::Supervised => IconName::Lock,
+        PermissionMode::AutoAcceptEdits => IconName::Edit,
+        PermissionMode::FullAccess => IconName::Shield,
+    }
+}
+
+fn permission_mode_hue(mode: PermissionMode) -> u32 {
+    match mode {
+        PermissionMode::ReadOnly => MUTED,
+        PermissionMode::Supervised => MUTED,
+        PermissionMode::AutoAcceptEdits => LINK,
+        PermissionMode::FullAccess => WARNING,
+    }
+}
+
+/// The approval-gated MCP tools that mutate the edit. Auto-accept edits approves these
+/// without a card; export and other non-edit actions still ask.
+fn in_process_tool_is_edit(tool_name: &str) -> bool {
+    match tool_name {
+        "split_clip" | "delete_clip" | "propose_changeset" | "add_composition_to_timeline" => true,
+        "export_video" => false,
+        _ => false,
+    }
 }
 
 fn assistant_model_row_view(
@@ -3092,6 +3416,7 @@ fn assistant_skill_button_view(
             editor.assistant.provider_menu_open = false;
             editor.assistant.model_menu_open = false;
             editor.assistant.effort_menu_open = false;
+            editor.assistant.permission_menu_open = false;
             cx.notify();
         }))
         .child(

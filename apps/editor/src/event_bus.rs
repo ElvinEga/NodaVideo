@@ -44,6 +44,7 @@ use gpui::prelude::*;
 use gpui::{
     AsyncApp, Bounds, Entity, EventEmitter, MouseMoveEvent, PathPromptOptions, Pixels, WeakEntity,
 };
+use nodavideo_agent_runtime::PermissionMode;
 use nodavideo_hyperframes_bridge::{
     CompositionAsset, save_composition, template_registry, unique_folder,
 };
@@ -163,6 +164,10 @@ pub(crate) enum AppEvent {
     /// The user chose a reasoning-effort variant; None restores the model default.
     AssistantEffortSelected {
         effort: Option<String>,
+    },
+    /// The user chose how much freedom the agent has to act without approval.
+    AssistantPermissionModeSelected {
+        mode: PermissionMode,
     },
     /// The user asked to retry loading the active provider's model catalog.
     AssistantModelsRefresh,
@@ -713,6 +718,11 @@ async fn handle_app_event(
         }
         AppEvent::AssistantEffortSelected { effort } => {
             editor.update(cx, |editor, cx| editor.select_assistant_effort(effort, cx));
+        }
+        AppEvent::AssistantPermissionModeSelected { mode } => {
+            editor.update(cx, |editor, cx| {
+                editor.select_assistant_permission_mode(mode, cx)
+            });
         }
         AppEvent::AssistantModelsRefresh => {
             editor.update(cx, |editor, cx| editor.refresh_assistant_models(cx));

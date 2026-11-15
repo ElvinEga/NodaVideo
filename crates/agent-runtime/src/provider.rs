@@ -11,6 +11,20 @@ use crate::error::AgentRuntimeError;
 use crate::event::AgentEvent;
 use crate::id::SessionId;
 
+/// How much freedom the agent has to run commands and change files without asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PermissionMode {
+    /// Inspect only; commands and file changes are denied.
+    ReadOnly,
+    /// Ask before commands and file changes.
+    #[default]
+    Supervised,
+    /// Auto-approve edits; ask before other actions.
+    AutoAcceptEdits,
+    /// Allow commands and edits without prompts.
+    FullAccess,
+}
+
 /// Configuration options for initializing an agent session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -22,6 +36,9 @@ pub struct AgentConfig {
 
     /// Optional reasoning-effort variant requested for the session (e.g. "low", "high", "max").
     pub effort: Option<String>,
+
+    /// How much freedom the session's agent has to act without user approval.
+    pub permission_mode: PermissionMode,
 
     /// Optional custom system instructions or context.
     pub system_prompt: Option<String>,
@@ -42,6 +59,7 @@ impl Default for AgentConfig {
             provider_id: "mock".into(),
             model: None,
             effort: None,
+            permission_mode: PermissionMode::default(),
             system_prompt: None,
             skills: Vec::new(),
             environment: HashMap::new(),

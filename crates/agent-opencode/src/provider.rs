@@ -8,7 +8,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt;
 use nodavideo_agent_runtime::{
-    AgentConfig, AgentEvent, AgentModel, AgentProvider, AgentRuntimeError, SessionId,
+    AgentConfig, AgentEvent, AgentModel, AgentProvider, AgentRuntimeError, PermissionMode,
+    SessionId,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -130,12 +131,18 @@ impl AgentProvider for OpenCodeAgentProvider {
         let server = self.ensure_server().await?;
         let model =
             resolve_model_ref(&server, config.model.as_deref(), config.effort.as_deref()).await?;
+        let (shell_effect, edit_effect) = match config.permission_mode {
+            PermissionMode::ReadOnly => ("deny", "deny"),
+            PermissionMode::Supervised => ("ask", "ask"),
+            PermissionMode::AutoAcceptEdits => ("ask", "allow"),
+            PermissionMode::FullAccess => ("allow", "allow"),
+        };
         let mut params = json!({
             "title": "NodaVideo",
             "model": model,
             "permissions": [
-                { "action": "shell", "resource": "*", "effect": "ask" },
-                { "action": "edit", "resource": "*", "effect": "ask" },
+                { "action": "shell", "resource": "*", "effect": shell_effect },
+                { "action": "edit", "resource": "*", "effect": edit_effect },
             ],
         });
         if let Some(dir) = &config.working_dir {
