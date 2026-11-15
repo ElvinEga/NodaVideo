@@ -742,9 +742,9 @@ impl Editor {
             return;
         };
         self.assistant.push_entry(AssistantEntry::Info(if approved {
-            format!("Approved: {}", approval.title)
+            format!("Approved {}", approval.tool_name)
         } else {
-            format!("Rejected: {}", approval.title)
+            format!("Rejected {}", approval.tool_name)
         }));
         self.assistant.scroll.scroll_to_bottom();
         cx.notify();
@@ -1567,7 +1567,7 @@ impl AssistantState {
                 match auto_decision {
                     Some(approved) => {
                         self.push_entry(AssistantEntry::Info(format!(
-                            "{}: {title} ({tool_name})",
+                            "{} {tool_name}",
                             if approved {
                                 "Auto-approved"
                             } else {
@@ -1604,7 +1604,7 @@ impl AssistantState {
             }
             AgentEvent::ApprovalDecision {
                 request_id,
-                approved,
+                approved: _,
             } => {
                 if self
                     .pending_approval
@@ -1613,11 +1613,6 @@ impl AssistantState {
                 {
                     self.pending_approval = None;
                 }
-                self.push_entry(AssistantEntry::Info(if approved {
-                    "The agent received the approval.".to_string()
-                } else {
-                    "The agent received the rejection.".to_string()
-                }));
             }
             AgentEvent::SessionCompleted { summary } => {
                 self.busy = false;

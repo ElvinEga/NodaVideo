@@ -103,8 +103,10 @@ pub(crate) fn load_session(project_root: &Path, id: Ulid) -> Result<AssistantSes
     let path = session_path(project_root, id);
     let contents = fs::read_to_string(&path)
         .with_context(|| format!("could not read assistant session {}", path.display()))?;
-    serde_json::from_str(&contents)
-        .with_context(|| format!("could not parse assistant session {}", path.display()))
+    let session: AssistantSession = serde_json::from_str(&contents)
+        .with_context(|| format!("could not parse assistant session {}", path.display()))?;
+    let entries = clean_legacy_approval_entries(session.entries);
+    Ok(AssistantSession { entries, ..session })
 }
 
 pub(crate) fn save_session(project_root: &Path, session: &AssistantSession) -> Result<()> {
@@ -151,4 +153,27 @@ fn session_path(project_root: &Path, id: Ulid) -> PathBuf {
 
 fn local_datetime(ms: u64) -> Option<DateTime<Local>> {
     Local.timestamp_millis_opt(ms as i64).single()
+}
+
+/// Shortens legacy approval-request JSON dumps to the tool label and drops redundant decision echoes.
+fn clean_legacy_approval_entries(entries: Vec<AssistantEntry>) -> Vec<AssistantEntry> {
+    entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            AssistantEntry::Info(info) => {
+                if info == "The agent received the approval."
+                    || info == "The agent received the rejection."
+                {
+                    return None;
+                }
+                if info.starts_with("Approval requested for ")
+                    && let Some((prefix, _)) = info.split_once(": {")
+                {
+                    return Some(AssistantEntry::Info(prefix.to_string()));
+                }
+                Some(AssistantEntry::Info(info))
+            }
+            other => Some(other),
+        })
+        .collect()
 }
