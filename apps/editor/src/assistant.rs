@@ -36,7 +36,7 @@ use nodavideo_mcp_server::{ExplorerChange, McpError, McpExecutor};
 use nodavideo_skill_registry::{SkillPackage, SkillRegistry};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -78,8 +78,11 @@ pub(crate) struct AssistantState {
     expanded_tools: HashSet<String>,
     /// Entry indices of thought rows expanded to their full text; rows start at one line.
     expanded_thoughts: HashSet<usize>,
-    /// Start indices of activity groups the user collapsed; groups start expanded.
-    collapsed_groups: HashSet<usize>,
+    /// Per-group expand/collapse overrides keyed by start index; true means expanded.
+    /// Absent means the default: a live run stays open, a finished run collapses.
+    group_overrides: HashMap<usize, bool>,
+    /// Request ids of approval cards expanded to full detail; cards start truncated.
+    expanded_approvals: HashSet<String>,
     /// When the running turn started; None between turns.
     turn_started_at: Option<Instant>,
     /// How long the most recent finished turn took; shown in its speaker header.
@@ -145,7 +148,8 @@ impl AssistantState {
             sessions_sidebar_open: true,
             expanded_tools: HashSet::new(),
             expanded_thoughts: HashSet::new(),
-            collapsed_groups: HashSet::new(),
+            group_overrides: HashMap::new(),
+            expanded_approvals: HashSet::new(),
             turn_started_at: None,
             last_turn_elapsed: None,
             history: Vec::new(),
@@ -368,7 +372,13 @@ impl Editor {
                     None
                 };
                 let content = if is_group {
-                    let collapsed = assistant.collapsed_groups.contains(&start);
+                    let is_live = viewing.is_none() && assistant.busy && end == entries.len();
+                    let collapsed = assistant_group_collapsed(
+                        &entries[start..end],
+                        start,
+                        is_live,
+                        &assistant.group_overrides,
+                    );
                     assistant_activity_group_view(assistant, &entries[start..end], start, collapsed, cx)
                 } else {
                     assistant_entry_view(first)
@@ -388,10 +398,10 @@ impl Editor {
 
         let approval = match viewing {
             Some(_) => None,
-            None => assistant
-                .pending_approval
-                .as_ref()
-                .map(|approval| assistant_approval_card_view(approval, window, cx)),
+            None => assistant.pending_approval.as_ref().map(|approval| {
+                let expanded = assistant.expanded_approvals.contains(&approval.request_id);
+                assistant_approval_card_view(approval, expanded, window, cx)
+            }),
         };
 
         let input_empty = assistant.input.read(cx).text().trim().is_empty();
@@ -945,7 +955,8 @@ impl Editor {
         self.assistant.entries.clear();
         self.assistant.expanded_tools.clear();
         self.assistant.expanded_thoughts.clear();
-        self.assistant.collapsed_groups.clear();
+        self.assistant.group_overrides.clear();
+        self.assistant.expanded_approvals.clear();
         self.assistant.last_turn_elapsed = None;
         self.assistant.transcript_id = None;
         self.assistant.provider_menu_open = false;
@@ -1056,7 +1067,8 @@ impl Editor {
                     if let Err(error) = editor.update(cx, |editor, cx| {
                         editor.assistant.viewing = Some(session);
                         editor.assistant.expanded_thoughts.clear();
-                        editor.assistant.collapsed_groups.clear();
+                        editor.assistant.group_overrides.clear();
+                        editor.assistant.expanded_approvals.clear();
                         editor.assistant.scroll.scroll_to_bottom();
                         cx.notify();
                     }) {
@@ -1072,7 +1084,8 @@ impl Editor {
     pub(super) fn resume_live_assistant(&mut self, cx: &mut Context<Self>) {
         self.assistant.viewing = None;
         self.assistant.expanded_thoughts.clear();
-        self.assistant.collapsed_groups.clear();
+        self.assistant.group_overrides.clear();
+        self.assistant.expanded_approvals.clear();
         self.assistant.scroll.scroll_to_bottom();
         cx.notify();
     }
@@ -1423,7 +1436,7 @@ impl AssistantState {
             self.entries.remove(0);
             // 前截断使所有下标减一；同步移动按下标键控的展开集合，避免展开行错位。
             self.expanded_thoughts = shift_expansion_indices(&self.expanded_thoughts);
-            self.collapsed_groups = shift_expansion_indices(&self.collapsed_groups);
+            self.group_overrides = shift_group_overrides(&self.group_overrides);
         }
         self.entries.push(entry);
     }
@@ -1982,6 +1995,29 @@ fn assistant_entry_is_activity(entry: &AssistantEntry) -> bool {
     )
 }
 
+/// A group's collapsed state: an explicit user override wins; otherwise a live run stays
+/// open and a finished run auto-collapses so completed turns stop taking up space.
+fn assistant_group_collapsed(
+    entries: &[AssistantEntry],
+    start: usize,
+    is_live: bool,
+    overrides: &HashMap<usize, bool>,
+) -> bool {
+    if let Some(expanded) = overrides.get(&start) {
+        return !expanded;
+    }
+    let running = entries.iter().any(|entry| {
+        matches!(
+            entry,
+            AssistantEntry::Tool {
+                status: ToolStatus::Running,
+                ..
+            }
+        )
+    });
+    !(running || is_live)
+}
+
 /// A run of consecutive tool/thought entries under one "Ran N tools" / "Thinking" header.
 /// The header collapses the whole run; each row inside expands independently.
 fn assistant_activity_group_view(
@@ -2001,6 +2037,7 @@ fn assistant_activity_group_view(
         count => format!("Ran {count} tools"),
     };
     let toggle_index = start;
+    let next_expanded = !collapsed;
     div()
         .flex()
         .flex_col()
@@ -2017,11 +2054,10 @@ fn assistant_activity_group_view(
                 .cursor(CursorStyle::PointingHand)
                 .hover(|style| style.bg(rgb(SURFACE)))
                 .on_click(cx.listener(move |editor, _, _, cx| {
-                    if editor.assistant.collapsed_groups.contains(&toggle_index) {
-                        editor.assistant.collapsed_groups.remove(&toggle_index);
-                    } else {
-                        editor.assistant.collapsed_groups.insert(toggle_index);
-                    }
+                    editor
+                        .assistant
+                        .group_overrides
+                        .insert(toggle_index, next_expanded);
                     cx.notify();
                 }))
                 .child(
@@ -2357,11 +2393,23 @@ fn shift_expansion_indices(indices: &HashSet<usize>) -> HashSet<usize> {
         .collect()
 }
 
+/// Same front-truncation rekey for the group override map, preserving each override's value.
+fn shift_group_overrides(overrides: &HashMap<usize, bool>) -> HashMap<usize, bool> {
+    overrides
+        .iter()
+        .filter_map(|(index, expanded)| {
+            index.checked_sub(1).map(|new_index| (new_index, *expanded))
+        })
+        .collect()
+}
+
 fn assistant_approval_card_view(
     approval: &AssistantApproval,
+    expanded: bool,
     window: &mut Window,
     cx: &mut Context<Editor>,
 ) -> gpui::AnyElement {
+    let toggle_id = approval.request_id.clone();
     div()
         .flex_shrink_0()
         .mx_3()
@@ -2383,9 +2431,22 @@ fn assistant_approval_card_view(
                 .gap_2()
                 .child(
                     div()
+                        .id(approval.request_id.clone())
                         .flex()
                         .items_center()
                         .gap_2()
+                        .cursor(CursorStyle::PointingHand)
+                        .on_click(cx.listener(move |editor, _, _, cx| {
+                            if editor.assistant.expanded_approvals.contains(&toggle_id) {
+                                editor.assistant.expanded_approvals.remove(&toggle_id);
+                            } else {
+                                editor
+                                    .assistant
+                                    .expanded_approvals
+                                    .insert(toggle_id.clone());
+                            }
+                            cx.notify();
+                        }))
                         .child(
                             svg()
                                 .path(IconName::Shield.path())
@@ -2409,6 +2470,16 @@ fn assistant_approval_card_view(
                                 .text_size(px(9.0))
                                 .text_color(rgb(MUTED))
                                 .child(approval.tool_name.clone()),
+                        )
+                        .child(
+                            svg()
+                                .path(if expanded {
+                                    IconName::ChevronDown.path()
+                                } else {
+                                    IconName::ChevronRight.path()
+                                })
+                                .size(px(11.0))
+                                .text_color(rgb(MUTED)),
                         ),
                 )
                 .child(
@@ -2416,9 +2487,10 @@ fn assistant_approval_card_view(
                         .text_size(px(10.0))
                         .line_height(px(16.0))
                         .text_color(rgb(MUTED))
+                        .when(!expanded, |this| this.whitespace_nowrap().text_ellipsis())
                         .child(approval.description.clone()),
                 )
-                .when(!approval.command_summary.is_empty(), |this| {
+                .when(expanded && !approval.command_summary.is_empty(), |this| {
                     this.child(
                         div()
                             .rounded(px(4.0))
