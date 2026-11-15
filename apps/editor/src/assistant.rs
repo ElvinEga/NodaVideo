@@ -1548,7 +1548,7 @@ impl AssistantState {
                 description,
                 tool_name,
                 command_summary,
-                parameters,
+                parameters: _,
             } => {
                 // In-process providers have no permission backend of their own, so the
                 // editor applies the selected mode here instead of showing a card.
@@ -1590,7 +1590,7 @@ impl AssistantState {
                     }
                     None => {
                         self.push_entry(AssistantEntry::Info(format!(
-                            "Approval requested for {tool_name}: {parameters}"
+                            "Approval requested for {tool_name}"
                         )));
                         self.pending_approval = Some(AssistantApproval {
                             request_id,
@@ -2037,7 +2037,8 @@ fn assistant_activity_group_view(
         count => format!("Ran {count} tools"),
     };
     let toggle_index = start;
-    let next_expanded = !collapsed;
+    // The override stores the expanded flag, so the next expanded state equals the current collapsed state.
+    let next_expanded = collapsed;
     div()
         .flex()
         .flex_col()
