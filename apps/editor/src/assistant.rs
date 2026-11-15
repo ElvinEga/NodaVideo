@@ -76,6 +76,10 @@ pub(crate) struct AssistantState {
     sessions_sidebar_open: bool,
     /// Tool call ids whose card body is expanded; cards start collapsed.
     expanded_tools: HashSet<String>,
+    /// Entry indices of thought rows expanded to their full text; rows start at one line.
+    expanded_thoughts: HashSet<usize>,
+    /// Start indices of activity groups the user collapsed; groups start expanded.
+    collapsed_groups: HashSet<usize>,
     /// When the running turn started; None between turns.
     turn_started_at: Option<Instant>,
     /// How long the most recent finished turn took; shown in its speaker header.
@@ -140,6 +144,8 @@ impl AssistantState {
             skill_menu_open: false,
             sessions_sidebar_open: true,
             expanded_tools: HashSet::new(),
+            expanded_thoughts: HashSet::new(),
+            collapsed_groups: HashSet::new(),
             turn_started_at: None,
             last_turn_elapsed: None,
             history: Vec::new(),
@@ -294,6 +300,23 @@ impl Editor {
             assistant.last_turn_elapsed.map(format_turn_elapsed)
         };
 
+        // Consecutive tool/thought entries collapse into one "Ran N tools" group; every
+        // other entry renders on its own. (start, end, is_group)
+        let mut items: Vec<(usize, usize, bool)> = Vec::new();
+        let mut cursor = 0;
+        while cursor < entries.len() {
+            if assistant_entry_is_activity(&entries[cursor]) {
+                let start = cursor;
+                while cursor < entries.len() && assistant_entry_is_activity(&entries[cursor]) {
+                    cursor += 1;
+                }
+                items.push((start, cursor, true));
+            } else {
+                items.push((cursor, cursor + 1, false));
+                cursor += 1;
+            }
+        }
+
         let messages = div()
             .id("assistant-messages")
             .flex_1()
@@ -333,21 +356,34 @@ impl Editor {
                         ),
                 )
             })
-            .children(entries.iter().enumerate().map(|(index, entry)| {
-                let show_header = assistant_entry_is_prose(entry)
-                    && (index == 0 || !assistant_entry_is_prose(&entries[index - 1]));
-                let header_label = if last_turn_header_index == Some(index) {
+            .children(items.into_iter().map(|(start, end, is_group)| {
+                let first = &entries[start];
+                let show_header = assistant_entry_is_prose(first)
+                    && (start == 0 || !assistant_entry_is_prose(&entries[start - 1]));
+                let header_label = if show_header
+                    && last_turn_header_index.is_some_and(|index| index >= start && index < end)
+                {
                     turn_label.as_deref()
                 } else {
                     None
                 };
-                let expanded = match entry {
-                    AssistantEntry::Tool { call_id, .. } => {
-                        assistant.expanded_tools.contains(call_id)
-                    }
-                    _ => false,
+                let content = if is_group {
+                    let collapsed = assistant.collapsed_groups.contains(&start);
+                    assistant_activity_group_view(assistant, &entries[start..end], start, collapsed, cx)
+                } else {
+                    assistant_entry_view(first)
                 };
-                assistant_entry_view(entry, show_header, thread_provider, header_label, expanded, cx)
+                if show_header {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(assistant_speaker_header_view(thread_provider, header_label))
+                        .child(content)
+                        .into_any_element()
+                } else {
+                    content
+                }
             }));
 
         let approval = match viewing {
@@ -908,6 +944,8 @@ impl Editor {
         let previous_session = self.assistant.reset_session();
         self.assistant.entries.clear();
         self.assistant.expanded_tools.clear();
+        self.assistant.expanded_thoughts.clear();
+        self.assistant.collapsed_groups.clear();
         self.assistant.last_turn_elapsed = None;
         self.assistant.transcript_id = None;
         self.assistant.provider_menu_open = false;
@@ -1017,6 +1055,8 @@ impl Editor {
                 Ok(session) => {
                     if let Err(error) = editor.update(cx, |editor, cx| {
                         editor.assistant.viewing = Some(session);
+                        editor.assistant.expanded_thoughts.clear();
+                        editor.assistant.collapsed_groups.clear();
                         editor.assistant.scroll.scroll_to_bottom();
                         cx.notify();
                     }) {
@@ -1031,6 +1071,8 @@ impl Editor {
 
     pub(super) fn resume_live_assistant(&mut self, cx: &mut Context<Self>) {
         self.assistant.viewing = None;
+        self.assistant.expanded_thoughts.clear();
+        self.assistant.collapsed_groups.clear();
         self.assistant.scroll.scroll_to_bottom();
         cx.notify();
     }
@@ -1379,6 +1421,9 @@ impl AssistantState {
         const MAX_ENTRIES: usize = 400;
         if self.entries.len() >= MAX_ENTRIES {
             self.entries.remove(0);
+            // 前截断使所有下标减一；同步移动按下标键控的展开集合，避免展开行错位。
+            self.expanded_thoughts = shift_expansion_indices(&self.expanded_thoughts);
+            self.collapsed_groups = shift_expansion_indices(&self.collapsed_groups);
         }
         self.entries.push(entry);
     }
@@ -1827,15 +1872,10 @@ fn run_assistant_tool_background(
     }
 }
 
-fn assistant_entry_view(
-    entry: &AssistantEntry,
-    show_header: bool,
-    provider: &AssistantProvider,
-    turn_label: Option<&str>,
-    expanded: bool,
-    cx: &mut Context<Editor>,
-) -> gpui::AnyElement {
-    let content = match entry {
+/// Renders a single non-activity transcript entry. Tool and thought runs are grouped by
+/// [`assistant_activity_group_view`] instead, so they never reach this function.
+fn assistant_entry_view(entry: &AssistantEntry) -> gpui::AnyElement {
+    match entry {
         AssistantEntry::User(message) => div()
             .flex()
             .justify_end()
@@ -1860,47 +1900,6 @@ fn assistant_entry_view(
             .text_color(rgb(TEXT))
             .child(message.clone())
             .into_any_element(),
-        AssistantEntry::Thought(thought) => div()
-            .rounded(px(5.0))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(BACKGROUND))
-            .px(px(8.0))
-            .py(px(6.0))
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(
-                div()
-                    .text_size(px(10.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(MUTED))
-                    .child("Thinking"),
-            )
-            .child(
-                div()
-                    .text_size(px(10.0))
-                    .line_height(px(16.0))
-                    .text_color(rgb(MUTED))
-                    .child(thought.clone()),
-            )
-            .into_any_element(),
-        AssistantEntry::Tool {
-            call_id,
-            tool_name,
-            arguments,
-            status,
-            result,
-        } => assistant_tool_card_view(
-            call_id,
-            tool_name,
-            arguments,
-            *status,
-            result.as_deref(),
-            expanded,
-            cx,
-        )
-        .into_any_element(),
         AssistantEntry::Info(info) => div()
             .text_size(px(11.0))
             .line_height(px(16.0))
@@ -1932,17 +1931,7 @@ fn assistant_entry_view(
                     .child(error.clone()),
             )
             .into_any_element(),
-    };
-    if show_header {
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(assistant_speaker_header_view(provider, turn_label))
-            .child(content)
-            .into_any_element()
-    } else {
-        content
+        AssistantEntry::Thought(_) | AssistantEntry::Tool { .. } => div().into_any_element(),
     }
 }
 
@@ -1984,9 +1973,116 @@ fn assistant_speaker_header_view(
         })
 }
 
-/// Collapsed by default: one row with the tool, its live status and a chevron.
-/// Clicking the row expands the arguments and result in place.
-fn assistant_tool_card_view(
+/// Tool and thought entries are grouped into a collapsible activity block; everything
+/// else renders as a standalone transcript entry.
+fn assistant_entry_is_activity(entry: &AssistantEntry) -> bool {
+    matches!(
+        entry,
+        AssistantEntry::Tool { .. } | AssistantEntry::Thought(_)
+    )
+}
+
+/// A run of consecutive tool/thought entries under one "Ran N tools" / "Thinking" header.
+/// The header collapses the whole run; each row inside expands independently.
+fn assistant_activity_group_view(
+    assistant: &AssistantState,
+    entries: &[AssistantEntry],
+    start: usize,
+    collapsed: bool,
+    cx: &mut Context<Editor>,
+) -> gpui::AnyElement {
+    let tool_count = entries
+        .iter()
+        .filter(|entry| matches!(entry, AssistantEntry::Tool { .. }))
+        .count();
+    let label = match tool_count {
+        0 => "Thinking".to_string(),
+        1 => "Ran 1 tool".to_string(),
+        count => format!("Ran {count} tools"),
+    };
+    let toggle_index = start;
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(
+            div()
+                .id(("assistant-group", start))
+                .flex()
+                .items_center()
+                .gap_1()
+                .px(px(4.0))
+                .py(px(2.0))
+                .rounded(px(4.0))
+                .cursor(CursorStyle::PointingHand)
+                .hover(|style| style.bg(rgb(SURFACE)))
+                .on_click(cx.listener(move |editor, _, _, cx| {
+                    if editor.assistant.collapsed_groups.contains(&toggle_index) {
+                        editor.assistant.collapsed_groups.remove(&toggle_index);
+                    } else {
+                        editor.assistant.collapsed_groups.insert(toggle_index);
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    svg()
+                        .path(if collapsed {
+                            IconName::ChevronRight.path()
+                        } else {
+                            IconName::ChevronDown.path()
+                        })
+                        .size(px(12.0))
+                        .text_color(rgb(MUTED)),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(MUTED))
+                        .child(label),
+                ),
+        )
+        .when(!collapsed, |this| {
+            this.child(div().flex().flex_col().gap(px(1.0)).pl(px(18.0)).children(
+                entries.iter().enumerate().map(|(offset, entry)| {
+                    let index = start + offset;
+                    match entry {
+                        AssistantEntry::Thought(text) => {
+                            let expanded = assistant.expanded_thoughts.contains(&index);
+                            assistant_thought_row_view(text, index, expanded, cx)
+                        }
+                        AssistantEntry::Tool {
+                            call_id,
+                            tool_name,
+                            arguments,
+                            status,
+                            result,
+                        } => {
+                            let expanded = assistant.expanded_tools.contains(call_id);
+                            assistant_tool_row_view(
+                                call_id,
+                                tool_name,
+                                arguments,
+                                *status,
+                                result.as_deref(),
+                                expanded,
+                                cx,
+                            )
+                        }
+                        AssistantEntry::User(_)
+                        | AssistantEntry::Message(_)
+                        | AssistantEntry::Info(_)
+                        | AssistantEntry::Error(_) => div().into_any_element(),
+                    }
+                }),
+            ))
+        })
+        .into_any_element()
+}
+
+/// One tool row: status icon, human label, a summary chip and a chevron. Clicking expands
+/// the real arguments and result in place — never a fabricated preview.
+fn assistant_tool_row_view(
     call_id: &str,
     tool_name: &str,
     arguments: &str,
@@ -1994,7 +2090,9 @@ fn assistant_tool_card_view(
     result: Option<&str>,
     expanded: bool,
     cx: &mut Context<Editor>,
-) -> gpui::Div {
+) -> gpui::AnyElement {
+    let (icon, icon_color) = assistant_tool_status_icon(status);
+    let (label, summary) = assistant_tool_label_and_summary(tool_name, arguments);
     let result_color = if status == ToolStatus::Failed {
         ERROR
     } else {
@@ -2002,27 +2100,19 @@ fn assistant_tool_card_view(
     };
     let toggle_id = call_id.to_string();
     div()
-        .overflow_hidden()
-        .rounded(px(5.0))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(BACKGROUND))
         .flex()
         .flex_col()
         .child(
             div()
                 .id(call_id.to_string())
-                .h(px(32.0))
-                .flex_shrink_0()
                 .flex()
                 .items_center()
                 .gap_2()
-                .px(px(10.0))
+                .px(px(4.0))
+                .py(px(3.0))
+                .rounded(px(4.0))
                 .cursor(CursorStyle::PointingHand)
                 .hover(|style| style.bg(rgb(SURFACE)))
-                .when(expanded, |this| {
-                    this.border_b_1().border_color(rgb(BORDER))
-                })
                 .on_click(cx.listener(move |editor, _, _, cx| {
                     if editor.assistant.expanded_tools.contains(&toggle_id) {
                         editor.assistant.expanded_tools.remove(&toggle_id);
@@ -2033,27 +2123,47 @@ fn assistant_tool_card_view(
                 }))
                 .child(
                     svg()
-                        .path(IconName::Plug.path())
-                        .size(px(12.0))
-                        .text_color(rgb(MUTED)),
+                        .path(icon.path())
+                        .size(px(13.0))
+                        .text_color(rgb(icon_color)),
                 )
                 .child(
                     div()
                         .min_w_0()
                         .flex_1()
-                        .font_family("monospace")
-                        .text_size(px(10.0))
-                        .text_color(rgb(TEXT))
-                        .text_ellipsis()
-                        .child(tool_name.to_string()),
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(11.0))
+                                .text_color(rgb(TEXT))
+                                .child(label),
+                        )
+                        .when(!summary.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .min_w_0()
+                                    .rounded(px(4.0))
+                                    .bg(rgb(SURFACE))
+                                    .px(px(6.0))
+                                    .py(px(1.0))
+                                    .font_family("monospace")
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(MUTED))
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(summary),
+                            )
+                        }),
                 )
-                .child(assistant_status_pill_view(status))
                 .child(
                     svg()
                         .path(if expanded {
-                            IconName::ArrowUp.path()
+                            IconName::ChevronDown.path()
                         } else {
-                            IconName::ArrowDown.path()
+                            IconName::ChevronRight.path()
                         })
                         .size(px(11.0))
                         .text_color(rgb(MUTED)),
@@ -2065,14 +2175,14 @@ fn assistant_tool_card_view(
                     .flex()
                     .flex_col()
                     .gap(px(6.0))
-                    .px(px(10.0))
-                    .py(px(8.0))
+                    .pl(px(21.0))
+                    .py(px(6.0))
                     .when(!arguments.is_empty(), |this| {
                         this.child(
                             div()
                                 .font_family("monospace")
                                 .text_size(px(9.0))
-                                .line_height(px(16.0))
+                                .line_height(px(15.0))
                                 .text_color(rgb(MUTED))
                                 .child(arguments.to_string()),
                         )
@@ -2088,6 +2198,135 @@ fn assistant_tool_card_view(
                     }),
             )
         })
+        .into_any_element()
+}
+
+/// One thought row: a single truncated line when collapsed, the full text when expanded.
+fn assistant_thought_row_view(
+    text: &str,
+    index: usize,
+    expanded: bool,
+    cx: &mut Context<Editor>,
+) -> gpui::AnyElement {
+    let body = if expanded {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(MUTED))
+                    .child("Thought"),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .line_height(px(16.0))
+                    .text_color(rgb(MUTED))
+                    .child(text.to_string()),
+            )
+            .into_any_element()
+    } else {
+        let first_line = text
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_size(px(10.0))
+            .text_color(rgb(MUTED))
+            .child(div().flex_shrink_0().child("Thought ·"))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(first_line.to_string()),
+            )
+            .into_any_element()
+    };
+    div()
+        .id(("assistant-thought", index))
+        .px(px(4.0))
+        .py(px(3.0))
+        .rounded(px(4.0))
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(rgb(SURFACE)))
+        .on_click(cx.listener(move |editor, _, _, cx| {
+            if editor.assistant.expanded_thoughts.contains(&index) {
+                editor.assistant.expanded_thoughts.remove(&index);
+            } else {
+                editor.assistant.expanded_thoughts.insert(index);
+            }
+            cx.notify();
+        }))
+        .child(body)
+        .into_any_element()
+}
+
+/// Maps a raw tool name to a human label and pulls a short summary chip from its arguments.
+fn assistant_tool_label_and_summary(tool_name: &str, arguments: &str) -> (String, String) {
+    let lower = tool_name.to_lowercase();
+    let label = if lower.contains("edit")
+        || lower.contains("write")
+        || lower.contains("patch")
+        || lower.contains("replace")
+        || lower.contains("apply")
+    {
+        "Edit file"
+    } else if lower.contains("delete") || lower.contains("remove") {
+        "Delete"
+    } else if lower.contains("read") || lower.contains("view") {
+        "Read"
+    } else if lower.contains("shell")
+        || lower.contains("bash")
+        || lower.contains("terminal")
+        || lower.contains("exec")
+        || lower.contains("command")
+    {
+        "Terminal command ran"
+    } else if lower.contains("web")
+        || lower.contains("fetch")
+        || lower.contains("browser")
+        || lower.contains("http")
+        || lower.contains("script")
+    {
+        "Run webscript"
+    } else {
+        tool_name
+    };
+    (label.to_string(), assistant_tool_summary(arguments))
+}
+
+/// A filename basename or command/query/url drawn from the tool's real arguments.
+fn assistant_tool_summary(arguments: &str) -> String {
+    let Ok(value) = serde_json::from_str::<Value>(arguments) else {
+        return String::new();
+    };
+    let Some(object) = value.as_object() else {
+        return String::new();
+    };
+    for key in ["path", "file_path", "filename", "file"] {
+        if let Some(path) = object.get(key).and_then(Value::as_str) {
+            let basename = Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(path);
+            return basename.to_string();
+        }
+    }
+    for key in ["command", "cmd", "query", "url"] {
+        if let Some(text) = object.get(key).and_then(Value::as_str) {
+            return text.to_string();
+        }
+    }
+    String::new()
 }
 
 fn format_turn_elapsed(elapsed: Duration) -> String {
@@ -2101,33 +2340,21 @@ fn format_turn_elapsed(elapsed: Duration) -> String {
     }
 }
 
-fn assistant_status_pill_view(status: ToolStatus) -> gpui::Div {
-    let (label, color) = assistant_tool_status_label(status);
-    div()
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .gap(px(4.0))
-        .rounded(px(3.0))
-        .bg(rgb(SURFACE))
-        .px(px(6.0))
-        .py(px(2.0))
-        .child(assistant_dot(color, 5.0))
-        .child(
-            div()
-                .text_size(px(9.0))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(color))
-                .child(label),
-        )
+fn assistant_tool_status_icon(status: ToolStatus) -> (IconName, u32) {
+    match status {
+        ToolStatus::Running => (IconName::Spinner, WARNING),
+        ToolStatus::Done => (IconName::CheckCircle, SUCCESS),
+        ToolStatus::Failed => (IconName::Warning, ERROR),
+    }
 }
 
-fn assistant_tool_status_label(status: ToolStatus) -> (&'static str, u32) {
-    match status {
-        ToolStatus::Running => ("Running", WARNING),
-        ToolStatus::Done => ("Done", SUCCESS),
-        ToolStatus::Failed => ("Failed", ERROR),
-    }
+/// Rekeys an index-keyed expansion set after the transcript drops its first entry:
+/// every index moves down one, and an index of 0 referred to the removed entry.
+fn shift_expansion_indices(indices: &HashSet<usize>) -> HashSet<usize> {
+    indices
+        .iter()
+        .filter_map(|index| index.checked_sub(1))
+        .collect()
 }
 
 fn assistant_approval_card_view(
