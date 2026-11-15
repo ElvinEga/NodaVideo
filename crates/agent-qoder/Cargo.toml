@@ -1,0 +1,20 @@
+[package]
+name = "nodavideo-agent-qoder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+nodavideo-agent-runtime.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+log.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
