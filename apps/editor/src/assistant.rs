@@ -5,29 +5,32 @@ use crate::assistant_history::{
     AssistantSession, AssistantSessionMeta, load_session, load_session_metas, now_ms, save_session,
     session_day_label, session_title,
 };
+use crate::clip_placement::{DEFAULT_IMAGE_DURATION_SECONDS, validate_clip_placement};
 use crate::dialog_missing_media::missing_media_dialog;
 use crate::edit_action::{EditAction, edit_timeline};
 use crate::editor::Editor;
 use crate::event_bus::AppEvent;
+use crate::explorer::save_imported_media;
 use crate::preview::{PreviewTarget, timeline_preview_target};
 use crate::property_panel::current_property_panel;
 use crate::theme::{
     ACCENT, ACCENT_BACKGROUND, BACKGROUND, BORDER, ERROR, LINK, MUTED, PANEL, SUCCESS, SURFACE,
     SURFACE_HOVER, TEXT, WARNING,
 };
-use crate::timeline::TimelineRuntimeState;
+use crate::timeline::{TimelineFrameIndex, TimelineRuntimeState};
+use crate::track::TrackKind;
 use crate::ui_components::TextInput;
 use crate::ui_components::cyberpunk_button::{
     button_cyberpunk_primary, button_cyberpunk_secondary,
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use futures::channel::mpsc;
 use futures::future::Shared;
 use futures::{FutureExt, StreamExt};
 use gpui::prelude::*;
 use gpui::{
-    AsyncApp, Context, CursorStyle, Entity, FontWeight, ScrollHandle, Stateful, Task, WeakEntity,
-    Window, div, px, rgb, svg,
+    AsyncApp, ClipboardItem, Context, CursorStyle, Entity, FontWeight, ScrollHandle, Stateful,
+    Task, WeakEntity, Window, div, px, rgb, svg,
 };
 use nodavideo_agent_acp::AcpAgentProvider;
 use nodavideo_agent_claude::ClaudeAgentProvider;
@@ -47,7 +50,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use timeline::{Asset, TimelineEditingState};
+use timeline::{Asset, MediaKind, TimelineEditingState};
 use ulid::Ulid;
 
 pub(crate) struct AssistantState {
@@ -97,6 +100,8 @@ pub(crate) struct AssistantState {
     turn_started_at: Option<Instant>,
     /// How long the most recent finished turn took; shown in its speaker header.
     last_turn_elapsed: Option<Duration>,
+    /// Turn start index whose Copy action just fired; drives the transient "Copied" label.
+    copied_turn: Option<usize>,
     /// Saved sessions of the open project, newest first; refreshed after every save.
     history: Vec<AssistantSessionMeta>,
     /// A saved transcript replayed read-only; None shows the live thread.
@@ -170,6 +175,7 @@ impl AssistantState {
             expanded_approvals: HashSet::new(),
             turn_started_at: None,
             last_turn_elapsed: None,
+            copied_turn: None,
             history: Vec::new(),
             viewing: None,
             transcript_id: None,
@@ -390,7 +396,7 @@ impl Editor {
                 } else {
                     None
                 };
-                let content = if is_group {
+                let entry_content = if is_group {
                     let is_live = viewing.is_none() && assistant.busy && end == entries.len();
                     let collapsed = assistant_group_collapsed(
                         &entries[start..end],
@@ -401,6 +407,42 @@ impl Editor {
                     assistant_activity_group_view(assistant, &entries[start..end], start, collapsed, cx)
                 } else {
                     assistant_entry_view(first)
+                };
+                // 完成回合的末尾挂动作行；进行中的尾部回合不显示，避免复制到半截回复。
+                let turn_completed = match entries.get(end) {
+                    Some(AssistantEntry::User(_)) => true,
+                    Some(_) => false,
+                    None => viewing.is_some() || !assistant.busy,
+                };
+                let actions = if turn_completed {
+                    let turn_start = entries[..start]
+                        .iter()
+                        .rposition(|entry| matches!(entry, AssistantEntry::User(_)))
+                        .map(|index| index + 1)
+                        .unwrap_or(0);
+                    assistant_turn_actions(
+                        &entries[turn_start..end],
+                        &self.project_root,
+                        viewing.is_none(),
+                    )
+                    .map(|actions| (turn_start, actions))
+                } else {
+                    None
+                };
+                let content = match actions {
+                    Some((turn_start, actions)) => div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(entry_content)
+                        .child(assistant_turn_actions_view(
+                            turn_start,
+                            &actions,
+                            assistant.copied_turn == Some(turn_start),
+                            cx,
+                        ))
+                        .into_any_element(),
+                    None => entry_content,
                 };
                 if show_header {
                     div()
@@ -1048,6 +1090,7 @@ impl Editor {
         self.assistant.group_overrides.clear();
         self.assistant.expanded_approvals.clear();
         self.assistant.last_turn_elapsed = None;
+        self.assistant.copied_turn = None;
         self.assistant.transcript_id = None;
         self.assistant.provider_menu_open = false;
         self.assistant.skill_menu_open = false;
@@ -1583,6 +1626,194 @@ impl Editor {
         })
         .detach();
     }
+
+    fn ui_callback_copy_response(
+        &mut self,
+        turn_start: usize,
+        markdown: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.write_to_clipboard(ClipboardItem::new_string(markdown));
+        self.assistant.copied_turn = Some(turn_start);
+        cx.notify();
+        cx.spawn(async move |editor, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            if let Err(error) = editor.update(cx, |editor, cx| {
+                if editor.assistant.copied_turn == Some(turn_start) {
+                    editor.assistant.copied_turn = None;
+                    cx.notify();
+                }
+            }) {
+                log::debug!("editor released: {error:?}");
+            }
+        })
+        .detach();
+    }
+
+    fn ui_callback_add_response_media(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let absolute_path = if path.is_absolute() {
+            path.clone()
+        } else {
+            self.project_root.join(&path)
+        };
+        let label = path.display().to_string();
+        let canonical = match absolute_path.canonicalize() {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                log::error!("Could not resolve generated media {label}: {error:?}");
+                self.assistant.push_entry(AssistantEntry::Error(format!(
+                    "Could not add {label} to the timeline: {error}"
+                )));
+                cx.notify();
+                return;
+            }
+        };
+        if let Some(asset) = self.explorer.media_metadata.get(&canonical).cloned() {
+            self.add_response_media_to_timeline(canonical, asset, cx);
+            return;
+        }
+        // 探测会打开解码器，必须离开 UI 线程；完成后回到编辑器走与拖放相同的落轨流程。
+        let probe_path = canonical.clone();
+        cx.spawn(async move |editor, cx| {
+            let probed = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut asset = engine::media_asset::probe_media_asset(&probe_path)?;
+                    asset.set_id(Ulid::generate());
+                    Ok::<_, anyhow::Error>(asset)
+                })
+                .await;
+            if let Err(error) = editor.update(cx, |editor, cx| match probed {
+                Ok(asset) => {
+                    editor
+                        .explorer
+                        .media_metadata
+                        .insert(canonical.clone(), asset.clone());
+                    editor.add_response_media_to_timeline(canonical, asset, cx);
+                }
+                Err(error) => {
+                    log::error!("Could not probe generated media {label}: {error:?}");
+                    editor.assistant.push_entry(AssistantEntry::Error(format!(
+                        "Could not add {label} to the timeline: {error:#}"
+                    )));
+                    cx.notify();
+                }
+            }) {
+                log::debug!("editor released: {error:?}");
+            }
+        })
+        .detach();
+    }
+
+    /// Imports one generated media file into the library and places it on the open timeline,
+    /// or creates a timeline for it when none is open. Reports the real outcome in the transcript.
+    fn add_response_media_to_timeline(
+        &mut self,
+        canonical: PathBuf,
+        asset: Asset,
+        cx: &mut Context<Self>,
+    ) {
+        let applied = (|| -> Result<()> {
+            // 预填的元数据会让导入队列跳过入库，这里按 auto_create 的方式手动登记媒体库。
+            if !self.explorer.imported_paths.contains(&canonical) {
+                self.explorer.imported_paths.insert(canonical.clone());
+                self.explorer.rebuild_imported_media();
+                let assets: Vec<Asset> = self
+                    .explorer
+                    .imported_paths
+                    .iter()
+                    .filter_map(|path| self.explorer.media_metadata.get(path))
+                    .cloned()
+                    .collect();
+                if let Err(error) = save_imported_media(&self.project_root, &assets) {
+                    log::error!("Could not save media library: {error:?}");
+                }
+                self.schedule_project_waveforms(cx);
+                self.schedule_media_thumbnails(cx);
+            }
+            let (track_id, start) = {
+                let Some(timeline) = self.timeline.as_ref() else {
+                    return self.auto_create_timeline_and_insert_asset(&canonical, cx);
+                };
+                let expected_kind = if asset.kind() == MediaKind::Audio {
+                    TrackKind::Audio
+                } else {
+                    TrackKind::Video
+                };
+                let playhead = timeline.playhead();
+                let duration = timeline
+                    .editing_state
+                    .nearest_time(asset.duration().unwrap_or(DEFAULT_IMAGE_DURATION_SECONDS))
+                    .max(TimelineFrameIndex::ONE_FRAME);
+                let playhead_track = timeline
+                    .editing_state
+                    .tracks
+                    .iter()
+                    .filter(|track| track.kind == expected_kind && !track.locked)
+                    .find(|track| {
+                        validate_clip_placement(
+                            &timeline.editing_state,
+                            track.id,
+                            asset.kind(),
+                            duration,
+                            playhead,
+                            &HashSet::new(),
+                        )
+                        .is_ok()
+                    })
+                    .map(|track| track.id);
+                match playhead_track {
+                    Some(track_id) => (Some(track_id), playhead),
+                    None => {
+                        let end_track = timeline
+                            .editing_state
+                            .tracks
+                            .iter()
+                            .find(|track| track.kind == expected_kind && !track.locked)
+                            .map(|track| track.id);
+                        match end_track {
+                            Some(track_id) => {
+                                (Some(track_id), timeline.editing_state.content_duration())
+                            }
+                            None => {
+                                if timeline
+                                    .editing_state
+                                    .tracks
+                                    .iter()
+                                    .any(|track| track.kind == expected_kind)
+                                {
+                                    bail!(
+                                        "No unlocked {expected_kind:?} track is available for placement"
+                                    );
+                                }
+                                (None, playhead) // 没有同类轨道：新建轨道并连同片段一起提交。
+                            }
+                        }
+                    }
+                }
+            };
+            self.place_explorer_asset(canonical.clone(), track_id, start, asset, None, cx)
+        })();
+        match applied {
+            Ok(()) => {
+                self.assistant.push_entry(AssistantEntry::Info(format!(
+                    "Added {} to the timeline.",
+                    canonical.display()
+                )));
+            }
+            Err(error) => {
+                log::error!("Could not add generated media to the timeline: {error:?}");
+                self.assistant.push_entry(AssistantEntry::Error(format!(
+                    "Could not add {} to the timeline: {error:#}",
+                    canonical.display()
+                )));
+            }
+        }
+        self.assistant.scroll.scroll_to_bottom();
+        cx.notify();
+    }
 }
 
 // Private APIs only
@@ -1742,6 +1973,7 @@ impl AssistantState {
             // 前截断使所有下标减一；同步移动按下标键控的展开集合，避免展开行错位。
             self.expanded_thoughts = shift_expansion_indices(&self.expanded_thoughts);
             self.group_overrides = shift_group_overrides(&self.group_overrides);
+            self.copied_turn = self.copied_turn.and_then(|index| index.checked_sub(1));
         }
         self.entries.push(entry);
     }
@@ -1976,6 +2208,14 @@ struct AssistantApproval {
     description: String,
     tool_name: String,
     command_summary: String,
+}
+
+/// Actions offered under a finished turn, derived from its transcript entries.
+struct AssistantTurnActions {
+    /// The turn's response markdown, joined across message entries; None when it said nothing.
+    markdown: Option<String>,
+    /// Real media files the turn's tools produced, in first-seen order.
+    media: Vec<PathBuf>,
 }
 
 /// Identity and revision of the editor snapshot used by one off-thread tool call.
@@ -2783,6 +3023,185 @@ fn shift_group_overrides(overrides: &HashMap<usize, bool>) -> HashMap<usize, boo
             index.checked_sub(1).map(|new_index| (new_index, *expanded))
         })
         .collect()
+}
+
+/// Derives a finished turn's actions from its entries: the response markdown to copy, and
+/// generated media files that actually exist on disk. `include_media` is false for read-only
+/// saved transcripts, which never mutate the open project.
+fn assistant_turn_actions(
+    entries: &[AssistantEntry],
+    project_root: &Path,
+    include_media: bool,
+) -> Option<AssistantTurnActions> {
+    let text = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            AssistantEntry::Message(text) => Some(text.as_str()),
+            AssistantEntry::User(_)
+            | AssistantEntry::Thought(_)
+            | AssistantEntry::Tool { .. }
+            | AssistantEntry::Info(_)
+            | AssistantEntry::Error(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let trimmed_text = text.trim();
+    let markdown = if trimmed_text.is_empty() {
+        None
+    } else {
+        Some(trimmed_text.to_string())
+    };
+    let mut media: Vec<PathBuf> = Vec::new();
+    if include_media {
+        for entry in entries {
+            let AssistantEntry::Tool {
+                tool_name,
+                status: ToolStatus::Done,
+                result: Some(result),
+                ..
+            } = entry
+            else {
+                continue;
+            };
+            if !matches!(tool_name.as_str(), "render_composition" | "export_video") {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(result) else {
+                continue;
+            };
+            let Some(path_text) = value
+                .get("asset_path")
+                .or_else(|| value.get("output_path"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let path = if Path::new(path_text).is_absolute() {
+                PathBuf::from(path_text)
+            } else {
+                project_root.join(path_text)
+            };
+            if assistant_generated_media_path(&path) && !media.contains(&path) {
+                media.push(path);
+            }
+        }
+    }
+    if markdown.is_none() && media.is_empty() {
+        return None;
+    }
+    Some(AssistantTurnActions { markdown, media })
+}
+
+/// True only for an existing file with a media extension the timeline can place.
+fn assistant_generated_media_path(path: &Path) -> bool {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let is_media = matches!(
+        extension.as_str(),
+        "mp4"
+            | "mov"
+            | "m4v"
+            | "mkv"
+            | "avi"
+            | "webm"
+            | "mp3"
+            | "wav"
+            | "aac"
+            | "flac"
+            | "ogg"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
+    );
+    is_media && path.is_file()
+}
+
+/// The action row under a finished response: Copy markdown, plus one Add-to-timeline button
+/// per real generated media file.
+fn assistant_turn_actions_view(
+    turn_start: usize,
+    actions: &AssistantTurnActions,
+    copied: bool,
+    cx: &mut Context<Editor>,
+) -> gpui::AnyElement {
+    let (copy_icon, copy_label, copy_color) = if copied {
+        (IconName::CheckCircle, "Copied", SUCCESS)
+    } else {
+        (IconName::Copy, "Copy", MUTED)
+    };
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(4.0))
+        .when_some(actions.markdown.as_ref(), |this, markdown| {
+            let markdown = markdown.clone();
+            this.child(
+                div()
+                    .id(("assistant-copy-response", turn_start))
+                    .h(px(22.0))
+                    .px(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .rounded(px(4.0))
+                    .cursor(CursorStyle::PointingHand)
+                    .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                    .on_click(cx.listener(move |editor, _, _, cx| {
+                        editor.ui_callback_copy_response(turn_start, markdown.clone(), cx);
+                    }))
+                    .child(
+                        svg()
+                            .path(copy_icon.path())
+                            .size(px(12.0))
+                            .text_color(rgb(copy_color)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(rgb(copy_color))
+                            .child(copy_label),
+                    ),
+            )
+        })
+        .children(actions.media.iter().enumerate().map(|(index, path)| {
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("media")
+                .to_string();
+            let media_path = path.clone();
+            div()
+                .id(format!("assistant-add-media-{turn_start}-{index}"))
+                .h(px(22.0))
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .rounded(px(4.0))
+                .cursor(CursorStyle::PointingHand)
+                .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                .on_click(cx.listener(move |editor, _, _, cx| {
+                    editor.ui_callback_add_response_media(media_path.clone(), cx);
+                }))
+                .child(
+                    svg()
+                        .path(IconName::Plus.path())
+                        .size(px(12.0))
+                        .text_color(rgb(MUTED)),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(rgb(MUTED))
+                        .child(format!("Add {file_name} to timeline")),
+                )
+        }))
+        .into_any_element()
 }
 
 fn assistant_approval_card_view(
