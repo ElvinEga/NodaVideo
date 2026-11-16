@@ -175,7 +175,7 @@ pub(crate) enum AppEvent {
     AssistantApprovalDecided {
         approved: bool,
     },
-    /// The user stopped the running assistant turn from the composer.
+    /// The user stopped the running assistant turn from the composer's Stop button or Esc.
     AssistantStopped,
     /// The user chose a production skill from the composer's skill picker.
     AssistantSkillSelected {

@@ -102,6 +102,8 @@ pub(crate) struct AssistantState {
     last_turn_elapsed: Option<Duration>,
     /// Turn start index whose Copy action just fired; drives the transient "Copied" label.
     copied_turn: Option<usize>,
+    /// Original entry positions of expanded user messages; only long copies can expand.
+    expanded_user_messages: HashSet<usize>,
     /// Saved sessions of the open project, newest first; refreshed after every save.
     history: Vec<AssistantSessionMeta>,
     /// A saved transcript replayed read-only; None shows the live thread.
@@ -176,6 +178,7 @@ impl AssistantState {
             turn_started_at: None,
             last_turn_elapsed: None,
             copied_turn: None,
+            expanded_user_messages: HashSet::new(),
             history: Vec::new(),
             viewing: None,
             transcript_id: None,
@@ -350,39 +353,25 @@ impl Editor {
             .id("assistant-messages")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&assistant.scroll)
-            .p_3()
-            .flex()
-            .flex_col()
-            .gap_2()
+            .overflow_hidden()
+            .when(!entries.is_empty(), |this| {
+                this.overflow_y_scroll()
+                    .track_scroll(&assistant.scroll)
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+            })
             .when(entries.is_empty(), |this| {
                 this.child(
                     div()
-                        .flex_1()
+                        .py(px(24.0))
                         .flex()
-                        .flex_col()
-                        .items_center()
                         .justify_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_size(px(16.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(TEXT))
-                                .child("What are you making?"),
-                        )
-                        .child(
-                            div()
-                                .max_w(px(420.0))
-                                .text_size(px(12.0))
-                                .line_height(px(18.0))
-                                .text_color(rgb(MUTED))
-                                .child(
-                                    "Ask the assistant to inspect the timeline, propose an edit, or \
-                                     explain a clip. Edits that need approval appear here as cards.",
-                                ),
-                        ),
+                        .text_size(px(16.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(TEXT))
+                        .child("What are you making?"),
                 )
             })
             .children(items.into_iter().map(|(start, end, is_group)| {
@@ -404,9 +393,15 @@ impl Editor {
                         is_live,
                         &assistant.group_overrides,
                     );
-                    assistant_activity_group_view(assistant, &entries[start..end], start, collapsed, cx)
+                    assistant_activity_group_view(
+                        assistant,
+                        &entries[start..end],
+                        start,
+                        collapsed,
+                        cx,
+                    )
                 } else {
-                    assistant_entry_view(first)
+                    assistant_entry_view(first, start, assistant, cx)
                 };
                 // 完成回合的末尾挂动作行；进行中的尾部回合不显示，避免复制到半截回复。
                 let turn_completed = match entries.get(end) {
@@ -466,6 +461,8 @@ impl Editor {
         };
 
         let input_empty = assistant.input.read(cx).text().trim().is_empty();
+        let awaiting_decision = assistant.pending_approval.is_some();
+        let can_send = !input_empty && viewing.is_none() && !awaiting_decision;
         let composer = div()
             .flex_shrink_0()
             .mx_3()
@@ -474,13 +471,26 @@ impl Editor {
             .border_1()
             .border_color(rgb(BORDER))
             .bg(rgb(BACKGROUND))
+            .opacity(if awaiting_decision {
+                0.55
+            } else {
+                1.0
+            })
             .flex()
             .flex_col()
             .child(
                 div()
                     .px(px(10.0))
                     .pt(px(10.0))
-                    .child(assistant.input.clone()),
+                    .when(awaiting_decision, |this| {
+                        this.text_color(rgb(MUTED))
+                            .text_size(px(11.0))
+                            .h(px(40.0))
+                            .child("Resolve the pending approval before sending another message.")
+                    })
+                    .when(!awaiting_decision, |this| {
+                        this.child(assistant.input.clone())
+                    }),
             )
             .child(
                 div()
@@ -489,40 +499,41 @@ impl Editor {
                     .gap_1()
                     .px(px(8.0))
                     .py(px(8.0))
-                    .child(assistant_skill_button_view(assistant, cx))
-                    .child(assistant_model_button_view(assistant, cx))
-                    .child(assistant_model_picker_view(assistant, cx))
-                    .when(!assistant.effort_options().is_empty(), |this| {
-                        this.child(assistant_effort_picker_view(assistant, cx))
-                    })
-                    .when(assistant.provider().supports_permissions, |this| {
-                        this.child(assistant_permission_picker_view(assistant, cx))
+                    .when(!awaiting_decision, |this| {
+                        this.child(assistant_skill_button_view(assistant, cx))
+                            .child(assistant_model_button_view(assistant, cx))
+                            .child(assistant_model_picker_view(assistant, cx))
+                            .when(!assistant.effort_options().is_empty(), |this| {
+                                this.child(assistant_effort_picker_view(assistant, cx))
+                            })
+                            .when(assistant.provider().supports_permissions, |this| {
+                                this.child(assistant_permission_picker_view(assistant, cx))
+                            })
                     })
                     .child(div().flex_1())
-                    .child(if assistant.busy {
-                        button_cyberpunk_secondary("assistant-stop", "Stop", true, window, cx)
-                            .on_click(cx.listener(|editor, _, _, cx| {
-                                editor.emit_event(cx, AppEvent::AssistantStopped);
-                            }))
-                    } else {
-                        button_cyberpunk_primary(
-                            "assistant-send",
-                            "Send",
-                            !input_empty && viewing.is_none(),
-                            window,
-                            cx,
+                    .when(assistant.busy, |this| {
+                        this.child(
+                            button_cyberpunk_secondary("assistant-stop", "Stop", true, window, cx)
+                                .on_click(cx.listener(|editor, _, _, cx| {
+                                    editor.emit_event(cx, AppEvent::AssistantStopped);
+                                })),
                         )
-                        .on_click(cx.listener(|editor, _, _, cx| {
-                            let message = editor.assistant.input.read(cx).text().trim().to_string();
-                            if message.is_empty() {
-                                return;
-                            }
-                            editor
-                                .assistant
-                                .input
-                                .update(cx, |input, cx| input.clear(cx));
-                            editor.emit_event(cx, AppEvent::AssistantMessageSubmitted { message });
-                        }))
+                    })
+                    .when(!assistant.busy, |this| {
+                        this.child(
+                            button_cyberpunk_primary(
+                                "assistant-send",
+                                "Send",
+                                can_send,
+                                window,
+                                cx,
+                            )
+                            .on_click(cx.listener(
+                                |editor, _, _, cx| {
+                                    editor.ui_callback_submit_assistant_message(cx);
+                                },
+                            )),
+                        )
                     }),
             );
 
@@ -531,6 +542,16 @@ impl Editor {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Project".to_string());
+        let sequence_label = self.timeline.as_ref().and_then(|timeline| {
+            timeline
+                .path
+                .file_stem()
+                .map(|name| format!(" · {}", name.to_string_lossy()))
+        });
+        let project_label = sequence_label.map_or_else(
+            || project_name.clone(),
+            |sequence| format!("{project_name}{sequence}"),
+        );
         let state_label = if viewing.is_some() {
             "Viewing saved session · New chat to continue"
         } else if assistant.busy {
@@ -544,7 +565,7 @@ impl Editor {
             .py(px(6.0))
             .text_size(px(10.0))
             .text_color(rgb(MUTED))
-            .child(format!("{project_name} · {state_label}"));
+            .child(format!("{project_label} · {state_label}"));
 
         let (approval_label, approval_color) = match assistant.pending_approval {
             Some(_) => ("1 approval pending", WARNING),
@@ -573,6 +594,16 @@ impl Editor {
                 }
             }
         };
+        let mut composer_stack = div()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .child(composer)
+            .child(context_line);
+        if entries.is_empty() {
+            composer_stack = composer_stack.mt_auto().mb_auto();
+        }
+
         let status_bar = div()
             .h(px(28.0))
             .flex_shrink_0()
@@ -614,6 +645,22 @@ impl Editor {
             .id("editor-assistant-window")
             .relative()
             .size_full()
+            .capture_key_down(cx.listener(|editor, event: &gpui::KeyDownEvent, _, cx| {
+                match event.keystroke.key.as_str() {
+                    "enter" if !event.keystroke.modifiers.modified() => {
+                        if editor.assistant.busy {
+                            return;
+                        }
+                        editor.ui_callback_submit_assistant_message(cx);
+                        cx.stop_propagation();
+                    }
+                    "escape" if editor.assistant.busy => {
+                        editor.emit_event(cx, AppEvent::AssistantStopped);
+                        cx.stop_propagation();
+                    }
+                    _ => {}
+                }
+            }))
             .flex()
             .overflow_hidden()
             .bg(rgb(PANEL))
@@ -631,8 +678,7 @@ impl Editor {
                     .child(tab_bar)
                     .child(messages)
                     .when_some(approval, |this, approval| this.child(approval))
-                    .child(composer)
-                    .child(context_line)
+                    .child(composer_stack)
                     .child(status_bar),
             )
             .when(assistant.provider_menu_open, |this| {
@@ -654,7 +700,10 @@ impl Editor {
     }
 
     pub(super) fn send_assistant_message(&mut self, message: String, cx: &mut Context<Self>) {
-        if self.assistant.busy || self.assistant.viewing.is_some() {
+        if self.assistant.busy
+            || self.assistant.viewing.is_some()
+            || self.assistant.pending_approval.is_some()
+        {
             return;
         }
         self.assistant
@@ -1091,6 +1140,7 @@ impl Editor {
         self.assistant.expanded_approvals.clear();
         self.assistant.last_turn_elapsed = None;
         self.assistant.copied_turn = None;
+        self.assistant.expanded_user_messages.clear();
         self.assistant.transcript_id = None;
         self.assistant.provider_menu_open = false;
         self.assistant.skill_menu_open = false;
@@ -1627,6 +1677,29 @@ impl Editor {
         .detach();
     }
 
+    fn ui_callback_submit_assistant_message(&mut self, cx: &mut Context<Self>) {
+        if self.assistant.busy || self.assistant.pending_approval.is_some() {
+            return;
+        }
+        let message = self.assistant.input.read(cx).text().trim().to_string();
+        if message.is_empty() {
+            return;
+        }
+        let provider_unavailable =
+            self.assistant.provider_readiness[self.assistant.provider_index] == Some(false);
+        if provider_unavailable {
+            self.assistant.push_entry(AssistantEntry::Error(format!(
+                "{} is not available. Choose a ready provider or install and sign in before sending.",
+                self.assistant.provider_display_name()
+            )));
+            self.assistant.scroll.scroll_to_bottom();
+            cx.notify();
+            return;
+        }
+        self.assistant.input.update(cx, |input, cx| input.clear(cx));
+        self.emit_event(cx, AppEvent::AssistantMessageSubmitted { message });
+    }
+
     fn ui_callback_copy_response(
         &mut self,
         turn_start: usize,
@@ -1974,6 +2047,7 @@ impl AssistantState {
             self.expanded_thoughts = shift_expansion_indices(&self.expanded_thoughts);
             self.group_overrides = shift_group_overrides(&self.group_overrides);
             self.copied_turn = self.copied_turn.and_then(|index| index.checked_sub(1));
+            self.expanded_user_messages = shift_expansion_indices(&self.expanded_user_messages);
         }
         self.entries.push(entry);
     }
@@ -2508,26 +2582,75 @@ fn run_assistant_tool_background(
 
 /// Renders a single non-activity transcript entry. Tool and thought runs are grouped by
 /// [`assistant_activity_group_view`] instead, so they never reach this function.
-fn assistant_entry_view(entry: &AssistantEntry) -> gpui::AnyElement {
+fn assistant_entry_view(
+    entry: &AssistantEntry,
+    index: usize,
+    assistant: &AssistantState,
+    cx: &mut Context<Editor>,
+) -> gpui::AnyElement {
     match entry {
-        AssistantEntry::User(message) => div()
-            .flex()
-            .justify_end()
-            .child(
-                div()
-                    .min_w_0()
-                    .max_w(px(340.0))
-                    .rounded(px(8.0))
-                    .rounded_br(px(2.0))
-                    .bg(rgb(ACCENT_BACKGROUND))
-                    .px(px(10.0))
-                    .py(px(8.0))
-                    .text_size(px(11.0))
-                    .line_height(px(20.0))
-                    .text_color(rgb(TEXT))
-                    .child(message.clone()),
-            )
-            .into_any_element(),
+        AssistantEntry::User(message) => {
+            let is_long = user_message_is_long(message);
+            let expanded = assistant.expanded_user_messages.contains(&index);
+            let shown_message = if is_long && !expanded {
+                abbreviate_user_message(message)
+            } else {
+                message.clone()
+            };
+            div()
+                .flex()
+                .justify_end()
+                .child(
+                    div()
+                        .min_w_0()
+                        .max_w(px(340.0))
+                        .rounded(px(8.0))
+                        .rounded_br(px(2.0))
+                        .bg(rgb(ACCENT_BACKGROUND))
+                        .px(px(10.0))
+                        .py(px(8.0))
+                        .text_size(px(11.0))
+                        .line_height(px(20.0))
+                        .text_color(rgb(TEXT))
+                        .child(shown_message)
+                        .when(is_long, move |this| {
+                            this.child(
+                                div()
+                                    .id(format!("assistant-user-message-{index}"))
+                                    .mt_1()
+                                    .text_color(rgb(LINK))
+                                    .cursor(CursorStyle::PointingHand)
+                                    .on_click(cx.listener(move |editor, _, _, cx| {
+                                        match editor
+                                            .assistant
+                                            .expanded_user_messages
+                                            .contains(&index)
+                                        {
+                                            true => {
+                                                editor
+                                                    .assistant
+                                                    .expanded_user_messages
+                                                    .remove(&index);
+                                            }
+                                            false => {
+                                                editor
+                                                    .assistant
+                                                    .expanded_user_messages
+                                                    .insert(index);
+                                            }
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(if expanded {
+                                        "Show less"
+                                    } else {
+                                        "Show more"
+                                    }),
+                            )
+                        }),
+                )
+                .into_any_element()
+        }
         AssistantEntry::Message(message) => div()
             .text_size(px(11.0))
             .line_height(px(20.0))
@@ -2567,6 +2690,16 @@ fn assistant_entry_view(entry: &AssistantEntry) -> gpui::AnyElement {
             .into_any_element(),
         AssistantEntry::Thought(_) | AssistantEntry::Tool { .. } => div().into_any_element(),
     }
+}
+
+/// Only visibly long prompts take an expansion control; short messages stay compact.
+fn user_message_is_long(message: &str) -> bool {
+    message.chars().count() > 240
+}
+
+fn abbreviate_user_message(message: &str) -> String {
+    let abbreviated = message.chars().take(240).collect::<String>();
+    format!("{}…", abbreviated.trim_end())
 }
 
 /// Assistant-generated content that belongs to one speaker turn. User and Info entries
