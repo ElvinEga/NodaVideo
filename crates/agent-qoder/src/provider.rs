@@ -1,11 +1,4 @@
-//! Qoder CLI AgentProvider adapter: drives the SDK daemon over NDJSON stdio.
-//!
-//! Discovery (availability, version, model catalog, account, sessions) and the
-//! session plane (open, messaging, streaming, cancellation) are implemented here.
-//! Each NodaVideo session owns one daemon process hosting one Qoder session, so
-//! the reader can route every session frame straight to that session's events.
-//! Tool approvals and MCP wiring land in a subsequent slice; the provider is not
-//! registered with the editor until those are in place.
+//! Native Qoder daemon sessions with host-owned permissions and editor MCP tools.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,10 +14,11 @@ use nodavideo_agent_runtime::{
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::host::{MCP_SERVER, SessionHost};
 use crate::protocol::{
     AUTH_PAYLOAD_QODERCLI, ControlResponse, DAEMON_PROTOCOL_VERSION, ENV_SDK_AUTH_PAYLOAD_FILE,
     ENV_SDK_DAEMON, ENV_SDK_ENTRYPOINT, ENV_SDK_VERSION, InitializeInfo, MULTI_SESSION_CAPABILITY,
@@ -52,6 +46,13 @@ struct ActiveQoderSession {
     child: Option<Child>,
     connection: Option<DaemonConnection>,
     _auth_dir: Option<TempDir>,
+    host: Arc<SessionHost>,
+}
+
+impl Drop for ActiveQoderSession {
+    fn drop(&mut self) {
+        self.host.stop();
+    }
 }
 
 /// AgentProvider adapter for the Qoder CLI SDK daemon.
@@ -210,11 +211,32 @@ impl AgentProvider for QoderAgentProvider {
         Ok(parse_models(&listed?))
     }
 
+    async fn status_detail(&self) -> Result<Option<String>, AgentRuntimeError> {
+        let version = self
+            .cli_version()
+            .await
+            .unwrap_or_else(|| "Unknown version".into());
+        let account = self.account_info().await?;
+        let auth = if account.is_some() {
+            "Signed in"
+        } else {
+            "Sign in with qodercli login"
+        };
+        Ok(Some(format!("{version} · {auth}")))
+    }
+
     async fn start_session(&self, config: AgentConfig) -> Result<SessionId, AgentRuntimeError> {
         let session_id = SessionId::new();
         let (tx, _) = broadcast::channel(128);
 
-        if self.binary.is_empty() || !Self::probe_binary_exists(&self.binary) {
+        let host = Arc::new(SessionHost::new(&config, tx.clone()));
+        if self.id != "qoder-simulated" && !Self::probe_binary_exists(&self.binary) {
+            return Err(AgentRuntimeError::ProviderUnavailable(
+                self.id.clone(),
+                "Install qodercli and run `qodercli login` before starting Qoder".into(),
+            ));
+        }
+        if self.id == "qoder-simulated" {
             self.sessions.lock().unwrap().insert(
                 session_id,
                 ActiveQoderSession {
@@ -223,19 +245,23 @@ impl AgentProvider for QoderAgentProvider {
                     child: None,
                     connection: None,
                     _auth_dir: None,
+                    host,
                 },
             );
             return Ok(session_id);
         }
 
-        let mut process = connect(&self.binary, &config, Some(tx.clone())).await?;
+        let mut process = connect(&self.binary, &config, Some(host.clone())).await?;
         let connection = process.connection.clone();
         let opened = async {
-            // Land the local login on the daemon before opening a session, otherwise
-            // the worker's ModelProvider stays empty and every model is "unavailable".
-            connection.request("daemon.authenticate", json!({})).await?;
-            // The daemon has no default working directory; open_session rejects an
-            // empty cwd, so fall back to the process working directory.
+            // Authentication must populate the worker's model provider before opening it.
+            let authentication = connection.request("daemon.authenticate", json!({})).await?;
+            if authentication.get("authenticated").and_then(Value::as_bool) != Some(true) {
+                return Err(AgentRuntimeError::Other(
+                    "Qoder is signed out; run `qodercli login` and try again".into(),
+                ));
+            }
+            // The daemon never inherits a default session directory.
             let cwd = match &config.working_dir {
                 Some(dir) => dir.clone(),
                 None => std::env::current_dir().map_err(|source| AgentRuntimeError::Io {
@@ -263,6 +289,27 @@ impl AgentProvider for QoderAgentProvider {
             connection
                 .request_session(&native_id, "set_model", json!({ "model": model }))
                 .await?;
+            let overrides = config
+                .editor_tools
+                .iter()
+                .map(|tool| (tool.name.clone(), json!({"alwaysLoad":true})))
+                .collect::<serde_json::Map<String, Value>>();
+            let mut params = json!({
+                "supportsCatalogReadyInitialize":true,
+                "supportsAvailableModelsUpdate":true,
+                "supportsCommandsChanged":true,
+                "initializeTimeoutMs":60000,
+            });
+            if !config.editor_tools.is_empty() {
+                params["sdkMcpServers"] = json!([MCP_SERVER]);
+                params["sdkMcpToolOverrides"] = json!({MCP_SERVER:overrides});
+            }
+            if let Some(prompt) = &config.system_prompt {
+                params["appendSystemPrompt"] = json!(prompt);
+            }
+            connection
+                .request_session(&native_id, "initialize", params)
+                .await?;
             Ok::<String, AgentRuntimeError>(native_id)
         }
         .await;
@@ -283,6 +330,7 @@ impl AgentProvider for QoderAgentProvider {
                 child: Some(process.child),
                 connection: Some(process.connection),
                 _auth_dir: Some(process._auth_dir),
+                host,
             },
         );
         Ok(session_id)
@@ -298,6 +346,11 @@ impl AgentProvider for QoderAgentProvider {
             let state = map
                 .get(&session)
                 .ok_or(AgentRuntimeError::SessionNotFound(session))?;
+            if *state.host.stopped.borrow() {
+                return Err(AgentRuntimeError::Other(
+                    "Qoder disconnected; resume the conversation to continue".into(),
+                ));
+            }
             (
                 state.connection.clone(),
                 state.tx.clone(),
@@ -327,30 +380,54 @@ impl AgentProvider for QoderAgentProvider {
             .await
     }
 
+    fn native_session_id(&self, session: SessionId) -> Option<String> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(&session)
+            .filter(|state| !state.native_id.is_empty())
+            .map(|state| state.native_id.clone())
+    }
+
     async fn submit_approval(
         &self,
-        _session: SessionId,
-        _request_id: String,
-        _approved: bool,
+        session: SessionId,
+        request_id: String,
+        approved: bool,
     ) -> Result<(), AgentRuntimeError> {
-        Err(AgentRuntimeError::Other(
-            "Qoder approvals are not implemented in this build yet".into(),
-        ))
+        let sessions = self.sessions.lock().unwrap();
+        let state = sessions
+            .get(&session)
+            .ok_or(AgentRuntimeError::SessionNotFound(session))?;
+        state.host.approve(&request_id, approved)
+    }
+
+    async fn submit_tool_result(
+        &self,
+        session: SessionId,
+        call_id: String,
+        result: Value,
+        is_error: bool,
+    ) -> Result<(), AgentRuntimeError> {
+        let sessions = self.sessions.lock().unwrap();
+        let state = sessions
+            .get(&session)
+            .ok_or(AgentRuntimeError::SessionNotFound(session))?;
+        state.host.tool_result(&call_id, result, is_error)
     }
 
     async fn cancel(&self, session: SessionId) -> Result<(), AgentRuntimeError> {
-        let (connection, tx, native_id, child) = {
-            let mut map = self.sessions.lock().unwrap();
-            let state = map
-                .get_mut(&session)
-                .ok_or(AgentRuntimeError::SessionNotFound(session))?;
-            (
-                state.connection.clone(),
-                state.tx.clone(),
-                state.native_id.clone(),
-                state.child.take(),
-            )
-        };
+        let mut state = self
+            .sessions
+            .lock()
+            .unwrap()
+            .remove(&session)
+            .ok_or(AgentRuntimeError::SessionNotFound(session))?;
+        state.host.stop();
+        let connection = state.connection.take();
+        let child = state.child.take();
+        let tx = state.tx.clone();
+        let native_id = state.native_id.clone();
 
         if let Some(connection) = connection {
             if !native_id.is_empty() {
@@ -368,6 +445,11 @@ impl AgentProvider for QoderAgentProvider {
                         log::debug!("Qoder did not acknowledge the interrupt in time");
                     }
                 }
+                let _ = tokio::time::timeout(
+                    INTERRUPT_TIMEOUT,
+                    connection.request_session(&native_id, "daemon.close_session", json!({})),
+                )
+                .await;
             }
         }
         if let Some(mut child) = child {
@@ -507,12 +589,12 @@ struct DaemonProcess {
 async fn connect(
     binary: &str,
     config: &AgentConfig,
-    tx: Option<broadcast::Sender<AgentEvent>>,
+    host: Option<Arc<SessionHost>>,
 ) -> Result<DaemonProcess, AgentRuntimeError> {
     let auth_dir = write_auth_payload()?;
     let payload_path = auth_dir.path().join("payload.json");
     let (mut child, connection, stdout) = launch(binary, config, &payload_path)?;
-    spawn_reader(stdout, connection.pending.clone(), tx);
+    spawn_reader(stdout, connection.clone(), host);
     match initialize(&connection).await {
         Ok(_info) => Ok(DaemonProcess {
             child,
@@ -564,6 +646,7 @@ fn launch(
     // (print/stream-json/permission-mode) travel in open_session's worker_args.
     command
         .arg("--sdk")
+        .kill_on_drop(true)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -595,9 +678,7 @@ fn launch(
     if let Some(stderr) = child.stderr.take() {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                log::debug!("qoder stderr: {line}");
-            }
+            while let Ok(Some(_)) = lines.next_line().await {}
         });
     }
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(32);
@@ -646,36 +727,140 @@ async fn initialize(connection: &DaemonConnection) -> Result<InitializeInfo, Age
     Ok(info)
 }
 
-fn spawn_reader(
-    stdout: ChildStdout,
-    pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
-    tx: Option<broadcast::Sender<AgentEvent>>,
-) {
-    tokio::spawn(async move {
-        let mut tool_names: HashMap<String, String> = HashMap::new();
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-                continue;
-            };
-            if value.get("type").and_then(Value::as_str) == Some("control_response") {
-                if let Some(request_id) = response_request_id(&value) {
-                    let reply = pending.lock().unwrap().remove(request_id);
-                    if let Some(reply) = reply {
-                        let _ = reply.send(value);
+fn spawn_reader(stdout: ChildStdout, connection: DaemonConnection, host: Option<Arc<SessionHost>>) {
+    let (requests, mut incoming) = mpsc::channel::<Value>(32);
+    if let Some(worker_host) = host.clone() {
+        let worker_connection = connection.clone();
+        tokio::spawn(async move {
+            let mut stopped = worker_host.stopped.subscribe();
+            while !*stopped.borrow_and_update() {
+                tokio::select! {
+                    biased;
+                    _ = stopped.changed() => break,
+                    frame = incoming.recv() => {
+                        let Some(frame) = frame else { break };
+                        let response = tokio::select! {
+                            biased;
+                            _ = stopped.changed() => break,
+                            response = worker_host.handle(&frame) => response,
+                        };
+                        if worker_connection.send_frame(response).await.is_err() { break; }
                     }
                 }
-                continue;
             }
-            if let Some(tx) = &tx {
-                map_session_frame(&value, tx, &mut tool_names);
+        });
+    }
+    tokio::spawn(async move {
+        let mut tool_names: HashMap<String, String> = HashMap::new();
+        let mut reader = BufReader::new(stdout);
+        let mut failure = None;
+        loop {
+            let value = match read_frame(&mut reader, 64 * 1024 * 1024).await {
+                Ok(Some(value)) => value,
+                Ok(None) => break,
+                Err(error) => {
+                    failure = Some(error.to_string());
+                    break;
+                }
+            };
+            match value.get("type").and_then(Value::as_str) {
+                Some("control_response") => {
+                    if let Some(request_id) = response_request_id(&value) {
+                        let reply = connection.pending.lock().unwrap().remove(request_id);
+                        if let Some(reply) = reply {
+                            let _ = reply.send(value);
+                        }
+                    }
+                }
+                Some("control_request") => {
+                    if requests.try_send(value.clone()).is_err() {
+                        let response = json!({"type":"control_response","session_id":value["session_id"],
+                            "response":{"subtype":"error","request_id":value["request_id"],"error":"NodaVideo host is busy or unavailable"}});
+                        if connection.send_frame(response).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Some("control_cancel_request" | "control_cancel") => {
+                    if let Some(host) = &host
+                        && let Some(id) = value.get("request_id").and_then(Value::as_str)
+                    {
+                        host.cancel_request(id);
+                    }
+                }
+                _ => {
+                    if let Some(host) = &host {
+                        map_session_frame(&value, &host.events, &mut tool_names);
+                    }
+                }
+            }
+        }
+        connection.pending.lock().unwrap().clear();
+        if let Some(host) = host {
+            let was_stopped = *host.stopped.borrow();
+            host.stop();
+            if !was_stopped {
+                let (code, message) = match failure {
+                    Some(message) => ("QODER_PROTOCOL", message),
+                    None => (
+                        "QODER_EXITED",
+                        "The Qoder process disconnected; start or resume the conversation again"
+                            .into(),
+                    ),
+                };
+                let _ = host.events.send(AgentEvent::SessionError {
+                    code: code.into(),
+                    message,
+                });
             }
         }
     });
+}
+
+async fn read_frame(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    limit: usize,
+) -> std::io::Result<Option<Value>> {
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Qoder returned an incomplete frame",
+            ));
+        }
+        let newline = chunk.iter().position(|byte| *byte == b'\n');
+        let count = match newline {
+            Some(index) => index + 1,
+            None => chunk.len(),
+        };
+        if bytes.len() + count > limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Qoder frame exceeds the 64 MiB protocol limit",
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+        reader.consume(count);
+        if newline.is_none() {
+            continue;
+        }
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            bytes.clear();
+            continue;
+        }
+        return match serde_json::from_slice(&bytes) {
+            Ok(value) => Ok(Some(value)),
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Qoder returned invalid JSON",
+            )),
+        };
+    }
 }
 
 /// Translate one Qoder session frame into NodaVideo events. Text and thinking
@@ -738,6 +923,9 @@ fn map_session_frame(
                     .unwrap_or("tool")
                     .to_string();
                 tool_names.insert(call_id.clone(), tool_name.clone());
+                if tool_name.starts_with("mcp__nodavideo__") {
+                    continue;
+                }
                 let _ = tx.send(AgentEvent::ToolCallRequested {
                     call_id,
                     tool_name,
@@ -763,9 +951,11 @@ fn map_session_frame(
                     .unwrap_or("")
                     .to_string();
                 let tool_name = tool_names
-                    .get(&call_id)
-                    .cloned()
+                    .remove(&call_id)
                     .unwrap_or_else(|| "tool".to_string());
+                if tool_name.starts_with("mcp__nodavideo__") {
+                    continue;
+                }
                 let _ = tx.send(AgentEvent::ToolCallResult {
                     call_id,
                     tool_name,
@@ -829,7 +1019,7 @@ fn map_session_frame(
 /// The per-session worker flags. The model is chosen with a `set_model` control
 /// request after open_session; `--model` here is ignored by the daemon worker.
 fn worker_args(config: &AgentConfig) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "--print".into(),
         "--output-format".into(),
         "stream-json".into(),
@@ -841,7 +1031,26 @@ fn worker_args(config: &AgentConfig) -> Vec<String> {
         "--include-partial-messages".into(),
         "--permission-mode".into(),
         permission_mode_flag(config.permission_mode).into(),
-    ]
+        "--permission-prompt-tool".into(),
+        "stdio".into(),
+    ];
+    if let Some(id) = &config.resume_session_id {
+        args.extend(["--resume".into(), id.clone()]);
+    }
+    if !config.editor_tools.is_empty() {
+        args.extend([
+            "--mcp-config".into(),
+            json!({"mcpServers":{
+                MCP_SERVER:{"type":"sdk","name":MCP_SERVER}
+            }})
+            .to_string(),
+            "--strict-mcp-config".into(),
+        ]);
+    }
+    if let Some(effort) = &config.effort {
+        args.extend(["--reasoning-effort".into(), effort.clone()]);
+    }
+    args
 }
 
 /// Resolve a concrete session model. The catalog default "auto" is a client-side
@@ -924,6 +1133,96 @@ fn newest_installed_binary() -> Option<String> {
         }
     }
     best.map(|(_, path)| path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod host_protocol_tests {
+    use crate::provider::{QoderAgentProvider, read_frame, worker_args};
+    use nodavideo_agent_runtime::{AgentConfig, AgentProvider, AgentTool};
+    use serde_json::json;
+    use tokio::io::BufReader;
+
+    #[tokio::test]
+    async fn initialize_frames_larger_than_64_kib_are_accepted() {
+        let expected = json!({"type":"control_response","catalog":"a".repeat(72_000)});
+        let input = format!("{expected}\n");
+        let mut reader = BufReader::with_capacity(17, input.as_bytes());
+        assert_eq!(
+            read_frame(&mut reader, 64 * 1024 * 1024).await.unwrap(),
+            Some(expected)
+        );
+        assert!(
+            read_frame(&mut reader, 64 * 1024 * 1024)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_oversized_and_truncated_frames_fail_without_content() {
+        for (input, limit) in [
+            ("{\"secret\":\"not-json\"\n", 1024),
+            ("{\"secret\":1}", 1024),
+            ("{\"secret\":1}\n", 5),
+        ] {
+            let mut reader = BufReader::new(input.as_bytes());
+            let error = read_frame(&mut reader, limit).await.unwrap_err();
+            assert!(!error.to_string().contains("secret"));
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_cli_never_falls_back_to_simulation() {
+        let provider = QoderAgentProvider::new("qoder", "Qoder", "nodavideo-missing-qoder-binary");
+        assert!(
+            provider
+                .start_session(AgentConfig::default())
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn worker_options_include_host_permissions_resume_and_real_mcp() {
+        let config = AgentConfig {
+            resume_session_id: Some("saved-session".into()),
+            effort: Some("high".into()),
+            editor_tools: vec![AgentTool {
+                name: "inspect".into(),
+                description: "Inspect".into(),
+                input_schema: json!({"type":"object"}),
+                is_mutation: false,
+                requires_approval: false,
+            }],
+            ..AgentConfig::default()
+        };
+        let args = worker_args(&config);
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--permission-prompt-tool", "stdio"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--resume", "saved-session"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--reasoning-effort", "high"])
+        );
+        let mcp = args
+            .windows(2)
+            .find(|pair| pair[0] == "--mcp-config")
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&mcp[1]).unwrap();
+        assert_eq!(value["mcpServers"]["nodavideo"]["type"], "sdk");
+        assert!(args.iter().any(|arg| arg == "--strict-mcp-config"));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--yolo" || arg == "bypassPermissions")
+        );
+    }
 }
 
 #[cfg(test)]

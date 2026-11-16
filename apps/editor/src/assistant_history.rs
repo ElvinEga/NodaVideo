@@ -17,6 +17,9 @@ pub(crate) struct AssistantSession {
     /// Reasoning-effort variant the transcript ran with; None means the model default.
     #[serde(default)]
     pub(crate) effort: Option<String>,
+    /// Provider-owned conversation id; absent in older, non-resumable transcripts.
+    #[serde(default)]
+    pub(crate) native_session_id: Option<String>,
     pub(crate) created_at_ms: u64,
     pub(crate) updated_at_ms: u64,
     pub(crate) title: String,
@@ -82,14 +85,20 @@ pub(crate) fn load_session_metas(project_root: &Path) -> Vec<AssistantSessionMet
         let contents = match fs::read_to_string(&path) {
             Ok(contents) => contents,
             Err(error) => {
-                log::warn!("Skipping unreadable assistant session {}: {error:?}", path.display());
+                log::warn!(
+                    "Skipping unreadable assistant session {}: {error:?}",
+                    path.display()
+                );
                 continue;
             }
         };
         let session: AssistantSession = match serde_json::from_str(&contents) {
             Ok(session) => session,
             Err(error) => {
-                log::warn!("Skipping invalid assistant session {}: {error:?}", path.display());
+                log::warn!(
+                    "Skipping invalid assistant session {}: {error:?}",
+                    path.display()
+                );
                 continue;
             }
         };

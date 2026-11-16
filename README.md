@@ -14,7 +14,7 @@ NodaVideo combines two codebases:
   video engine with `ffmpeg-next` FFI decoding, VideoToolbox on macOS, Metal GPU
   compositing, `cpal` audio output, and a shared decoder path for preview + export.
 - **AI layer** — NodaVideo's original agent system: pluggable `AgentProvider`
-  trait, ACP/Codex/Claude adapters, MCP tool server, skill registry, and
+  trait, ACP/Codex/Claude/OpenCode/Qoder adapters, MCP tool executor, skill registry, and
   HyperFrames motion graphics bridge.
 
 ## Product Direction
@@ -23,8 +23,8 @@ NodaVideo combines two codebases:
    workspace leaves a fully featured desktop NLE.
 2. **Complete user control.** Agents propose actions; the user reviews, approves,
    or undoes them.
-3. **Provider independence.** Antigravity, Codex, Gemini CLI, Claude Code, and
-   ACP-compatible agents operate interchangeably without vendor lock-in.
+3. **Provider independence.** Antigravity, Codex, Gemini CLI, Claude Code,
+   OpenCode, Qoder CLI, and ACP-compatible agents share one provider interface.
 4. **Extensible AI skills** system for video-production capabilities.
 
 ## Requirements
@@ -53,6 +53,20 @@ cargo check --config .cargo/macos.toml -p editor   # Windows: .cargo/windows.tom
 cargo clippy --config .cargo/macos.toml --all-features
 ```
 
+## Qoder CLI provider
+
+Install Qoder CLI and authenticate with `qodercli login`, then select **Qoder CLI SDK**
+in the Assistant provider menu. The provider uses native Rust and Qoder's SDK daemon
+protocol; it does not use ACP or a Node sidecar. `NODAVIDEO_QODER_BIN` selects a custom
+CLI executable. The menu reports the installed version and sign-in status without
+reading or storing authentication tokens.
+
+Models come from the live CLI catalog. Qoder receives the editor's canonical MCP tool
+schemas, with host-owned approvals and real gateway results. Saved NodaVideo Qoder
+conversations resume using their native session IDs; older transcripts without IDs
+remain read-only. Supervised mode is the default. Full access is an explicit opt-in,
+not a sandbox. See [Qoder provider details and limitations](docs/QODER_PROVIDER.md).
+
 ## Workspace structure
 
 ```
@@ -75,6 +89,8 @@ crates/         — AI layer (NodaVideo-specific)
   agent-acp/      ACP JSON-RPC adapter (Antigravity, Gemini CLI)
   agent-codex/    Codex app-server JSON-RPC adapter
   agent-claude/   Claude Code CLI streaming adapter
+  agent-opencode/ OpenCode HTTP/SSE adapter
+  agent-qoder/    Native Qoder SDK daemon, host approvals and virtual MCP
   mcp-server/     MCP editor tool schemas and executor
   skill-registry/ SKILL.md parser, discovery, prompt composer
   hyperframes-bridge/ Motion graphics templates, HTML/SVG composition

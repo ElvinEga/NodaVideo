@@ -3,6 +3,7 @@
 //! Speaks the Qoder daemon's NDJSON control protocol directly from Rust (no ACP,
 //! no Node sidecar). Authentication reuses the local qodercli login read-only.
 
+mod host;
 pub mod protocol;
 pub mod provider;
 

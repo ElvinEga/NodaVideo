@@ -12,10 +12,10 @@ pub mod provider;
 pub mod registry;
 
 pub use error::AgentRuntimeError;
-pub use event::AgentEvent;
+pub use event::{AgentEvent, ToolCallAuthorization};
 pub use id::SessionId;
 pub use mock::MockAgentProvider;
-pub use provider::{AgentConfig, AgentModel, AgentProvider, PermissionMode};
+pub use provider::{AgentConfig, AgentModel, AgentProvider, AgentTool, PermissionMode};
 pub use registry::AgentRuntime;
 
 #[cfg(test)]

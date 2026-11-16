@@ -5,39 +5,46 @@ use crate::assistant_history::{
     AssistantSession, AssistantSessionMeta, load_session, load_session_metas, now_ms, save_session,
     session_day_label, session_title,
 };
-use crate::edit_action::EditAction;
+use crate::dialog_missing_media::missing_media_dialog;
+use crate::edit_action::{EditAction, edit_timeline};
 use crate::editor::Editor;
 use crate::event_bus::AppEvent;
+use crate::preview::{PreviewTarget, timeline_preview_target};
+use crate::property_panel::current_property_panel;
 use crate::theme::{
     ACCENT, ACCENT_BACKGROUND, BACKGROUND, BORDER, ERROR, LINK, MUTED, PANEL, SUCCESS, SURFACE,
     SURFACE_HOVER, TEXT, WARNING,
 };
+use crate::timeline::TimelineRuntimeState;
 use crate::ui_components::TextInput;
 use crate::ui_components::cyberpunk_button::{
     button_cyberpunk_primary, button_cyberpunk_secondary,
 };
-use anyhow::Result;
-use futures::StreamExt;
+use anyhow::{Result, anyhow};
 use futures::channel::mpsc;
+use futures::future::Shared;
+use futures::{FutureExt, StreamExt};
 use gpui::prelude::*;
 use gpui::{
-    AsyncApp, Context, CursorStyle, Entity, FontWeight, ScrollHandle, Stateful, WeakEntity, Window,
-    div, px, rgb, svg,
+    AsyncApp, Context, CursorStyle, Entity, FontWeight, ScrollHandle, Stateful, Task, WeakEntity,
+    Window, div, px, rgb, svg,
 };
 use nodavideo_agent_acp::AcpAgentProvider;
 use nodavideo_agent_claude::ClaudeAgentProvider;
 use nodavideo_agent_codex::CodexAgentProvider;
 use nodavideo_agent_opencode::OpenCodeAgentProvider;
+use nodavideo_agent_qoder::QoderAgentProvider;
 use nodavideo_agent_runtime::{
-    AgentConfig, AgentEvent, AgentModel, AgentRuntime, MockAgentProvider, PermissionMode, SessionId,
+    AgentConfig, AgentEvent, AgentModel, AgentRuntime, AgentTool, MockAgentProvider,
+    PermissionMode, SessionId, ToolCallAuthorization,
 };
 use nodavideo_hyperframes_bridge::{CompositionAsset, load_compositions};
-use nodavideo_mcp_server::{ExplorerChange, McpError, McpExecutor};
+use nodavideo_mcp_server::{ExplorerChange, McpError, McpExecutor, McpToolDefinition};
 use nodavideo_skill_registry::{SkillPackage, SkillRegistry};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use timeline::{Asset, TimelineEditingState};
@@ -47,7 +54,9 @@ pub(crate) struct AssistantState {
     runtime: AgentRuntime,
     provider_index: usize,
     session: Option<SessionId>,
-    /// Incremented when the provider changes so a stale event pump stops applying events.
+    native_session_id: Option<String>, // 提供方的持久会话标识；Stop 后保留以便续聊。
+    pending_cancellation: Option<Shared<Task<()>>>, // 启动与关闭串行，避免两个进程恢复同一原生会话。
+    /// Incremented when the session resets so a stale event pump stops applying events.
     session_generation: u64,
     entries: Vec<AssistantEntry>,
     pending_approval: Option<AssistantApproval>,
@@ -57,6 +66,7 @@ pub(crate) struct AssistantState {
     provider_menu_open: bool,
     /// Per-provider readiness probe: None until `is_available` answers. 与 entries 无关，可跨会话缓存。
     provider_readiness: Vec<Option<bool>>,
+    provider_details: Vec<Option<String>>,
     /// Per-provider model catalog, queried from the provider itself; cached across sessions.
     model_catalogs: Vec<ModelCatalog>,
     /// Per-provider chosen model id; None means the provider's default model.
@@ -97,6 +107,10 @@ pub(crate) struct AssistantState {
 }
 
 pub(crate) fn register_assistant_providers(runtime: &AgentRuntime, cx: &mut Context<Editor>) {
+    let qoder = match std::env::var("NODAVIDEO_QODER_BIN") {
+        Ok(binary) => QoderAgentProvider::new("qoder", "Qoder (CLI)", binary),
+        Err(_) => QoderAgentProvider::default(),
+    };
     let runtime = runtime.clone();
     gpui_tokio::Tokio::spawn(cx, async move {
         runtime
@@ -117,6 +131,7 @@ pub(crate) fn register_assistant_providers(runtime: &AgentRuntime, cx: &mut Cont
         runtime
             .register_provider(Arc::new(OpenCodeAgentProvider::default()))
             .await;
+        runtime.register_provider(Arc::new(qoder)).await;
     })
     .detach();
 }
@@ -128,6 +143,8 @@ impl AssistantState {
             runtime: AgentRuntime::new(),
             provider_index: 0,
             session: None,
+            native_session_id: None,
+            pending_cancellation: None,
             session_generation: 0,
             entries: Vec::new(),
             pending_approval: None,
@@ -136,6 +153,7 @@ impl AssistantState {
             busy: false,
             provider_menu_open: false,
             provider_readiness: vec![None; ASSISTANT_PROVIDERS.len()],
+            provider_details: vec![None; ASSISTANT_PROVIDERS.len()],
             model_catalogs: vec![ModelCatalog::NotProbed; ASSISTANT_PROVIDERS.len()],
             model_choices: vec![None; ASSISTANT_PROVIDERS.len()],
             effort_choices: vec![None; ASSISTANT_PROVIDERS.len()],
@@ -188,6 +206,7 @@ impl Editor {
             Some(session) => session.title.clone(),
             None => match assistant.session {
                 Some(_) => provider.display_name.to_string(),
+                None if assistant.native_session_id.is_some() => provider.display_name.to_string(),
                 None => "New chat".to_string(),
             },
         };
@@ -452,8 +471,7 @@ impl Editor {
                             cx,
                         )
                         .on_click(cx.listener(|editor, _, _, cx| {
-                            let message =
-                                editor.assistant.input.read(cx).text().trim().to_string();
+                            let message = editor.assistant.input.read(cx).text().trim().to_string();
                             if message.is_empty() {
                                 return;
                             }
@@ -612,23 +630,64 @@ impl Editor {
         let runtime = self.assistant.runtime.clone();
         let provider_id = self.assistant.provider_id().to_string();
         let existing_session = self.assistant.session;
+        let pending_cancellation = self.assistant.pending_cancellation.clone();
         let generation = self.assistant.session_generation;
-        let working_dir = self.project_root.clone();
-        let model = self.assistant.active_model().map(|model| model.id.clone());
-        let effort = self.assistant.active_effort().map(str::to_string);
+        let project_root = self.project_root.clone();
+        let index = self.assistant.provider_index;
+        let model = match &self.assistant.model_choices[index] {
+            Some(choice) if provider_id == "qoder" => Some(choice.clone()),
+            Some(_) | None => self.assistant.active_model().map(|model| model.id.clone()),
+        };
+        let effort = if provider_id == "qoder" {
+            self.assistant.effort_choices[index].clone()
+        } else {
+            self.assistant.active_effort().map(str::to_string)
+        };
+        let resume_session_id = if provider_id == "qoder" {
+            self.assistant.native_session_id.clone()
+        } else {
+            None
+        };
+        let editor_tools = if provider_id == "qoder" {
+            McpToolDefinition::all_tools()
+                .into_iter()
+                .map(|tool| AgentTool {
+                    name: tool.name,
+                    description: tool.description,
+                    input_schema: tool.input_schema,
+                    is_mutation: tool.is_mutation,
+                    requires_approval: tool.requires_approval,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let permission_mode = self.assistant.permission_mode;
 
         // Providers deliver only the message string, so the active skill's instructions ride
         // along on the first message of a session. A reused session already carries them; a
         // skill change resets the session, so this never disagrees with the composer button.
         let instructions = self.assistant.skills.build_combined_instructions();
-        let outgoing_message = if existing_session.is_none() && !instructions.is_empty() {
+        let outgoing_message = if existing_session.is_none()
+            && resume_session_id.is_none()
+            && !instructions.is_empty()
+        {
             format!("{}\n\n{}", instructions.trim_end(), message)
         } else {
             message
         };
 
-        cx.spawn(async move |editor, cx| {
+        let startup = cx.spawn(async move |editor, cx| {
+            if let Some(cancellation) = pending_cancellation {
+                cancellation.await;
+            }
+            let current = editor.update(cx, |editor, _| {
+                editor.assistant.session_generation == generation
+                    && editor.project_root == project_root
+            });
+            if current.ok() != Some(true) {
+                return;
+            }
             let session = match existing_session {
                 Some(session) => session,
                 None => {
@@ -637,7 +696,9 @@ impl Editor {
                         model,
                         effort,
                         permission_mode,
-                        working_dir: Some(working_dir),
+                        editor_tools,
+                        resume_session_id,
+                        working_dir: Some(project_root.clone()),
                         ..AgentConfig::default()
                     };
                     let started = gpui_tokio::Tokio::spawn(cx, {
@@ -651,6 +712,8 @@ impl Editor {
                             assistant_failed(
                                 &editor,
                                 cx,
+                                generation,
+                                &project_root,
                                 format!("Could not start the agent session: {error}"),
                             );
                             return;
@@ -659,6 +722,8 @@ impl Editor {
                             assistant_failed(
                                 &editor,
                                 cx,
+                                generation,
+                                &project_root,
                                 format!("Starting the agent session failed: {error}"),
                             );
                             return;
@@ -666,15 +731,30 @@ impl Editor {
                     };
                     let subscribed = gpui_tokio::Tokio::spawn(cx, {
                         let runtime = runtime.clone();
-                        async move { runtime.subscribe(session).await }
+                        async move {
+                            match runtime.subscribe(session).await {
+                                Ok(receiver) => {
+                                    let native_id = runtime.native_session_id(session).await;
+                                    Ok((receiver, native_id))
+                                }
+                                Err(error) => {
+                                    if let Err(cancel_error) = runtime.cancel(session).await {
+                                        log::warn!("Could not cancel the unsubscribed session: {cancel_error:?}");
+                                    }
+                                    Err(error)
+                                }
+                            }
+                        }
                     })
                     .await;
-                    let receiver = match subscribed {
-                        Ok(Ok(receiver)) => receiver,
+                    let (receiver, native_session_id) = match subscribed {
+                        Ok(Ok(subscribed_session)) => subscribed_session,
                         Ok(Err(error)) => {
                             assistant_failed(
                                 &editor,
                                 cx,
+                                generation,
+                                &project_root,
                                 format!("Could not subscribe to the agent session: {error}"),
                             );
                             return;
@@ -683,31 +763,44 @@ impl Editor {
                             assistant_failed(
                                 &editor,
                                 cx,
+                                generation,
+                                &project_root,
                                 format!("Subscribing to the agent session failed: {error}"),
                             );
                             return;
                         }
                     };
                     let stored = editor.update(cx, |editor, cx| {
-                        if editor.assistant.session_generation != generation {
+                        if editor.assistant.session_generation != generation
+                            || editor.project_root != project_root
+                        {
                             return false;
                         }
                         editor.assistant.session = Some(session);
+                        editor.assistant.native_session_id =
+                            native_session_id.filter(|id| !id.trim().is_empty());
+                        editor.persist_assistant_transcript(cx);
                         cx.notify();
                         true
                     });
                     if stored.ok() != Some(true) {
                         // The provider changed while the session was starting.
-                        gpui_tokio::Tokio::spawn(cx, {
+                        let cancelled = gpui_tokio::Tokio::spawn(cx, {
                             let runtime = runtime.clone();
-                            async move {
-                                let _ = runtime.cancel(session).await;
-                            }
-                        })
-                        .detach();
+                            async move { runtime.cancel(session).await }
+                        }).await;
+                        if !matches!(cancelled, Ok(Ok(()))) {
+                            log::warn!("Could not clean up a superseded agent startup: {cancelled:?}");
+                        }
                         return;
                     }
-                    start_assistant_event_pump(receiver, generation, editor.clone(), cx);
+                    start_assistant_event_pump(
+                        receiver,
+                        generation,
+                        project_root.clone(),
+                        editor.clone(),
+                        cx,
+                    );
                     session
                 }
             };
@@ -720,14 +813,20 @@ impl Editor {
             match sent {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
-                    assistant_failed(&editor, cx, format!("Could not send the message: {error}"));
+                    assistant_failed(
+                        &editor, cx, generation, &project_root,
+                        format!("Could not send the message: {error}"),
+                    );
                 }
                 Err(error) => {
-                    assistant_failed(&editor, cx, format!("Sending the message failed: {error}"));
+                    assistant_failed(
+                        &editor, cx, generation, &project_root,
+                        format!("Sending the message failed: {error}"),
+                    );
                 }
             }
-        })
-        .detach();
+        });
+        self.assistant.pending_cancellation = Some(startup.shared());
     }
 
     pub(super) fn submit_assistant_approval(&mut self, approved: bool, cx: &mut Context<Self>) {
@@ -750,11 +849,31 @@ impl Editor {
         cx.notify();
 
         let runtime = self.assistant.runtime.clone();
-        let request_id = approval.request_id;
-        gpui_tokio::Tokio::spawn(cx, async move {
-            if let Err(error) = runtime.submit_approval(session, request_id, approved).await {
-                log::error!("Could not submit the approval decision: {error:?}");
-            }
+        let request_id = approval.request_id.clone();
+        let generation = self.assistant.session_generation;
+        let project_root = self.project_root.clone();
+        cx.spawn(async move |editor, cx| {
+            let submitted = gpui_tokio::Tokio::spawn(cx, async move {
+                runtime.submit_approval(session, request_id, approved).await
+            })
+            .await;
+            let message = match submitted {
+                Ok(Ok(())) => return,
+                Ok(Err(error)) => format!("Could not submit the approval decision: {error}"),
+                Err(error) => format!("Submitting the approval decision failed: {error}"),
+            };
+            let _ = editor.update(cx, |editor, cx| {
+                if editor.assistant.session_generation != generation
+                    || editor.project_root != project_root
+                    || editor.assistant.session != Some(session)
+                {
+                    return;
+                }
+                editor.assistant.push_entry(AssistantEntry::Error(message));
+                editor.assistant.scroll.scroll_to_bottom();
+                editor.persist_assistant_transcript(cx);
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -768,15 +887,10 @@ impl Editor {
             cx.notify();
             return;
         }
+        self.new_assistant_chat(cx);
         let previous_session = self.assistant.select_provider(index);
-        let runtime = self.assistant.runtime.clone();
         if let Some(session) = previous_session {
-            gpui_tokio::Tokio::spawn(cx, async move {
-                if let Err(error) = runtime.cancel(session).await {
-                    log::debug!("Could not cancel the previous agent session: {error:?}");
-                }
-            })
-            .detach();
+            self.cancel_assistant_session(session, cx);
         }
         self.assistant.push_entry(AssistantEntry::Info(format!(
             "Provider: {}",
@@ -807,7 +921,7 @@ impl Editor {
         {
             self.assistant.effort_choices[index] = None;
         }
-        let previous_session = self.assistant.reset_session();
+        let previous_session = self.assistant.restart_session();
         let label = match model {
             Some(_) => self.assistant.model_label(),
             None => format!("{} (default)", self.assistant.model_label()),
@@ -818,13 +932,7 @@ impl Editor {
         self.persist_assistant_transcript(cx);
         cx.notify();
         if let Some(session) = previous_session {
-            let runtime = self.assistant.runtime.clone();
-            gpui_tokio::Tokio::spawn(cx, async move {
-                if let Err(error) = runtime.cancel(session).await {
-                    log::debug!("Could not cancel the previous agent session: {error:?}");
-                }
-            })
-            .detach();
+            self.cancel_assistant_session(session, cx);
         }
     }
 
@@ -841,7 +949,7 @@ impl Editor {
             return;
         }
         self.assistant.effort_choices[index] = effort.clone();
-        let previous_session = self.assistant.reset_session();
+        let previous_session = self.assistant.restart_session();
         let label = match effort {
             Some(effort) => effort_display_name(&effort),
             None => format!("{} (default)", self.assistant.effort_label()),
@@ -852,13 +960,7 @@ impl Editor {
         self.persist_assistant_transcript(cx);
         cx.notify();
         if let Some(session) = previous_session {
-            let runtime = self.assistant.runtime.clone();
-            gpui_tokio::Tokio::spawn(cx, async move {
-                if let Err(error) = runtime.cancel(session).await {
-                    log::debug!("Could not cancel the previous agent session: {error:?}");
-                }
-            })
-            .detach();
+            self.cancel_assistant_session(session, cx);
         }
     }
 
@@ -875,7 +977,7 @@ impl Editor {
             return;
         }
         self.assistant.permission_mode = mode;
-        let previous_session = self.assistant.reset_session();
+        let previous_session = self.assistant.restart_session();
         self.assistant.push_entry(AssistantEntry::Info(format!(
             "Permissions: {}",
             permission_mode_label(mode)
@@ -884,13 +986,7 @@ impl Editor {
         self.persist_assistant_transcript(cx);
         cx.notify();
         if let Some(session) = previous_session {
-            let runtime = self.assistant.runtime.clone();
-            gpui_tokio::Tokio::spawn(cx, async move {
-                if let Err(error) = runtime.cancel(session).await {
-                    log::debug!("Could not cancel the previous agent session: {error:?}");
-                }
-            })
-            .detach();
+            self.cancel_assistant_session(session, cx);
         }
     }
 
@@ -931,20 +1027,14 @@ impl Editor {
             return;
         }
         self.assistant.finish_turn_timing();
-        let previous_session = self.assistant.reset_session();
+        let previous_session = self.assistant.restart_session();
         self.assistant
             .push_entry(AssistantEntry::Info("Stopped.".to_string()));
         self.assistant.scroll.scroll_to_bottom();
         self.persist_assistant_transcript(cx);
         cx.notify();
         if let Some(session) = previous_session {
-            let runtime = self.assistant.runtime.clone();
-            gpui_tokio::Tokio::spawn(cx, async move {
-                if let Err(error) = runtime.cancel(session).await {
-                    log::debug!("Could not cancel the assistant session: {error:?}");
-                }
-            })
-            .detach();
+            self.cancel_assistant_session(session, cx);
         }
     }
 
@@ -965,28 +1055,17 @@ impl Editor {
         self.assistant.effort_menu_open = false;
         cx.notify();
         if let Some(session) = previous_session {
-            let runtime = self.assistant.runtime.clone();
-            gpui_tokio::Tokio::spawn(cx, async move {
-                if let Err(error) = runtime.cancel(session).await {
-                    log::debug!("Could not cancel the assistant session: {error:?}");
-                }
-            })
-            .detach();
+            self.cancel_assistant_session(session, cx);
         }
     }
 
     pub(super) fn select_assistant_skill(&mut self, id: String, cx: &mut Context<Self>) {
+        self.new_assistant_chat(cx);
         let previous_session = self.assistant.select_skill(&id);
         self.persist_assistant_transcript(cx);
         cx.notify();
         if let Some(session) = previous_session {
-            let runtime = self.assistant.runtime.clone();
-            gpui_tokio::Tokio::spawn(cx, async move {
-                if let Err(error) = runtime.cancel(session).await {
-                    log::debug!("Could not cancel the previous agent session: {error:?}");
-                }
-            })
-            .detach();
+            self.cancel_assistant_session(session, cx);
         }
     }
 
@@ -1007,6 +1086,7 @@ impl Editor {
             provider_id: self.assistant.provider_id().to_string(),
             model: self.assistant.model_choices[self.assistant.provider_index].clone(),
             effort: self.assistant.effort_choices[self.assistant.provider_index].clone(),
+            native_session_id: self.assistant.native_session_id.clone(),
             created_at_ms: self.assistant.transcript_created_at_ms,
             updated_at_ms: now_ms(),
             title: session_title(&self.assistant.entries),
@@ -1054,18 +1134,57 @@ impl Editor {
         .detach();
     }
 
-    /// Opens a saved transcript read-only. The live session, if any, keeps running untouched.
+    /// Qoder transcripts with a native id can resume on the next send; all others are read-only.
     pub(super) fn select_assistant_session(&mut self, id: Ulid, cx: &mut Context<Self>) {
         let project_root = self.project_root.clone();
+        let generation = self.assistant.session_generation;
         cx.spawn(async move |editor, cx| {
+            let load_root = project_root.clone();
             let loaded = cx
                 .background_executor()
-                .spawn(async move { load_session(&project_root, id) })
+                .spawn(async move { load_session(&load_root, id) })
                 .await;
             match loaded {
                 Ok(session) => {
                     if let Err(error) = editor.update(cx, |editor, cx| {
-                        editor.assistant.viewing = Some(session);
+                        if editor.assistant.session_generation != generation
+                            || editor.project_root != project_root
+                        {
+                            return;
+                        }
+                        let resumable_provider = ASSISTANT_PROVIDERS.iter().position(|provider| {
+                            provider.id == "qoder"
+                                && session.provider_id == provider.id
+                                && session
+                                    .native_session_id
+                                    .as_ref()
+                                    .is_some_and(|native_id| !native_id.trim().is_empty())
+                        });
+                        match resumable_provider {
+                            Some(index) => {
+                                editor.assistant.viewing = None;
+                                editor.persist_assistant_transcript(cx);
+                                let previous_session = editor.assistant.reset_session();
+                                editor.assistant.provider_index = index;
+                                editor.assistant.model_choices[index] = session.model;
+                                editor.assistant.effort_choices[index] = session.effort;
+                                editor.assistant.entries = session.entries;
+                                editor.assistant.transcript_id = Some(session.id);
+                                editor.assistant.transcript_created_at_ms = session.created_at_ms;
+                                editor.assistant.native_session_id = session.native_session_id;
+                                editor.assistant.last_turn_elapsed = None;
+                                editor.assistant.provider_menu_open = false;
+                                editor.assistant.model_menu_open = false;
+                                editor.assistant.effort_menu_open = false;
+                                editor.assistant.permission_menu_open = false;
+                                editor.assistant.skill_menu_open = false;
+                                if let Some(previous) = previous_session {
+                                    editor.cancel_assistant_session(previous, cx);
+                                }
+                            }
+                            None => editor.assistant.viewing = Some(session),
+                        }
+                        editor.assistant.expanded_tools.clear();
                         editor.assistant.expanded_thoughts.clear();
                         editor.assistant.group_overrides.clear();
                         editor.assistant.expanded_approvals.clear();
@@ -1093,6 +1212,30 @@ impl Editor {
 
 // Private APIs only
 impl Editor {
+    /// Keep cancellation awaitable across resets so a resumed daemon never races its predecessor.
+    fn cancel_assistant_session(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        let pending = self.assistant.pending_cancellation.take();
+        let runtime = self.assistant.runtime.clone();
+        self.assistant.pending_cancellation = Some(
+            cx.spawn(async move |_, cx| {
+                if let Some(previous) = pending {
+                    previous.await;
+                }
+                let cancelled =
+                    gpui_tokio::Tokio::spawn(cx, async move { runtime.cancel(session).await })
+                        .await;
+                match cancelled {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        log::warn!("Could not cancel the assistant session: {error:?}")
+                    }
+                    Err(error) => log::warn!("Cancelling the assistant session failed: {error:?}"),
+                }
+            })
+            .shared(),
+        );
+    }
+
     /// Probes each provider's real readiness via `is_available`, off the UI thread.
     /// Results cache across sessions; an unanswered probe stays `None` and retries next open.
     fn probe_assistant_providers(&mut self, cx: &mut Context<Self>) {
@@ -1105,14 +1248,26 @@ impl Editor {
             cx.spawn(async move |editor, cx| {
                 let probed = gpui_tokio::Tokio::spawn(cx, async move {
                     match runtime.get_provider(provider_id).await {
-                        Some(provider) => provider.is_available().await,
-                        None => false,
+                        Some(provider) => {
+                            let available = provider.is_available().await;
+                            let detail = if available {
+                                match provider.status_detail().await {
+                                    Ok(detail) => detail,
+                                    Err(error) => Some(format!("Status unavailable: {error}")),
+                                }
+                            } else {
+                                None
+                            };
+                            (available, detail)
+                        }
+                        None => (false, None),
                     }
                 })
                 .await;
-                if let Ok(available) = probed {
+                if let Ok((available, detail)) = probed {
                     let _ = editor.update(cx, |editor, cx| {
                         editor.assistant.provider_readiness[index] = Some(available);
+                        editor.assistant.provider_details[index] = detail;
                         cx.notify();
                     });
                 }
@@ -1153,7 +1308,10 @@ impl Editor {
             };
             let _ = editor.update(cx, |editor, cx| {
                 editor.assistant.model_catalogs[index] = catalog;
-                if index == editor.assistant.provider_index {
+                if index == editor.assistant.provider_index
+                    && !(editor.assistant.provider_id() == "qoder"
+                        && editor.assistant.native_session_id.is_some())
+                {
                     let supported = match editor.assistant.active_model() {
                         Some(model) => model.efforts.clone(),
                         None => Vec::new(),
@@ -1170,16 +1328,34 @@ impl Editor {
         .detach();
     }
 
-    /// Runs an in-process provider's tool call off the UI thread, then applies the result.
-    /// Approval-required tools were already gated by the provider's ApprovalRequested card,
-    /// so execution here is approved; the executor still validates before committing.
+    /// Runs an editor tool off-thread, whether from Mock or the approved Qoder MCP gateway.
+    /// Native tool activity never reaches this path. The provider has already gated approvals;
+    /// the executor validates the edit and the editor rejects stale snapshots before commit.
     fn begin_assistant_tool_call(
         &mut self,
         call_id: String,
         tool_name: String,
         arguments: Value,
+        authorization: Option<ToolCallAuthorization>,
         cx: &mut Context<Self>,
     ) {
+        let Some(session) = self.assistant.session else {
+            self.assistant.push_entry(AssistantEntry::Error(
+                "Cannot execute an editor tool without an active agent session.".to_string(),
+            ));
+            cx.notify();
+            return;
+        };
+        let snapshot = AssistantToolSnapshot {
+            authorization: authorization.clone(),
+            session,
+            generation: self.assistant.session_generation,
+            project_root: self.project_root.clone(),
+            timeline: self
+                .timeline
+                .as_ref()
+                .map(|timeline| (timeline.path.clone(), timeline.revision)),
+        };
         self.assistant.push_entry(AssistantEntry::Tool {
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
@@ -1206,8 +1382,7 @@ impl Editor {
                 media_library,
             )
         });
-        let project_root = self.project_root.clone();
-        let generation = self.assistant.session_generation;
+        let project_root = snapshot.project_root.clone();
 
         cx.spawn(async move |editor, cx| {
             let background_tool_name = tool_name.clone();
@@ -1219,14 +1394,12 @@ impl Editor {
                         &arguments,
                         seed,
                         &project_root,
+                        authorization.as_ref(),
                     )
                 })
                 .await;
             let _ = editor.update(cx, |editor, cx| {
-                if editor.assistant.session_generation != generation {
-                    return;
-                }
-                editor.finish_assistant_tool_call(call_id, tool_name, outcome, cx);
+                editor.finish_assistant_tool_call(snapshot, call_id, tool_name, outcome, cx);
             });
         })
         .detach();
@@ -1234,13 +1407,116 @@ impl Editor {
 
     fn finish_assistant_tool_call(
         &mut self,
+        snapshot: AssistantToolSnapshot,
         call_id: String,
         tool_name: String,
         mut outcome: AssistantToolOutcome,
         cx: &mut Context<Self>,
     ) {
-        if let Some(timeline) = outcome.mutated_timeline {
-            self.emit_event(cx, AppEvent::Edit(EditAction::ApplyAgentEdit { timeline }));
+        let same_session = self.assistant.session_generation == snapshot.generation
+            && self.assistant.session == Some(snapshot.session)
+            && self.project_root == snapshot.project_root;
+        let stale = if snapshot
+            .authorization
+            .as_ref()
+            .is_some_and(|authorization| !authorization.is_valid())
+        {
+            Some(McpError::ExecutionFailed(
+                "The editor tool was cancelled or timed out; no timeline changes were applied."
+                    .into(),
+            ))
+        } else if !same_session {
+            Some(McpError::ExecutionFailed(
+                "The agent session or project changed while the tool was running; no editor changes were applied.".to_string(),
+            ))
+        } else {
+            match (&snapshot.timeline, &self.timeline) {
+                (Some((path, expected)), Some(current)) if path == &current.path => {
+                    if *expected != current.revision {
+                        Some(McpError::StaleRevision { expected: *expected, actual: current.revision })
+                    } else {
+                        None
+                    }
+                }
+                (None, None) => None,
+                _ => Some(McpError::ExecutionFailed(
+                    "The open timeline changed while the tool was running; re-read state before retrying.".to_string(),
+                )),
+            }
+        };
+        if let Some(error) = stale {
+            outcome.result = Err(error);
+            outcome.mutated_timeline = None;
+            outcome.reloaded_compositions = None;
+            outcome.explorer_change = None;
+        }
+        if let Some(updated) = outcome.mutated_timeline.take() {
+            // 先验证、准备预览并保存；无异步间隙地提交后才回传 MCP 成功，避免覆盖用户的新编辑。
+            let applied = (|| -> Result<()> {
+                let timeline = self
+                    .timeline
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("No timeline is open"))?;
+                let mut new_timeline = TimelineRuntimeState::from_serialize(
+                    timeline.to_serialize(),
+                    timeline.path.clone(),
+                )?;
+                if let PreviewTarget::Timeline { path, player, .. } = &self.preview.target
+                    && self.project_root.join(path) == timeline.path
+                {
+                    new_timeline.set_playhead(player.read(cx).backend().frame_index());
+                }
+                edit_timeline(
+                    &mut new_timeline,
+                    EditAction::ApplyAgentEdit { timeline: updated },
+                )?;
+                let new_preview = match self.preview.target {
+                    PreviewTarget::Timeline { .. } | PreviewTarget::None => Some(
+                        timeline_preview_target(&new_timeline, &self.project_root, cx)?,
+                    ),
+                    _ => None,
+                };
+                let commit = match &snapshot.authorization {
+                    Some(authorization) => Some(
+                        authorization
+                            .lock_for_commit()
+                            .ok_or_else(|| anyhow!("Editor tool cancelled before commit"))?,
+                    ),
+                    None => None,
+                };
+                new_timeline.save()?;
+                let new_playhead = new_timeline.playhead();
+                timeline.record_editing_history();
+                timeline.offline_asset_ids = new_timeline.offline_asset_ids;
+                timeline.commit_editing_state(new_timeline.editing_state);
+                timeline.set_playhead(new_playhead);
+                if let Some(commit) = commit {
+                    commit.complete();
+                }
+                if let Some(preview) = new_preview {
+                    self.preview.target = preview;
+                }
+                self.property_panel = current_property_panel(self);
+                if self.missing_media_dialog.is_some()
+                    && let Some(current) = self.timeline.as_ref()
+                {
+                    let dialog = missing_media_dialog(current);
+                    self.missing_media_dialog = if dialog.files.is_empty() {
+                        None
+                    } else {
+                        Some(dialog)
+                    };
+                }
+                self.schedule_composition_thumbnails(cx);
+                Ok(())
+            })();
+            if let Err(error) = applied {
+                outcome.result = Err(McpError::ExecutionFailed(format!("{error:#}")));
+            }
+        }
+        if outcome.result.is_err() {
+            outcome.reloaded_compositions = None;
+            outcome.explorer_change = None;
         }
         if let Some(compositions) = outcome.reloaded_compositions {
             self.explorer.compositions = compositions;
@@ -1248,16 +1524,27 @@ impl Editor {
         }
         if let Some(change) = outcome.explorer_change.take() {
             // 媒体库写请求由编辑器权威应用；失败时把工具结果改写为真实错误，避免上报虚假成功。
-            let applied = match change {
-                ExplorerChange::Import { paths } => {
-                    self.import_external_paths(&paths, cx);
-                    Ok(())
+            let applied = (|| -> Result<()> {
+                let commit = match &snapshot.authorization {
+                    Some(authorization) => {
+                        Some(authorization.lock_for_commit().ok_or_else(|| {
+                            anyhow!("Editor tool cancelled before library update")
+                        })?)
+                    }
+                    None => None,
+                };
+                match change {
+                    ExplorerChange::Import { paths } => self.import_external_paths(&paths, cx),
+                    ExplorerChange::Remove { asset_id } => self.remove_media_asset(asset_id, cx)?,
+                    ExplorerChange::Rename { asset_id, name } => {
+                        self.rename_media_asset(asset_id, name)?;
+                    }
                 }
-                ExplorerChange::Remove { asset_id } => self.remove_media_asset(asset_id, cx),
-                ExplorerChange::Rename { asset_id, name } => {
-                    self.rename_media_asset(asset_id, name)
+                if let Some(commit) = commit {
+                    commit.complete();
                 }
-            };
+                Ok(())
+            })();
             if let Err(error) = applied {
                 outcome.result = Err(McpError::ExecutionFailed(format!("{error:#}")));
             }
@@ -1265,16 +1552,26 @@ impl Editor {
 
         let (result, is_error) = match outcome.result {
             Ok(result) => (result, false),
+            Err(error @ McpError::StaleRevision { expected, actual }) => (
+                json!({
+                    "error": error.to_string(),
+                    "code": "StaleRevision",
+                    "expected_revision": expected,
+                    "actual_revision": actual,
+                }),
+                true,
+            ),
             Err(error) => (json!({ "error": error.to_string() }), true),
         };
-        self.assistant
-            .complete_tool_call(&call_id, &tool_name, result.to_string(), is_error);
-        self.assistant.scroll.scroll_to_bottom();
-        cx.notify();
+        if same_session {
+            self.assistant
+                .complete_tool_call(&call_id, &tool_name, result.to_string(), is_error);
+            self.assistant.scroll.scroll_to_bottom();
+            cx.notify();
+        }
 
-        let Some(session) = self.assistant.session else {
-            return;
-        };
+        // 结果只交还原会话；切换后的会话不能收到旧工具的完成通知。
+        let session = snapshot.session;
         let runtime = self.assistant.runtime.clone();
         gpui_tokio::Tokio::spawn(cx, async move {
             if let Err(error) = runtime
@@ -1332,6 +1629,9 @@ impl AssistantState {
     }
 
     fn model_label(&self) -> String {
+        if self.provider_id() == "qoder" && self.model_choices[self.provider_index].is_some() {
+            return self.provider_model_label(self.provider_index);
+        }
         match self.active_model() {
             Some(model) => model.display_name.clone(),
             None => match self.catalog() {
@@ -1411,11 +1711,16 @@ impl AssistantState {
         self.skills.get(id)
     }
 
-    /// Drops the live session so a stale event pump stops applying events. Returns the old
-    /// session for the caller to cancel off-thread. Shared by provider switch, skill change
-    /// and Stop.
+    fn restart_session(&mut self) -> Option<SessionId> {
+        let native_session_id = self.native_session_id.take();
+        let previous_session = self.reset_session();
+        self.native_session_id = native_session_id;
+        previous_session
+    }
+
     fn reset_session(&mut self) -> Option<SessionId> {
         self.session_generation += 1;
+        self.native_session_id = None;
         self.pending_approval = None;
         self.busy = false;
         self.turn_started_at = None;
@@ -1522,6 +1827,12 @@ impl AssistantState {
                 call_id,
                 tool_name,
                 arguments,
+            }
+            | AgentEvent::EditorToolCallRequested {
+                call_id,
+                tool_name,
+                arguments,
+                ..
             } => {
                 self.push_entry(AssistantEntry::Tool {
                     call_id,
@@ -1615,6 +1926,7 @@ impl AssistantState {
                 }
             }
             AgentEvent::SessionCompleted { summary } => {
+                self.pending_approval = None;
                 self.busy = false;
                 self.finish_turn_timing();
                 if let Some(summary) = summary {
@@ -1622,6 +1934,7 @@ impl AssistantState {
                 }
             }
             AgentEvent::SessionError { code, message } => {
+                self.pending_approval = None;
                 self.busy = false;
                 self.finish_turn_timing();
                 self.push_entry(AssistantEntry::Error(format!("{code}: {message}")));
@@ -1665,6 +1978,15 @@ struct AssistantApproval {
     command_summary: String,
 }
 
+/// Identity and revision of the editor snapshot used by one off-thread tool call.
+struct AssistantToolSnapshot {
+    authorization: Option<ToolCallAuthorization>,
+    session: SessionId,
+    generation: u64,
+    project_root: PathBuf,
+    timeline: Option<(PathBuf, u64)>,
+}
+
 /// Result of an off-thread MCP tool call, applied back on the UI thread.
 struct AssistantToolOutcome {
     result: Result<Value, McpError>,
@@ -1694,14 +2016,14 @@ struct AssistantProvider {
     transport: &'static str,
     /// Brand dot hue; identifies the agent without tinting the chrome.
     hue: u32,
-    /// True when the editor executes the provider's tool calls in-process (offline Mock).
-    /// Self-executing providers (ACP/Codex/Claude) run their own tools and only stream results.
+    /// True when legacy ToolCallRequested events execute in the editor (offline Mock).
+    /// Other providers report native activity; EditorToolCallRequested always uses the gateway.
     executes_in_process: bool,
     /// True when the provider has a real permission backend the mode picker can drive.
     supports_permissions: bool,
 }
 
-const ASSISTANT_PROVIDERS: [AssistantProvider; 6] = [
+const ASSISTANT_PROVIDERS: [AssistantProvider; 7] = [
     AssistantProvider {
         id: "mock",
         display_name: "Mock Assistant (Offline)",
@@ -1750,11 +2072,20 @@ const ASSISTANT_PROVIDERS: [AssistantProvider; 6] = [
         executes_in_process: false,
         supports_permissions: true,
     },
+    AssistantProvider {
+        id: "qoder",
+        display_name: "Qoder CLI SDK",
+        transport: "CLI SDK",
+        hue: ACCENT,
+        executes_in_process: false,
+        supports_permissions: true,
+    },
 ];
 
 fn start_assistant_event_pump(
     receiver: tokio::sync::broadcast::Receiver<AgentEvent>,
     generation: u64,
+    project_root: PathBuf,
     editor: WeakEntity<Editor>,
     cx: &mut AsyncApp,
 ) {
@@ -1776,16 +2107,41 @@ fn start_assistant_event_pump(
                 AgentEvent::SessionCompleted { .. } | AgentEvent::SessionError { .. }
             );
             let applied = editor.update(cx, |editor, cx| {
-                if editor.assistant.session_generation != generation {
+                if editor.assistant.session_generation != generation
+                    || editor.project_root != project_root
+                {
                     return false;
                 }
                 match event {
+                    AgentEvent::EditorToolCallRequested {
+                        call_id,
+                        tool_name,
+                        arguments,
+                        authorization,
+                    } => {
+                        editor.begin_assistant_tool_call(
+                            call_id,
+                            tool_name,
+                            arguments,
+                            Some(authorization),
+                            cx,
+                        );
+                    }
                     AgentEvent::ToolCallRequested {
                         call_id,
                         tool_name,
                         arguments,
                     } if editor.assistant.provider_executes_in_process() => {
-                        editor.begin_assistant_tool_call(call_id, tool_name, arguments, cx);
+                        editor.begin_assistant_tool_call(call_id, tool_name, arguments, None, cx);
+                    }
+                    event @ AgentEvent::SessionError { .. }
+                        if editor.assistant.provider_id() == "qoder" =>
+                    {
+                        editor.assistant.apply_agent_event(event, cx);
+                        let previous = editor.assistant.restart_session();
+                        if let Some(session) = previous {
+                            editor.cancel_assistant_session(session, cx);
+                        }
                     }
                     event => editor.assistant.apply_agent_event(event, cx),
                 }
@@ -1803,10 +2159,29 @@ fn start_assistant_event_pump(
     .detach();
 }
 
-fn assistant_failed(editor: &WeakEntity<Editor>, cx: &mut AsyncApp, message: String) {
+fn assistant_failed(
+    editor: &WeakEntity<Editor>,
+    cx: &mut AsyncApp,
+    generation: u64,
+    project_root: &Path,
+    message: String,
+) {
     let _ = editor.update(cx, |editor, cx| {
+        if editor.assistant.session_generation != generation || editor.project_root != project_root
+        {
+            return;
+        }
         editor.assistant.busy = false;
+        editor.assistant.pending_approval = None;
+        editor.assistant.finish_turn_timing();
+        if editor.assistant.provider_id() == "qoder"
+            && let Some(session) = editor.assistant.restart_session()
+        {
+            editor.cancel_assistant_session(session, cx);
+        }
         editor.assistant.push_entry(AssistantEntry::Error(message));
+        editor.assistant.scroll.scroll_to_bottom();
+        editor.persist_assistant_transcript(cx);
         cx.notify();
     });
 }
@@ -1819,7 +2194,18 @@ fn run_assistant_tool_background(
     arguments: &Value,
     seed: Option<(TimelineEditingState, HashSet<Ulid>, u64, Vec<Asset>)>,
     project_root: &Path,
+    authorization: Option<&ToolCallAuthorization>,
 ) -> AssistantToolOutcome {
+    if authorization.is_some_and(|authorization| !authorization.is_valid()) {
+        return AssistantToolOutcome {
+            result: Err(McpError::ExecutionFailed(
+                "Editor tool cancelled before execution".into(),
+            )),
+            mutated_timeline: None,
+            reloaded_compositions: None,
+            explorer_change: None,
+        };
+    }
     let Some((editing_state, selected_clips, revision, media_library)) = seed else {
         return AssistantToolOutcome {
             result: Err(McpError::Unsupported {
@@ -2512,12 +2898,14 @@ fn assistant_approval_card_view(
                                 window,
                                 cx,
                             )
-                            .on_click(cx.listener(|editor, _, _, cx| {
-                                editor.emit_event(
-                                    cx,
-                                    AppEvent::AssistantApprovalDecided { approved: true },
-                                );
-                            })),
+                            .on_click(cx.listener(
+                                |editor, _, _, cx| {
+                                    editor.emit_event(
+                                        cx,
+                                        AppEvent::AssistantApprovalDecided { approved: true },
+                                    );
+                                },
+                            )),
                         )
                         .child(
                             button_cyberpunk_secondary(
@@ -2527,12 +2915,14 @@ fn assistant_approval_card_view(
                                 window,
                                 cx,
                             )
-                            .on_click(cx.listener(|editor, _, _, cx| {
-                                editor.emit_event(
-                                    cx,
-                                    AppEvent::AssistantApprovalDecided { approved: false },
-                                );
-                            })),
+                            .on_click(cx.listener(
+                                |editor, _, _, cx| {
+                                    editor.emit_event(
+                                        cx,
+                                        AppEvent::AssistantApprovalDecided { approved: false },
+                                    );
+                                },
+                            )),
                         ),
                 ),
         )
@@ -3431,9 +3821,7 @@ fn assistant_session_row_view(
         .px(px(10.0))
         .py(px(8.0))
         .when(selected, |this| {
-            this.bg(rgb(SURFACE))
-                .border_1()
-                .border_color(rgb(ACCENT))
+            this.bg(rgb(SURFACE)).border_1().border_color(rgb(ACCENT))
         })
         .when(!selected, |this| {
             this.cursor(CursorStyle::PointingHand)
@@ -3473,7 +3861,10 @@ fn assistant_session_row_view(
 }
 
 fn assistant_provider_for_id(id: &str) -> &'static AssistantProvider {
-    match ASSISTANT_PROVIDERS.iter().find(|provider| provider.id == id) {
+    match ASSISTANT_PROVIDERS
+        .iter()
+        .find(|provider| provider.id == id)
+    {
         Some(provider) => provider,
         None => &ASSISTANT_PROVIDERS[0],
     }
@@ -3511,10 +3902,7 @@ fn assistant_new_chat_button_view(
 
 /// The provider dropdown: a click-away backdrop plus every registered agent with its
 /// transport, model and real readiness. Choosing a row emits one AssistantProviderSelected.
-fn assistant_provider_menu_view(
-    assistant: &AssistantState,
-    cx: &mut Context<Editor>,
-) -> gpui::Div {
+fn assistant_provider_menu_view(assistant: &AssistantState, cx: &mut Context<Editor>) -> gpui::Div {
     let menu = div()
         .absolute()
         .bottom(px(96.0))
@@ -3575,7 +3963,11 @@ fn assistant_provider_row_view(
     let selected = index == assistant.provider_index;
     let readiness = assistant.provider_readiness[index];
     let unavailable = readiness == Some(false);
-    let (readiness_label, readiness_color) = assistant_readiness_label(readiness);
+    let (readiness_label, readiness_color) = if provider.id == "qoder" && readiness == Some(true) {
+        ("Installed", SUCCESS)
+    } else {
+        assistant_readiness_label(readiness)
+    };
     let name_color = if unavailable {
         MUTED
     } else {
@@ -3635,7 +4027,10 @@ fn assistant_provider_row_view(
                         .text_size(px(10.0))
                         .text_color(rgb(MUTED))
                         .text_ellipsis()
-                        .child(assistant.provider_model_label(index)),
+                        .child(match &assistant.provider_details[index] {
+                            Some(detail) => detail.clone(),
+                            None => assistant.provider_model_label(index),
+                        }),
                 ),
         )
         .child(
@@ -3736,10 +4131,7 @@ fn assistant_skill_button_view(
 
 /// The skill dropdown: a click-away backdrop plus every discovered production skill with
 /// its real description. Choosing a row emits one AssistantSkillSelected.
-fn assistant_skill_menu_view(
-    assistant: &AssistantState,
-    cx: &mut Context<Editor>,
-) -> gpui::Div {
+fn assistant_skill_menu_view(assistant: &AssistantState, cx: &mut Context<Editor>) -> gpui::Div {
     let mut skills = assistant.skills.list();
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     let empty = skills.is_empty();
@@ -3827,10 +4219,7 @@ fn assistant_skill_row_view(
         .hover(|style| style.bg(rgb(SURFACE_HOVER)))
         .when(active, |this| this.bg(rgb(SURFACE_HOVER)))
         .on_click(cx.listener(move |editor, _, _, cx| {
-            editor.emit_event(
-                cx,
-                AppEvent::AssistantSkillSelected { id: id.clone() },
-            );
+            editor.emit_event(cx, AppEvent::AssistantSkillSelected { id: id.clone() });
         }))
         .child(
             svg()

@@ -1479,6 +1479,7 @@ dependencies = [
  "nodavideo-agent-claude",
  "nodavideo-agent-codex",
  "nodavideo-agent-opencode",
+ "nodavideo-agent-qoder",
  "nodavideo-agent-runtime",
  "nodavideo-hyperframes-bridge",
  "nodavideo-mcp-server",
