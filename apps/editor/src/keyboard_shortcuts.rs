@@ -73,6 +73,7 @@ const SECTIONS: &[(&str, &[(&str, &[&str])])] = &[
             ("Minimize", &["⌘", "M"]),
             ("Send assistant message", &["↩"]),
             ("Stop assistant", &["Esc"]),
+            ("Toggle terminal", &["⌃", "`"]),
         ],
     ),
 ];

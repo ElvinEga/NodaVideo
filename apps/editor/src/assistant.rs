@@ -1,5 +1,6 @@
 //! AI assistant window: provider cycling, streamed conversation, and approval cards.
 
+use crate::actions::ToggleTerminal;
 use crate::asset::IconName;
 use crate::assistant_history::{
     AssistantAttachment, AssistantAttachmentKind, AssistantSession, AssistantSessionMeta,
@@ -13,6 +14,7 @@ use crate::event_bus::AppEvent;
 use crate::explorer::save_imported_media;
 use crate::preview::{PreviewTarget, timeline_preview_target};
 use crate::property_panel::current_property_panel;
+use crate::terminal::terminal_dock_view;
 use crate::theme::{
     ACCENT, ACCENT_BACKGROUND, BACKGROUND, BORDER, ERROR, LINK, MUTED, PANEL, SUCCESS, SURFACE,
     SURFACE_HOVER, TEXT, WARNING,
@@ -681,29 +683,82 @@ impl Editor {
                             .text_color(rgb(MUTED))
                             .child(format!("{} · {}", thread_provider.transport, model_status)),
                     )
-                    .child(div().text_color(rgb(approval_color)).child(approval_label)),
+                    .child(div().text_color(rgb(approval_color)).child(approval_label))
+                    .child(
+                        div()
+                            .id("assistant-terminal-toggle")
+                            .h(px(20.0))
+                            .px(px(7.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .cursor(CursorStyle::PointingHand)
+                            .bg(rgb(if self.terminal.visible {
+                                SURFACE
+                            } else {
+                                PANEL
+                            }))
+                            .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                            .on_click(cx.listener(|editor, _, window, cx| {
+                                editor.action_toggle_terminal(&ToggleTerminal, window, cx);
+                            }))
+                            .child(
+                                svg()
+                                    .path(IconName::Terminal.path())
+                                    .size(px(11.0))
+                                    .text_color(rgb(if self.terminal.visible {
+                                        TEXT
+                                    } else {
+                                        MUTED
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(if self.terminal.visible {
+                                        TEXT
+                                    } else {
+                                        MUTED
+                                    }))
+                                    .child("Terminal"),
+                            ),
+                    ),
             );
 
         div()
             .id("editor-assistant-window")
             .relative()
             .size_full()
-            .capture_key_down(cx.listener(|editor, event: &gpui::KeyDownEvent, _, cx| {
-                match event.keystroke.key.as_str() {
-                    "enter" if !event.keystroke.modifiers.modified() => {
-                        if editor.assistant.busy {
-                            return;
+            .capture_key_down(
+                cx.listener(|editor, event: &gpui::KeyDownEvent, window, cx| {
+                    let terminal_focused = editor.terminal.visible
+                        && editor
+                            .terminal
+                            .tabs
+                            .get(editor.terminal.active)
+                            .is_some_and(|tab| tab.focus_handle.is_focused(window));
+                    if terminal_focused {
+                        return; // 终端聚焦时 Enter/Esc 属于 shell，不属于助手。
+                    }
+                    match event.keystroke.key.as_str() {
+                        "enter" if !event.keystroke.modifiers.modified() => {
+                            if editor.assistant.busy {
+                                return;
+                            }
+                            editor.ui_callback_submit_assistant_message(cx);
+                            cx.stop_propagation();
                         }
-                        editor.ui_callback_submit_assistant_message(cx);
-                        cx.stop_propagation();
+                        "escape" if editor.assistant.busy => {
+                            editor.emit_event(cx, AppEvent::AssistantStopped);
+                            cx.stop_propagation();
+                        }
+                        _ => {}
                     }
-                    "escape" if editor.assistant.busy => {
-                        editor.emit_event(cx, AppEvent::AssistantStopped);
-                        cx.stop_propagation();
-                    }
-                    _ => {}
-                }
-            }))
+                }),
+            )
             .flex()
             .overflow_hidden()
             .bg(rgb(PANEL))
@@ -722,7 +777,10 @@ impl Editor {
                     .child(messages)
                     .when_some(approval, |this, approval| this.child(approval))
                     .child(composer_stack)
-                    .child(status_bar),
+                    .child(status_bar)
+                    .when(self.terminal.visible, |this| {
+                        this.child(terminal_dock_view(self, cx))
+                    }),
             )
             .when(assistant.provider_menu_open, |this| {
                 this.child(assistant_provider_menu_view(assistant, cx))

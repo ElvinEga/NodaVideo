@@ -35,6 +35,9 @@ authors = ["NodaVideo Contributors"]
 publish = false
 
 [workspace.dependencies]
+portable-pty = "0.9.0"
+alacritty_terminal = { version = "0.26.0", default-features = false }
+
 # OpenCut libs (editor core)
 timeline = { path = "libs/timeline" }
 engine = { path = "libs/engine" }

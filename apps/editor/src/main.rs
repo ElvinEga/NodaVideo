@@ -47,6 +47,7 @@ mod property_panel_video_clip;
 mod property_panel_video_file;
 mod settings;
 mod srt;
+mod terminal;
 #[cfg(test)]
 #[path = "tests/test_support.rs"]
 mod test_support;

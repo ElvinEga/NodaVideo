@@ -39,6 +39,7 @@ pub(crate) enum IconName {
     Snap,
     Sparkle,
     Spinner,
+    Terminal,
     Text,
     Trash,
     Unmute,
@@ -86,6 +87,7 @@ impl IconName {
             Self::Snap => "icons/snap.svg",
             Self::Sparkle => "icons/sparkle.svg",
             Self::Spinner => "icons/spinner.svg",
+            Self::Terminal => "icons/terminal.svg",
             Self::Text => "icons/text.svg",
             Self::Trash => "icons/trash.svg",
             Self::Unmute => "icons/unmute.svg",
@@ -118,7 +120,7 @@ impl AssetSource for EditorAssets {
 
 // Private APIs only
 impl IconName {
-    const ALL: [Self; 41] = [
+    const ALL: [Self; 42] = [
         Self::AlertTriangle,
         Self::App,
         Self::ArrowDown,
@@ -155,6 +157,7 @@ impl IconName {
         Self::Snap,
         Self::Sparkle,
         Self::Spinner,
+        Self::Terminal,
         Self::Text,
         Self::Trash,
         Self::Unmute,
@@ -200,6 +203,7 @@ impl IconName {
             Self::Snap => include_bytes!("../../../icons/snap.svg"),
             Self::Sparkle => include_bytes!("../../../icons/sparkle.svg"),
             Self::Spinner => include_bytes!("../../../icons/spinner.svg"),
+            Self::Terminal => include_bytes!("../../../icons/terminal.svg"),
             Self::Text => include_bytes!("../../../icons/text.svg"),
             Self::Trash => include_bytes!("../../../icons/trash.svg"),
             Self::Unmute => include_bytes!("../../../icons/unmute.svg"),

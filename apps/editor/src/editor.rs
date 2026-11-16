@@ -10,6 +10,7 @@ use crate::preview::{PreviewState, PreviewTarget};
 use crate::project_settings::load_project_local_settings;
 use crate::property_panel::{PropertyPanel, PropertyPanelState, current_property_panel};
 use crate::property_panel_transform::VideoTransformInputs;
+use crate::terminal::TerminalState;
 use crate::timeline::TimelineRuntimeState;
 use crate::ui_components::{HorizontalSplitState, TextInput, VerticalSplitState};
 use anyhow::{Result, bail};
@@ -36,6 +37,7 @@ pub(crate) struct Editor {
     pub(super) settings_open: bool,
     pub(super) shortcuts_open: bool,
     pub(super) assistant: AssistantState,
+    pub(crate) terminal: TerminalState,
     pub(crate) workspace: WorkspaceTab,
     pub(crate) show_media_browser: bool,
     pub(crate) show_inspector: bool,
@@ -120,6 +122,7 @@ impl Editor {
             settings_open: false,
             shortcuts_open: false,
             assistant,
+            terminal: TerminalState::new(),
             workspace: WorkspaceTab::Edit,
             show_media_browser: true,
             show_inspector: true,
