@@ -15,6 +15,7 @@ import {
   CompositionResultCard,
   DiffLine,
   ErrorCard,
+  LimitationCard,
   ModelMenu,
   PROVIDERS,
   ProviderDot,
@@ -35,16 +36,16 @@ export default function AiAssistantPage(): Markup {
   return (
     <ReviewPage
       title="The AI Assistant"
-      subtitle="A full-length window of its own, not a dock. Tool output, plans and motion results need room, so the assistant gets the whole window: a sessions sidebar, a wide thread, a bottom composer whose attach / model / autonomy controls sit below the field, an integrated terminal dock and a status bar. The editor's timeline stays in the Edit workspace; every change the agent proposes here is approved there and undoable with one stack. One AgentProvider abstraction serves Claude Code, Codex, Gemini CLI, Antigravity and an offline Mock, all with the same tools."
+      subtitle="Target architecture for a full-length assistant window: a sessions sidebar, wide thread, bottom composer and integrated terminal dock. The current editor already provides providers, streamed conversations, approvals, persisted sessions, skills and response actions. Sections for attachments, terminal tabs and tool inspection specify future behavior; they do not claim those backends already ship. Every editor mutation stays behind the host-owned approval gateway."
     >
       <div class="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs text-ink/70">
-        <span>Window ≥1080px · sessions sidebar 260px · {TOOL_COUNT} MCP tools · 5 providers · 6 skills</span>
-        <span>Native chrome · indigo accent · amber motion results</span>
+        <span>Window ≥1080px · sessions sidebar 260px · {TOOL_COUNT} MCP tools · 7 providers · 6 skills</span>
+        <span>Existing state first · proposed infrastructure labeled explicitly</span>
       </div>
 
       <ReviewSection
         title="A window of its own"
-        caption="The whole window is the assistant. Sessions on the left, the conversation in the middle, the composer pinned to the bottom with its controls under the field, and a terminal dock that opens from the status bar when a CLI agent needs room. Nothing is squeezed into a 300px rail: a turn can show reasoning, a tool run, an approval and a rendered composition without scrolling sideways."
+        caption="Target terminal-open window. The terminal shell, tabs and shortcut require a real PTY integration before this state ships; it is a planned layout, not a claim of terminal support. The existing editor approval gateway remains the only editor mutation path."
       >
         <div class="grid gap-6">
           <ReviewFigure
@@ -64,6 +65,9 @@ export default function AiAssistantPage(): Markup {
           <ReviewFigure title="Empty" caption="No sessions, no invented history. The composer is ready; send is disabled until there is text.">
             <AssistantWindow state="empty" />
           </ReviewFigure>
+          <ReviewFigure title="Error" caption="A failed action carries the actual error and only the recovery affordances its saved operation supports.">
+            <AssistantWindow state="error" />
+          </ReviewFigure>
           <ReviewFigure title="Approval" caption="A destructive edit waits for a decision. The status bar counts the pending approval; the composer dims so nothing is sent mid-decision.">
             <AssistantWindow state="approval" />
           </ReviewFigure>
@@ -75,7 +79,7 @@ export default function AiAssistantPage(): Markup {
 
       <ReviewSection
         title="The composer, up close"
-        caption="Attachment chips and any warning sit above the field; the field grows with the message; the toolbar stays below it — attach, skill, model with reasoning effort, autonomy, then send or stop at the right. Controls under the text, never above it. Attachments are referenced, not copied."
+        caption="Attachment chips and any warning sit above the field; the field grows with the message; the toolbar stays below it. Attachments persist as references, not copies. Each provider either accepts its documented input format or receives explicit file-reference context; unsupported inputs are rejected with a concrete error rather than silently dropped."
       >
         <div class="grid gap-x-5 gap-y-6 md:grid-cols-2">
           <ReviewFigure title="Empty" caption="Placeholder text, send disabled. Attach, skill, model and autonomy are always reachable below the field.">
@@ -95,9 +99,9 @@ export default function AiAssistantPage(): Markup {
           <ReviewFigure title="Disabled" caption="While a decision is pending the composer dims and send is disabled; the controls stay visible but inert.">
             <Specimen width={560}><Composer state="disabled" /></Specimen>
           </ReviewFigure>
-          <ReviewFigure title="Attachment limit" caption="A honest warning above the field when attachments exceed the limit, in the interface's voice.">
+          <ReviewFigure title="Attachment limit" caption="Rejected references report the actual constraint. A 20 MB text-reference ceiling is enforced on submission; native provider binary limits may be stricter and are reported by the provider.">
             <Specimen width={560}>
-              <Composer state="empty" warning="Attachments must total 20 MB or less." attachments={[{ name: "interview.mov", kind: "video", size: "412 MB" }]} />
+              <Composer state="empty" warning="attachments.txt exceeds the 20 MB text-reference limit." attachments={[{ name: "attachments.txt", kind: "file", size: "24 MB" }]} />
             </Specimen>
           </ReviewFigure>
         </div>
@@ -154,9 +158,9 @@ export default function AiAssistantPage(): Markup {
             <div class="h-[420px] overflow-hidden rounded-[6px] border border-border"><SessionsSidebar empty /></div>
           </ReviewFigure>
           <div class="max-w-[420px] space-y-3 self-start text-xs leading-5 text-ink/70">
-            <p><strong class="text-ink">Per-project storage.</strong> Sessions are part of the project folder, so the history travels with the edit.</p>
-            <p><strong class="text-ink">The editor still owns state.</strong> A session is a view over the one timeline. Approving a plan applies it in the Edit workspace; there is no separate agent document.</p>
-            <p><strong class="text-ink">One undo stack.</strong> Whether an edit came from a session or a CLI agent in the terminal, Cmd-Z reverses it in order.</p>
+            <p><strong class="text-ink">Existing feature.</strong> Sessions are stored with the project and restored when it reopens. Provider, model and transcript entries travel with the conversation.</p>
+            <p><strong class="text-ink">The editor still owns state.</strong> A session is a view over the one timeline. Approved host gateway edits apply in the Edit workspace; there is no separate agent document.</p>
+            <p><strong class="text-ink">Future navigation.</strong> Search, session tabs and project switching are proposed additions; the current sidebar supports history and new chat.</p>
           </div>
         </div>
       </ReviewSection>
@@ -223,7 +227,7 @@ export default function AiAssistantPage(): Markup {
 
       <ReviewSection
         title="Approval and control"
-        caption="The user owns the timeline. Splits, deletes, exports, multi-step plans and composition placement surface as approval cards with a concrete before → after. Approve applies atomically with one undo; Reject changes nothing. A standing 'always allow' rule and three autonomy modes tune how often the agent asks — but destructive edits always ask, in every mode."
+        caption="Only tools gated by the MCP metadata require a NodaVideo editor approval. Provider command/file approvals are separate; changing autonomy does not grant host bypass permissions. Before/after details come from actual request parameters, never inferred values."
       >
         <div class="grid gap-x-5 gap-y-6 md:grid-cols-[repeat(3,340px)]">
           <ReviewFigure title="Trim" caption="A single-clip trim with mono timecodes. The most common gate.">
@@ -231,7 +235,7 @@ export default function AiAssistantPage(): Markup {
               <ApprovalCard title="Review timeline change" detail="Trim the end of the opening video clip." tool="trim_clip" diff={<DiffLine before="00:00:18:12" after="00:00:08:00" />} />
             </Specimen>
           </ReviewFigure>
-          <ReviewFigure title="Delete" caption="Removing a clip is destructive, so it always asks — even in Autonomous.">
+          <ReviewFigure title="Delete" caption="The canonical delete tool requires an explicit editor approval before executing; rejection changes nothing.">
             <Specimen width={340}>
               <ApprovalCard title="Delete clip" detail="Remove the selected clip from Video 1. This can be undone." tool="delete_clip" diff={<DiffLine before="market-walk.mp4 · 00:00:24:08" after="removed" />} />
             </Specimen>
@@ -256,9 +260,9 @@ export default function AiAssistantPage(): Markup {
               />
             </Specimen>
           </ReviewFigure>
-          <ReviewFigure title="Export" caption="Export renders the sequence to a file; it asks before writing to disk.">
+          <ReviewFigure title="Export · editor-owned" caption="Export runs only in the editor process; the assistant gateway cannot produce an MP4. This state directs the user to the real action instead of pretending export succeeded.">
             <Specimen width={340}>
-              <ApprovalCard title="Export sequence" detail="Render Sequence 01 to an MP4 in the project folder." tool="export_video" diff={<DiffLine before="Sequence 01 · 00:00:42:00" after="city-after-hours.mp4 · 1080p" />} />
+              <LimitationCard title="Export is unavailable here" detail="Use Export in the editor's menu. This tool is registered for host integrations, not executed by the assistant gateway." />
             </Specimen>
           </ReviewFigure>
           <ReviewFigure title="Decided" caption="After a decision the card records the outcome: applied with undo, or rejected with no change.">
@@ -274,7 +278,7 @@ export default function AiAssistantPage(): Markup {
 
       <ReviewSection
         title="Skills"
-        caption="Skills are provider-agnostic production capabilities loaded from skills/. Picking one shapes the conversation and the tools the agent reaches for. They are instructions, not code, so every provider can use them — and the active skill is visible in the composer toolbar."
+        caption="The assistant selects one production skill at a time. Choosing another saves the current transcript and starts a new chat; the active skill remains visible in the composer toolbar. These six production skills expose provider-agnostic instructions, not executable code."
       >
         <div class="grid items-start gap-x-5 gap-y-6 md:grid-cols-[300px_minmax(0,1fr)]">
           <ReviewFigure title="The skill picker" caption="Opened from the composer's skill button. Each skill names what it does; the active one is checked.">
@@ -290,17 +294,16 @@ export default function AiAssistantPage(): Markup {
 
       <ReviewSection
         title="Tools and plugins"
-        caption={`The assistant reaches the editor through an MCP gateway: ${TOOL_COUNT} tools across project & media, timeline, captions, changesets, HyperFrames and export. Each is marked read or write, and the destructive ones carry an approval shield. Per-tool switches and additional MCP servers make the surface extensible without changing the editor.`}
+        caption={`Target inspection of the canonical MCP gateway: ${TOOL_COUNT} tools across project, timeline, captions, changesets, HyperFrames and the editor-owned export schema. Each is marked by mutation/approval metadata. This is a proposed inspector; no enable switches or extra-server controls appear until their enforcement and configuration backends exist.`}
       >
         <div class="grid items-start gap-x-5 gap-y-6 md:grid-cols-[320px_minmax(0,1fr)]">
-          <ReviewFigure title="The tool browser" caption="Opened from the composer or the status bar. Groups collapse; each tool shows read/write, an approval shield and an enable switch.">
+          <ReviewFigure title="The tool browser" caption="Target inspector for actual tool names, mutation status and approval requirements. Read/view only until per-tool policy is implemented.">
             <div class="h-[560px]"><ToolBrowser /></div>
           </ReviewFigure>
           <div class="max-w-[460px] space-y-3 self-start text-xs leading-5 text-ink/70">
             <p><strong class="text-ink">Read vs write.</strong> Read tools inspect project, timeline and media; write tools change them. The badge makes the distinction visible before a tool runs.</p>
-            <p><strong class="text-ink">The approval shield.</strong> <span class="font-mono">split_clip</span>, <span class="font-mono">delete_clip</span>, <span class="font-mono">propose_changeset</span>, <span class="font-mono">add_composition_to_timeline</span> and <span class="font-mono">export_video</span> always gate behind a card.</p>
-            <p><strong class="text-ink">HyperFrames is a tool group.</strong> Creating, rendering, validating and placing compositions are MCP tools like any other — the assistant makes motion graphics through the same gateway.</p>
-            <p><strong class="text-ink">Extensible.</strong> Additional MCP servers can be added; the editor's own tools stay canonical and revision-safe.</p>
+            <p><strong class="text-ink">Known limitation.</strong> <span class="font-mono">export_video</span> is described by the canonical schema but executions remain owned by the editor. The assistant reports that fact instead of claiming an export.</p>
+            <p><strong class="text-ink">Inspection only.</strong> Actual enablement and additional-server configuration require an authorized host policy layer; the proposed browser does not draw those controls yet.</p>
             <div class="rounded-[6px] border border-rule bg-white p-3 text-[11px] text-ink/70">
               <p class="mb-2 font-semibold text-ink">Gateway</p>
               <p class="font-mono">nodavideo · hyperframes</p>
@@ -312,21 +315,21 @@ export default function AiAssistantPage(): Markup {
 
       <ReviewSection
         title="The integrated terminal"
-        caption="For users who prefer the CLI, Codex and Claude Code run in the terminal dock with a tab per agent — there is room for it now that the assistant owns the window. Self-executing agents stream their own output here, but their timeline edits still surface as NodaVideo approval cards, so the editor keeps the canonical gate and the single undo stack. A plain shell tab is always available."
+        caption="Proposed infrastructure: a real PTY shell opened from the status bar or Ctrl+`, with later Codex/Claude tabs. Native CLI output is display-only. Interactive agent launches still require an approved MCP connection and live protocol verification before they can share NodaVideo's approval cards."
       >
         <div class="grid gap-x-5 gap-y-6 md:grid-cols-[repeat(2,620px)]">
-          <ReviewFigure title="Codex running" caption="The app-server agent analyzes media and previews a changeset, then requests approval in NodaVideo. The terminal narrates; the editor decides.">
+          <ReviewFigure title="Codex running · target" caption="Proposed terminal with a verified provider connection. Command/file approvals remain distinct from MCP editor mutations; the editor still owns its own gate.">
             <Terminal state="codex" />
           </ReviewFigure>
-          <ReviewFigure title="Claude Code · approval" caption="Claude creates and renders a composition, then asks to place it. The approval appears in the Assistant window, not as a terminal y/N.">
+          <ReviewFigure title="Claude Code · target" caption="A proposed integration, not current support. An interactive CLI must not be treated as a second way to execute reported editor tool activity.">
             <Terminal state="claude" />
           </ReviewFigure>
-          <ReviewFigure title="Plain shell" caption="A normal zsh tab for git, scripts and launching agents by hand. The terminal is a real shell, not a chat box.">
+          <ReviewFigure title="Plain shell · target" caption="A future real zsh PTY at the project root with correct terminal input/output and ownership—not a fake chat transcript.">
             <Terminal state="shell" />
           </ReviewFigure>
           <div class="max-w-[420px] space-y-3 self-start text-xs leading-5 text-ink/70">
-            <p><strong class="text-ink">Two ways in, one gate.</strong> Chat and terminal are two surfaces over the same MCP gateway. A mutation proposed in the terminal still raises an approval card in the editor.</p>
-            <p><strong class="text-ink">One undo stack.</strong> Whether an edit came from a session or a CLI agent, Cmd-Z reverses it in order. There is no second history to reconcile.</p>
+            <p><strong class="text-ink">Separate processes, explicit gate.</strong> Native CLI tool activity is not a host editor command. Only the shared MCP executor may mutate the timeline; native approvals remain command/file approvals.</p>
+            <p><strong class="text-ink">One editor undo stack.</strong> Every accepted host edit joins NodaVideo's existing timeline history. A terminal session never invents a second editor document or bypass permission path.</p>
             <p><strong class="text-ink">Tabs per agent.</strong> Codex, Claude Code and a shell coexist; the user can watch one agent while working in another.</p>
           </div>
         </div>

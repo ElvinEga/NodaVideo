@@ -1,6 +1,5 @@
 import type { Child, Markup } from "@design/jsx/jsx-runtime";
 import { NodaButton, NodaGlyph } from "./noda-shell.tsx";
-import { Checkbox, Switch } from "./panel.tsx";
 import {
   ALPHA_STYLE,
   COMPOSITION_FIXTURES,
@@ -16,7 +15,7 @@ import type { Composition } from "./motion-media.tsx";
 // the dock is gone. Identity stays the editor's indigo; motion results keep their amber.
 // Everything here is a static mock-up: states are drawn side by side, never scripted.
 
-export type ProviderId = "claude" | "codex" | "gemini" | "antigravity" | "mock";
+export type ProviderId = "claude" | "codex" | "gemini" | "antigravity" | "opencode" | "qoder" | "mock";
 export type ProviderStatus = "ready" | "signin" | "offline";
 
 export type Provider = {
@@ -33,8 +32,10 @@ export const PROVIDERS: Provider[] = [
   { id: "claude", name: "Claude Code", transport: "CLI", model: "Sonnet 4.5", status: "ready", hue: "#d97757" },
   { id: "codex", name: "Codex", transport: "App-Server", model: "GPT-5.4", status: "ready", hue: "#10a37f" },
   { id: "gemini", name: "Gemini CLI", transport: "ACP", model: "2.5 Pro", status: "ready", hue: "#4285f4" },
-  { id: "antigravity", name: "Antigravity", transport: "ACP", model: "Gemini 3 Pro", status: "signin", hue: "#a5b4fc" },
-  { id: "mock", name: "Mock Assistant", transport: "Offline", model: "Demo loop", status: "offline", hue: "#8a90a2" },
+  { id: "antigravity", name: "Antigravity (ACP)", transport: "ACP", model: "Provider default", status: "signin", hue: "#a5b4fc" },
+  { id: "opencode", name: "OpenCode", transport: "HTTP", model: "Provider default", status: "offline", hue: "#22d3ee" },
+  { id: "qoder", name: "Qoder CLI SDK", transport: "CLI SDK", model: "Provider default", status: "ready", hue: "#6366f1" },
+  { id: "mock", name: "Mock Assistant (Offline)", transport: "Offline", model: "Demo loop", status: "offline", hue: "#8a90a2" },
 ];
 
 export type Skill = { id: string; name: string; desc: string; icon: Parameters<typeof NodaGlyph>[0]["name"] };
@@ -170,7 +171,8 @@ function KeyCap({ children }: { children: Child }): Markup {
   );
 }
 
-/// A file attached to a message: kind icon, name, size and a remove control.
+/// A composer attachment with a kind and measured size. Removing it withdraws only the
+/// pending reference; it never deletes the source media.
 export function AttachmentChip(
   { name, kind, size }: { name: string; kind: "video" | "audio" | "image" | "file"; size: string },
 ): Markup {
@@ -366,10 +368,7 @@ export function ApprovalCard(
               <NodaButton label="Reject" />
             </div>
             {always && (
-              <label class="mt-2 flex items-center gap-1.5 text-[10px] text-muted">
-                <Checkbox checked={false} />
-                Always allow <span class="font-mono">{tool}</span>
-              </label>
+              <p class="mt-2 text-[10px] text-muted">One approval applies to this request only.</p>
             )}
           </>
         )}
@@ -416,6 +415,19 @@ export function ErrorCard(
         <NodaButton label="Retry" />
         <NodaButton label="Dismiss" />
       </div>
+    </div>
+  );
+}
+
+/// A limitation flags a real alternative workflow; it does not offer to retry an unavailable action.
+export function LimitationCard({ title, detail }: { title: string; detail: string }): Markup {
+  return (
+    <div class="rounded-[6px] border border-border bg-surface p-2.5">
+      <div class="flex items-center gap-2">
+        <span class="text-warning"><NodaGlyph name="warning" size={13} /></span>
+        <p class="text-[12px] font-medium text-text">{title}</p>
+      </div>
+      <p class="mt-1 text-[11px] text-subtle">{detail}</p>
     </div>
   );
 }
@@ -475,10 +487,7 @@ export function ModelMenu({ selected = "claude" }: { selected?: ProviderId }): M
         </div>
       ))}
       <div class="mt-1 border-t border-border pt-1">
-        <div role="menuitem" class="flex items-center gap-2 rounded-md px-3 py-2 text-[11px] text-muted">
-          <NodaGlyph name="sliders" size={13} />
-          Manage providers…
-        </div>
+        <p class="px-3 py-2 text-[10px] leading-4 text-muted">The assistant uses the seven installed providers.</p>
       </div>
     </div>
   );
@@ -486,8 +495,8 @@ export function ModelMenu({ selected = "claude" }: { selected?: ProviderId }): M
 
 const AUTONOMY: { id: AutonomyMode; name: string; icon: Parameters<typeof NodaGlyph>[0]["name"]; note: string }[] = [
   { id: "assist", name: "Assist", icon: "hand", note: "Proposes changes; you apply each one." },
-  { id: "collaborate", name: "Collaborate", icon: "shield", note: "Applies safe edits; asks before cuts and deletes." },
-  { id: "autonomous", name: "Autonomous", icon: "zap", note: "Runs a whole plan; still asks before destructive edits." },
+  { id: "collaborate", name: "Collaborate", icon: "shield", note: "Follows the host permission mode; asks when its policy requires." },
+  { id: "autonomous", name: "Autonomous", icon: "zap", note: "Runs with fewer prompts when supported; explicit editor approvals remain." },
 ];
 
 /// The autonomy button in the composer toolbar, BELOW the field. Autonomous tints amber
@@ -529,7 +538,7 @@ export function AutonomyMenu({ selected = "collaborate" }: { selected?: Autonomy
         </div>
       ))}
       <p class="border-t border-border px-3 py-2 text-[10px] leading-4 text-muted">
-        Destructive edits always ask, in every mode.
+        Editor-required approvals never disappear; unsupported provider modes are hidden.
       </p>
     </div>
   );
@@ -557,10 +566,7 @@ export function SkillMenu({ selected = "smart-cuts" }: { selected?: string }): M
         </div>
       ))}
       <div class="mt-1 border-t border-border pt-1">
-        <div role="menuitem" class="flex items-center gap-2 rounded-md px-3 py-2 text-[11px] text-muted">
-          <NodaGlyph name="folder" size={13} />
-          Browse skill library…
-        </div>
+        <p class="px-3 py-2 text-[10px] leading-4 text-muted">Only one production skill is active for a chat. Switching skills starts a new chat.</p>
       </div>
     </div>
   );
@@ -779,7 +785,7 @@ export function StatusBar({ terminal = false, pending = false }: { terminal?: bo
         )}
         <span class="flex items-center gap-1"><NodaGlyph name="play" size={11} />Actions<NodaGlyph name="chevron" size={10} /></span>
         <span class={`flex items-center gap-1 ${terminal ? "text-accent-soft" : ""}`}>
-          <NodaGlyph name="terminal" size={12} />Terminal
+          <NodaGlyph name="terminal" size={12} />Terminal <KeyCap>Ctrl + `</KeyCap>
         </span>
       </span>
     </div>
@@ -1003,8 +1009,8 @@ function TerminalBody({ state }: { state: TerminalState }): Markup {
   );
 }
 
-/// The tool & plugin browser: the MCP catalog grouped, each tool read/write and whether
-/// it needs approval, with a per-tool enable switch. The connection state is shown once.
+/// Target tool inspection: the real MCP catalog, read/write kind and approval requirement.
+/// No enable toggles are drawn until the editor can enforce them at execution time.
 export function ToolBrowser({ groups = TOOL_GROUPS }: { groups?: ToolGroup[] }): Markup {
   const count = groups.reduce((n, g) => n + g.tools.length, 0);
   return (
@@ -1032,7 +1038,6 @@ export function ToolBrowser({ groups = TOOL_GROUPS }: { groups?: ToolGroup[] }):
                 <span class="min-w-0 flex-1 truncate font-mono text-[10px] text-light">{tool.name}</span>
                 {tool.approval && <span class="text-accent-soft" title="Needs approval"><NodaGlyph name="shield" size={11} /></span>}
                 <KindBadge kind={tool.kind} />
-                <Switch on />
               </div>
             ))}
           </div>
@@ -1040,7 +1045,7 @@ export function ToolBrowser({ groups = TOOL_GROUPS }: { groups?: ToolGroup[] }):
       </div>
       <div class="flex h-8 shrink-0 items-center justify-between border-t border-border px-3 text-[9px] text-muted">
         <span>nodavideo · hyperframes</span>
-        <span class="flex items-center gap-1"><NodaGlyph name="plus" size={11} />Add server</span>
+        <span>Canonical tools · revision-safe</span>
       </div>
     </div>
   );
