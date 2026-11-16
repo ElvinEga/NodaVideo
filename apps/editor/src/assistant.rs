@@ -30,7 +30,7 @@ use futures::{FutureExt, StreamExt};
 use gpui::prelude::*;
 use gpui::{
     AsyncApp, ClipboardItem, Context, CursorStyle, Entity, FontWeight, ScrollHandle, Stateful,
-    Task, WeakEntity, Window, div, px, rgb, svg,
+    Task, WeakEntity, Window, div, img, px, rgb, svg,
 };
 use nodavideo_agent_acp::AcpAgentProvider;
 use nodavideo_agent_claude::ClaudeAgentProvider;
@@ -401,13 +401,7 @@ impl Editor {
                         is_live,
                         &assistant.group_overrides,
                     );
-                    assistant_activity_group_view(
-                        assistant,
-                        &entries[start..end],
-                        start,
-                        collapsed,
-                        cx,
-                    )
+                    assistant_activity_group_view(self, &entries[start..end], start, collapsed, cx)
                 } else {
                     assistant_entry_view(
                         first,
@@ -1002,11 +996,14 @@ impl Editor {
             cx.notify();
             return;
         };
-        self.assistant.push_entry(AssistantEntry::Info(if approved {
-            format!("Approved {}", approval.tool_name)
-        } else {
-            format!("Rejected {}", approval.tool_name)
-        }));
+        self.assistant.push_entry(AssistantEntry::ApprovalDecision {
+            request_id: approval.request_id.clone(),
+            title: approval.title.clone(),
+            tool_name: approval.tool_name.clone(),
+            parameters: approval.parameters.clone(),
+            approved,
+            automatic: false,
+        });
         self.assistant.scroll.scroll_to_bottom();
         cx.notify();
 
@@ -2329,6 +2326,7 @@ impl AssistantState {
                     Some(AssistantEntry::Thought(_))
                     | Some(AssistantEntry::User(_))
                     | Some(AssistantEntry::Tool { .. })
+                    | Some(AssistantEntry::ApprovalDecision { .. })
                     | Some(AssistantEntry::Info(_))
                     | Some(AssistantEntry::Error(_))
                     | None => false,
@@ -2346,6 +2344,7 @@ impl AssistantState {
                     Some(AssistantEntry::Message(_))
                     | Some(AssistantEntry::User(_))
                     | Some(AssistantEntry::Tool { .. })
+                    | Some(AssistantEntry::ApprovalDecision { .. })
                     | Some(AssistantEntry::Info(_))
                     | Some(AssistantEntry::Error(_))
                     | None => false,
@@ -2390,8 +2389,9 @@ impl AssistantState {
                 description,
                 tool_name,
                 command_summary,
-                parameters: _,
+                parameters,
             } => {
+                let parameters = parameters.to_string();
                 // In-process providers have no permission backend of their own, so the
                 // editor applies the selected mode here instead of showing a card.
                 let auto_decision = if self.provider_executes_in_process() {
@@ -2408,14 +2408,14 @@ impl AssistantState {
                 };
                 match auto_decision {
                     Some(approved) => {
-                        self.push_entry(AssistantEntry::Info(format!(
-                            "{} {tool_name}",
-                            if approved {
-                                "Auto-approved"
-                            } else {
-                                "Auto-rejected"
-                            }
-                        )));
+                        self.push_entry(AssistantEntry::ApprovalDecision {
+                            request_id: request_id.clone(),
+                            title,
+                            tool_name: tool_name.clone(),
+                            parameters,
+                            approved,
+                            automatic: true,
+                        });
                         if let Some(session) = self.session {
                             let runtime = self.runtime.clone();
                             gpui_tokio::Tokio::spawn(cx, async move {
@@ -2431,23 +2431,44 @@ impl AssistantState {
                         }
                     }
                     None => {
-                        self.push_entry(AssistantEntry::Info(format!(
-                            "Approval requested for {tool_name}"
-                        )));
                         self.pending_approval = Some(AssistantApproval {
                             request_id,
                             title,
                             description,
                             tool_name,
                             command_summary,
+                            parameters,
                         });
                     }
                 }
             }
             AgentEvent::ApprovalDecision {
                 request_id,
-                approved: _,
+                approved,
             } => {
+                let existing = self.entries.iter_mut().find(|entry| {
+                    matches!(entry, AssistantEntry::ApprovalDecision { request_id: id, .. } if id == &request_id)
+                });
+                if let Some(AssistantEntry::ApprovalDecision {
+                    approved: existing, ..
+                }) = existing
+                {
+                    *existing = approved;
+                } else if let Some(approval) = &self.pending_approval
+                    && approval.request_id == request_id
+                {
+                    let title = approval.title.clone();
+                    let tool_name = approval.tool_name.clone();
+                    let parameters = approval.parameters.clone();
+                    self.push_entry(AssistantEntry::ApprovalDecision {
+                        request_id: request_id.clone(),
+                        title,
+                        tool_name,
+                        parameters,
+                        approved,
+                        automatic: false,
+                    });
+                }
                 if self
                     .pending_approval
                     .as_ref()
@@ -2492,6 +2513,14 @@ pub(crate) enum AssistantEntry {
     },
     Info(String),
     Error(String),
+    ApprovalDecision {
+        request_id: String,
+        title: String,
+        tool_name: String,
+        parameters: String,
+        approved: bool,
+        automatic: bool,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -2507,6 +2536,14 @@ struct AssistantApproval {
     description: String,
     tool_name: String,
     command_summary: String,
+    parameters: String,
+}
+
+struct CompositionPreview<'a> {
+    name: &'a str,
+    template_id: &'a str,
+    thumbnail: Option<&'a Path>,
+    rendered_path: PathBuf,
 }
 
 /// Actions offered under a finished turn, derived from its transcript entries.
@@ -2895,6 +2932,14 @@ fn assistant_entry_view(
             .text_color(rgb(TEXT))
             .child(message.clone())
             .into_any_element(),
+        AssistantEntry::ApprovalDecision {
+            title,
+            tool_name,
+            parameters,
+            approved,
+            automatic,
+            ..
+        } => assistant_decision_card_view(title, tool_name, parameters, *approved, *automatic),
         AssistantEntry::Info(info) => div()
             .text_size(px(11.0))
             .line_height(px(16.0))
@@ -3125,6 +3170,95 @@ fn assistant_references_context(attachments: &[AssistantAttachment]) -> String {
     )
 }
 
+fn assistant_decision_detail(parameters: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(parameters).ok()?;
+    if parsed.is_null() || parsed == json!({}) {
+        return None;
+    }
+    let Value::Object(fields) = parsed else {
+        return Some(parameters.to_string());
+    };
+    let flattened = fields
+        .into_iter()
+        .map(|(key, value)| format!("{key}: {value}"))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    Some(flattened)
+}
+
+fn assistant_decision_card_view(
+    title: &str,
+    tool_name: &str,
+    parameters: &str,
+    approved: bool,
+    automatic: bool,
+) -> gpui::AnyElement {
+    let (color, label) = if approved {
+        (SUCCESS, "Approved")
+    } else {
+        (ERROR, "Rejected")
+    };
+    let header = if automatic {
+        format!("{label} automatically · {title}")
+    } else {
+        format!("{label} · {title}")
+    };
+    div()
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .p(px(8.0))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .child(
+                    svg()
+                        .path(if approved {
+                            IconName::CheckCircle.path()
+                        } else {
+                            IconName::Close.path()
+                        })
+                        .size(px(12.0))
+                        .text_color(rgb(color)),
+                )
+                .child(div().text_size(px(10.0)).text_color(rgb(color)).child(header))
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .font_family("monospace")
+                        .text_size(px(9.0))
+                        .text_color(rgb(MUTED))
+                        .child(tool_name.to_string()),
+                ),
+        )
+        .when_some(assistant_decision_detail(parameters), |this, detail| {
+            this.child(
+                div()
+                    .font_family("monospace")
+                    .text_size(px(9.0))
+                    .line_height(px(14.0))
+                    .text_color(rgb(MUTED))
+                    .child(detail),
+            )
+        })
+        .child(
+            div()
+                .text_size(px(9.0))
+                .text_color(rgb(MUTED))
+                .child(match (approved, automatic) {
+                    (false, _) => "No editor change was applied by this decision.",
+                    (true, false) => "You permitted the agent to proceed; tool outcomes are shown in its activity above.",
+                    (true, true) => "The configured permission mode permitted the agent to proceed; tool outcomes are shown in its activity above.",
+                }),
+        )
+        .into_any_element()
+}
+
 /// Only visibly long prompts take an expansion control; short messages stay compact.
 fn user_message_is_long(message: &str) -> bool {
     message.chars().count() > 240
@@ -3143,6 +3277,7 @@ fn assistant_entry_is_prose(entry: &AssistantEntry) -> bool {
         AssistantEntry::Message(_)
             | AssistantEntry::Thought(_)
             | AssistantEntry::Tool { .. }
+            | AssistantEntry::ApprovalDecision { .. }
             | AssistantEntry::Error(_)
     )
 }
@@ -3208,12 +3343,13 @@ fn assistant_group_collapsed(
 /// A run of consecutive tool/thought entries under one "Ran N tools" / "Thinking" header.
 /// The header collapses the whole run; each row inside expands independently.
 fn assistant_activity_group_view(
-    assistant: &AssistantState,
+    assistant_editor: &Editor,
     entries: &[AssistantEntry],
     start: usize,
     collapsed: bool,
     cx: &mut Context<Editor>,
 ) -> gpui::AnyElement {
+    let assistant = &assistant_editor.assistant;
     let tool_count = entries
         .iter()
         .filter(|entry| matches!(entry, AssistantEntry::Tool { .. }))
@@ -3278,24 +3414,29 @@ fn assistant_activity_group_view(
                         AssistantEntry::Tool {
                             call_id,
                             tool_name,
-                            arguments,
                             status,
                             result,
+                            ..
                         } => {
                             let expanded = assistant.expanded_tools.contains(call_id);
-                            assistant_tool_row_view(
-                                call_id,
+                            let composition_preview = assistant_composition_preview(
+                                result.as_deref(),
+                                assistant_editor,
                                 tool_name,
-                                arguments,
+                            );
+                            assistant_tool_row_view(
+                                entry,
                                 *status,
                                 result.as_deref(),
                                 expanded,
+                                composition_preview,
                                 cx,
                             )
                         }
                         AssistantEntry::User(_)
                         | AssistantEntry::Message(_)
                         | AssistantEntry::Info(_)
+                        | AssistantEntry::ApprovalDecision { .. }
                         | AssistantEntry::Error(_) => div().into_any_element(),
                     }
                 }),
@@ -3304,23 +3445,73 @@ fn assistant_activity_group_view(
         .into_any_element()
 }
 
+fn assistant_composition_preview<'a>(
+    result: Option<&str>,
+    editor: &'a Editor,
+    tool_name: &str,
+) -> Option<CompositionPreview<'a>> {
+    if tool_name != "render_composition" {
+        return None;
+    }
+    let result: Value = serde_json::from_str(result?).ok()?;
+    let composition_id = Ulid::from_string(result.get("composition_id")?.as_str()?).ok()?;
+    let asset = editor
+        .explorer
+        .compositions
+        .iter()
+        .find(|asset| asset.id == composition_id)?;
+    let raw_path = result.get("asset_path")?.as_str()?;
+    let path = Path::new(raw_path);
+    let rendered_path = match path.is_absolute() {
+        true => path.to_path_buf(),
+        false => editor.project_root.join(path),
+    };
+    if !assistant_generated_media_path(&rendered_path) {
+        return None;
+    }
+    let thumbnail = editor
+        .explorer
+        .composition_thumbs
+        .get(&composition_id)
+        .map(PathBuf::as_path);
+    Some(CompositionPreview {
+        name: &asset.name,
+        template_id: &asset.template_id,
+        thumbnail,
+        rendered_path,
+    })
+}
+
 /// One tool row: status icon, human label, a summary chip and a chevron. Clicking expands
 /// the real arguments and result in place — never a fabricated preview.
 fn assistant_tool_row_view(
-    call_id: &str,
-    tool_name: &str,
-    arguments: &str,
+    entry: &AssistantEntry,
     status: ToolStatus,
     result: Option<&str>,
     expanded: bool,
-    cx: &mut Context<Editor>,
+    composition_preview: Option<CompositionPreview<'_>>,
+    cx: &mut gpui::Context<Editor>,
 ) -> gpui::AnyElement {
+    let AssistantEntry::Tool {
+        call_id,
+        tool_name,
+        arguments,
+        ..
+    } = entry
+    else {
+        return div().into_any_element();
+    };
     let (icon, icon_color) = assistant_tool_status_icon(status);
     let (label, summary) = assistant_tool_label_and_summary(tool_name, arguments);
     let result_color = if status == ToolStatus::Failed {
         ERROR
     } else {
         MUTED
+    };
+    let (status_label, status_color) = match status {
+        ToolStatus::Running => ("Running", WARNING),
+        ToolStatus::Done => ("Done", SUCCESS),
+        ToolStatus::Failed => ("Failed", ERROR),
     };
     let toggle_id = call_id.to_string();
     div()
@@ -3364,6 +3555,15 @@ fn assistant_tool_row_view(
                                 .text_size(px(11.0))
                                 .text_color(rgb(TEXT))
                                 .child(label),
+                        )
+                        .child(
+                            div()
+                                .rounded(px(3.0))
+                                .bg(rgb(SURFACE))
+                                .px(px(5.0))
+                                .text_size(px(9.0))
+                                .text_color(rgb(status_color))
+                                .child(status_label),
                         )
                         .when(!summary.is_empty(), |this| {
                             this.child(
@@ -3418,6 +3618,45 @@ fn assistant_tool_row_view(
                                 .line_height(px(16.0))
                                 .text_color(rgb(result_color))
                                 .child(result.to_string()),
+                        )
+                    })
+                    .when_some(composition_preview, |this, preview| {
+                        this.child(
+                            div()
+                                .overflow_hidden()
+                                .rounded(px(4.0))
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgb(BACKGROUND))
+                                .child(
+                                    div()
+                                        .px(px(8.0))
+                                        .py(px(4.0))
+                                        .text_size(px(9.0))
+                                        .text_color(rgb(TEXT))
+                                        .child(preview.name.to_string()),
+                                )
+                                .when_some(preview.thumbnail, |this, path| {
+                                    this.child(
+                                        img(path.to_path_buf())
+                                            .w_full()
+                                            .h(px(120.0))
+                                            .bg(rgb(BACKGROUND))
+                                            .object_fit(gpui::ObjectFit::Contain),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .px(px(8.0))
+                                        .pb(px(5.0))
+                                        .text_size(px(9.0))
+                                        .text_color(rgb(MUTED))
+                                        .child(format!(
+                                            "{} · transparent still · {}",
+                                            preview.template_id,
+                                            preview.rendered_path.display()
+                                        )),
+                                ),
                         )
                     }),
             )
@@ -3607,6 +3846,7 @@ fn assistant_turn_actions(
             | AssistantEntry::Thought(_)
             | AssistantEntry::Tool { .. }
             | AssistantEntry::Info(_)
+            | AssistantEntry::ApprovalDecision { .. }
             | AssistantEntry::Error(_) => None,
         })
         .collect::<Vec<_>>()
