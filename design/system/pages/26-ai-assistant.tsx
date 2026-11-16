@@ -99,9 +99,9 @@ export default function AiAssistantPage(): Markup {
           <ReviewFigure title="Disabled" caption="While a decision is pending the composer dims and send is disabled; the controls stay visible but inert.">
             <Specimen width={560}><Composer state="disabled" /></Specimen>
           </ReviewFigure>
-          <ReviewFigure title="Attachment limit" caption="Rejected references report the actual constraint. A 20 MB text-reference ceiling is enforced on submission; native provider binary limits may be stricter and are reported by the provider.">
+          <ReviewFigure title="Attachment limit" caption="A 20 MB total selection-size limit is enforced before send. These are text path references, not binary uploads; media stays at its original location.">
             <Specimen width={560}>
-              <Composer state="empty" warning="attachments.txt exceeds the 20 MB text-reference limit." attachments={[{ name: "attachments.txt", kind: "file", size: "24 MB" }]} />
+              <Composer state="empty" warning="File references exceed the 20 MB total selection limit. Remove one or send fewer files." attachments={[{ name: "interview.mov", kind: "video", size: "412 MB" }]} />
             </Specimen>
           </ReviewFigure>
         </div>

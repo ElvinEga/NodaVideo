@@ -2,6 +2,7 @@ use crate::assistant::AssistantEntry;
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Datelike, Local, TimeZone};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,6 +25,25 @@ pub(crate) struct AssistantSession {
     pub(crate) updated_at_ms: u64,
     pub(crate) title: String,
     pub(crate) entries: Vec<AssistantEntry>,
+    /// Confirmed references attached to user turns. Older text-only sessions have none.
+    #[serde(default)]
+    pub(crate) attachments: HashMap<usize, Vec<AssistantAttachment>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct AssistantAttachment {
+    pub(crate) path: PathBuf,
+    pub(crate) name: String,
+    pub(crate) kind: AssistantAttachmentKind,
+    pub(crate) size_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) enum AssistantAttachmentKind {
+    Video,
+    Audio,
+    Image,
+    File,
 }
 
 #[derive(Clone)]
@@ -55,17 +75,30 @@ pub(crate) fn now_ms() -> u64 {
     }
 }
 
-pub(crate) fn session_title(entries: &[AssistantEntry]) -> String {
-    for entry in entries {
+pub(crate) fn session_title(
+    entries: &[AssistantEntry],
+    attachments: &HashMap<usize, Vec<AssistantAttachment>>,
+) -> String {
+    for (index, entry) in entries.iter().enumerate() {
         if let AssistantEntry::User(message) = entry {
             let trimmed = message.trim();
-            if trimmed.is_empty() {
-                continue;
+            if !trimmed.is_empty() {
+                return match trimmed.char_indices().nth(48) {
+                    Some((cut, _)) => format!("{}…", &trimmed[..cut]),
+                    None => trimmed.to_string(),
+                };
             }
-            return match trimmed.char_indices().nth(48) {
-                Some((cut, _)) => format!("{}…", &trimmed[..cut]),
-                None => trimmed.to_string(),
-            };
+            if let Some(attachments) = attachments.get(&index) {
+                let names = attachments
+                    .iter()
+                    .map(|attachment| attachment.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if names.chars().count() > 48 {
+                    return names.chars().take(48).collect::<String>() + "…";
+                }
+                return names;
+            }
         }
     }
     "New chat".to_string()

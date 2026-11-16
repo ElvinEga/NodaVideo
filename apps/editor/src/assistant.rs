@@ -2,8 +2,8 @@
 
 use crate::asset::IconName;
 use crate::assistant_history::{
-    AssistantSession, AssistantSessionMeta, load_session, load_session_metas, now_ms, save_session,
-    session_day_label, session_title,
+    AssistantAttachment, AssistantAttachmentKind, AssistantSession, AssistantSessionMeta,
+    load_session, load_session_metas, now_ms, save_session, session_day_label, session_title,
 };
 use crate::clip_placement::{DEFAULT_IMAGE_DURATION_SECONDS, validate_clip_placement};
 use crate::dialog_missing_media::missing_media_dialog;
@@ -62,6 +62,11 @@ pub(crate) struct AssistantState {
     /// Incremented when the session resets so a stale event pump stops applying events.
     session_generation: u64,
     entries: Vec<AssistantEntry>,
+    /// Paths the picker has validated but not sent yet; not a media-library import.
+    pending_attachments: Vec<AssistantAttachment>,
+    /// Confirmed references keyed by user-entry position, persisted alongside older text sessions.
+    session_attachments: HashMap<usize, Vec<AssistantAttachment>>,
+    attachment_error: Option<String>,
     pending_approval: Option<AssistantApproval>,
     input: Entity<TextInput>,
     scroll: ScrollHandle,
@@ -154,6 +159,9 @@ impl AssistantState {
             pending_cancellation: None,
             session_generation: 0,
             entries: Vec::new(),
+            pending_attachments: Vec::new(),
+            session_attachments: HashMap::new(),
+            attachment_error: None,
             pending_approval: None,
             input,
             scroll: ScrollHandle::new(),
@@ -401,7 +409,13 @@ impl Editor {
                         cx,
                     )
                 } else {
-                    assistant_entry_view(first, start, assistant, cx)
+                    assistant_entry_view(
+                        first,
+                        start,
+                        assistant,
+                        viewing.map(|session| &session.attachments),
+                        cx,
+                    )
                 };
                 // 完成回合的末尾挂动作行；进行中的尾部回合不显示，避免复制到半截回复。
                 let turn_completed = match entries.get(end) {
@@ -462,7 +476,9 @@ impl Editor {
 
         let input_empty = assistant.input.read(cx).text().trim().is_empty();
         let awaiting_decision = assistant.pending_approval.is_some();
-        let can_send = !input_empty && viewing.is_none() && !awaiting_decision;
+        let can_send = (!input_empty || !assistant.pending_attachments.is_empty())
+            && viewing.is_none()
+            && !awaiting_decision;
         let composer = div()
             .flex_shrink_0()
             .mx_3()
@@ -478,6 +494,34 @@ impl Editor {
             })
             .flex()
             .flex_col()
+            .when_some(assistant.attachment_error.as_ref(), |this, error| {
+                this.child(
+                    div()
+                        .px(px(10.0))
+                        .pt(px(8.0))
+                        .text_size(px(10.0))
+                        .line_height(px(16.0))
+                        .text_color(rgb(WARNING))
+                        .child(error.clone()),
+                )
+            })
+            .when(!assistant.pending_attachments.is_empty(), |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_1()
+                        .px(px(8.0))
+                        .pt(px(8.0))
+                        .children(
+                            assistant
+                                .pending_attachments
+                                .iter()
+                                .map(|attachment| assistant_attachment_chip_view(attachment, cx)),
+                        ),
+                )
+            })
             .child(
                 div()
                     .px(px(10.0))
@@ -500,7 +544,8 @@ impl Editor {
                     .px(px(8.0))
                     .py(px(8.0))
                     .when(!awaiting_decision, |this| {
-                        this.child(assistant_skill_button_view(assistant, cx))
+                        this.child(assistant_attachment_button_view(assistant.busy, cx))
+                            .child(assistant_skill_button_view(assistant, cx))
                             .child(assistant_model_button_view(assistant, cx))
                             .child(assistant_model_picker_view(assistant, cx))
                             .when(!assistant.effort_options().is_empty(), |this| {
@@ -556,6 +601,10 @@ impl Editor {
             "Viewing saved session · New chat to continue"
         } else if assistant.busy {
             "Working…"
+        } else if assistant.pending_approval.is_some() {
+            "Waiting for your decision"
+        } else if !assistant.pending_attachments.is_empty() {
+            "File references · not uploaded or copied"
         } else {
             "Ready"
         };
@@ -699,7 +748,12 @@ impl Editor {
             .into_any_element()
     }
 
-    pub(super) fn send_assistant_message(&mut self, message: String, cx: &mut Context<Self>) {
+    pub(super) fn send_assistant_message(
+        &mut self,
+        message: String,
+        pending_attachments: Vec<AssistantAttachment>,
+        cx: &mut Context<Self>,
+    ) {
         if self.assistant.busy
             || self.assistant.viewing.is_some()
             || self.assistant.pending_approval.is_some()
@@ -708,6 +762,14 @@ impl Editor {
         }
         self.assistant
             .push_entry(AssistantEntry::User(message.clone()));
+        self.assistant.pending_attachments.clear();
+        self.assistant.attachment_error = None;
+        if !pending_attachments.is_empty() {
+            self.assistant.session_attachments.insert(
+                self.assistant.entries.len() - 1,
+                pending_attachments.clone(),
+            );
+        }
         if self.assistant.transcript_id.is_none() {
             self.assistant.transcript_id = Some(Ulid::generate());
             self.assistant.transcript_created_at_ms = now_ms();
@@ -759,13 +821,22 @@ impl Editor {
         // along on the first message of a session. A reused session already carries them; a
         // skill change resets the session, so this never disagrees with the composer button.
         let instructions = self.assistant.skills.build_combined_instructions();
+        // Providers accept text rather than binary uploads; do not copy media or claim an upload.
+        let message_with_references = if pending_attachments.is_empty() {
+            message.clone()
+        } else {
+            format!(
+                "{message}\n\n{}",
+                assistant_references_context(&pending_attachments)
+            )
+        };
         let outgoing_message = if existing_session.is_none()
             && resume_session_id.is_none()
             && !instructions.is_empty()
         {
-            format!("{}\n\n{}", instructions.trim_end(), message)
+            format!("{}\n\n{}", instructions.trim_end(), message_with_references)
         } else {
-            message
+            message_with_references
         };
 
         let startup = cx.spawn(async move |editor, cx| {
@@ -1134,6 +1205,9 @@ impl Editor {
         self.persist_assistant_transcript(cx);
         let previous_session = self.assistant.reset_session();
         self.assistant.entries.clear();
+        self.assistant.pending_attachments.clear();
+        self.assistant.session_attachments.clear();
+        self.assistant.attachment_error = None;
         self.assistant.expanded_tools.clear();
         self.assistant.expanded_thoughts.clear();
         self.assistant.group_overrides.clear();
@@ -1182,8 +1256,9 @@ impl Editor {
             native_session_id: self.assistant.native_session_id.clone(),
             created_at_ms: self.assistant.transcript_created_at_ms,
             updated_at_ms: now_ms(),
-            title: session_title(&self.assistant.entries),
+            title: session_title(&self.assistant.entries, &self.assistant.session_attachments),
             entries: self.assistant.entries.clone(),
+            attachments: self.assistant.session_attachments.clone(),
         };
         let project_root = self.project_root.clone();
         cx.spawn(async move |editor, cx| {
@@ -1255,16 +1330,27 @@ impl Editor {
                         });
                         match resumable_provider {
                             Some(index) => {
+                                let AssistantSession {
+                                    model,
+                                    effort,
+                                    native_session_id,
+                                    id,
+                                    created_at_ms,
+                                    entries,
+                                    attachments,
+                                    ..
+                                } = session;
                                 editor.assistant.viewing = None;
                                 editor.persist_assistant_transcript(cx);
                                 let previous_session = editor.assistant.reset_session();
                                 editor.assistant.provider_index = index;
-                                editor.assistant.model_choices[index] = session.model;
-                                editor.assistant.effort_choices[index] = session.effort;
-                                editor.assistant.entries = session.entries;
-                                editor.assistant.transcript_id = Some(session.id);
-                                editor.assistant.transcript_created_at_ms = session.created_at_ms;
-                                editor.assistant.native_session_id = session.native_session_id;
+                                editor.assistant.model_choices[index] = model;
+                                editor.assistant.effort_choices[index] = effort;
+                                editor.assistant.entries = entries;
+                                editor.assistant.session_attachments = attachments;
+                                editor.assistant.transcript_id = Some(id);
+                                editor.assistant.transcript_created_at_ms = created_at_ms;
+                                editor.assistant.native_session_id = native_session_id;
                                 editor.assistant.last_turn_elapsed = None;
                                 editor.assistant.provider_menu_open = false;
                                 editor.assistant.model_menu_open = false;
@@ -1280,7 +1366,9 @@ impl Editor {
                         editor.assistant.expanded_tools.clear();
                         editor.assistant.expanded_thoughts.clear();
                         editor.assistant.group_overrides.clear();
+                        editor.assistant.expanded_user_messages.clear();
                         editor.assistant.expanded_approvals.clear();
+                        editor.assistant.copied_turn = None;
                         editor.assistant.scroll.scroll_to_bottom();
                         cx.notify();
                     }) {
@@ -1296,6 +1384,8 @@ impl Editor {
     pub(super) fn resume_live_assistant(&mut self, cx: &mut Context<Self>) {
         self.assistant.viewing = None;
         self.assistant.expanded_thoughts.clear();
+        self.assistant.expanded_user_messages.clear();
+        self.assistant.copied_turn = None;
         self.assistant.group_overrides.clear();
         self.assistant.expanded_approvals.clear();
         self.assistant.scroll.scroll_to_bottom();
@@ -1677,12 +1767,102 @@ impl Editor {
         .detach();
     }
 
+    fn ui_callback_select_assistant_attachments(&mut self, cx: &mut Context<Self>) {
+        if self.assistant.busy || self.assistant.viewing.is_some() {
+            return;
+        }
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Reference files in your assistant message (they are not copied)".into()),
+        });
+        cx.spawn(async move|editor,cx| {
+            let paths = match receiver.await {
+                Ok(Ok(Some(paths))) => paths,
+                Ok(Ok(None)) => return,
+                Ok(Err(error)) => {
+                    log::error!("Attachment picker failed: {error:?}");
+                    return;
+                }
+                Err(error) => {
+                    log::error!("Attachment picker failed: {error:?}");
+                    return;
+                }
+            };
+            if paths.is_empty() {
+                return;
+            }
+            let inspected: Vec<(PathBuf, Result<AssistantAttachment>)> = cx
+                .background_executor()
+                .spawn(async move {
+                    paths
+                        .into_iter()
+                        .map(|path| {
+                            let inspected = inspect_assistant_attachment(&path);
+                            (path, inspected)
+                        })
+                        .collect()
+                })
+                .await;
+            if let Err(error) = editor.update(cx, |editor, cx| {
+                if editor.assistant.busy || editor.assistant.viewing.is_some() {
+                    return;
+                }
+                let mut errors: Vec<String> = Vec::new();
+                for (path, inspected) in inspected {
+                    match inspected {
+                        Ok(attachment) => {
+                            if !editor
+                                .assistant
+                                .pending_attachments
+                                .iter()
+                                .any(|existing| existing.path == attachment.path)
+                            {
+                                editor.assistant.pending_attachments.push(attachment);
+                            }
+                        }
+                        Err(error) => errors.push(format!("{}: {error}", path.display())),
+                    }
+                }
+                let total_bytes = editor.assistant.pending_attachments_total_bytes();
+                const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
+                if total_bytes > MAX_ATTACHMENT_BYTES {
+                    errors.push(format!(
+                        "File references exceed the 20 MB total selection limit (currently {}). Remove one or send fewer files.",
+                        assistant_file_size(total_bytes)
+                    ));
+                }
+                editor.assistant.attachment_error = match errors.is_empty() {
+                    true => None,
+                    false => Some(errors.join(" ")),
+                };
+                cx.notify();
+            }) {
+                log::debug!("editor released: {error:?}");
+            }
+        })
+        .detach();
+    }
+
+    fn ui_callback_remove_assistant_attachment(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.assistant
+            .pending_attachments
+            .retain(|attachment| attachment.path != path);
+        self.assistant.attachment_error = self
+            .assistant
+            .validate_assistant_attachments()
+            .err()
+            .map(|error| error.to_string());
+        cx.notify();
+    }
+
     fn ui_callback_submit_assistant_message(&mut self, cx: &mut Context<Self>) {
         if self.assistant.busy || self.assistant.pending_approval.is_some() {
             return;
         }
         let message = self.assistant.input.read(cx).text().trim().to_string();
-        if message.is_empty() {
+        if message.is_empty() && self.assistant.pending_attachments.is_empty() {
             return;
         }
         let provider_unavailable =
@@ -1696,8 +1876,21 @@ impl Editor {
             cx.notify();
             return;
         }
+        let pending_attachments = self.assistant.pending_attachments.clone();
+        if let Err(error) = self.assistant.validate_assistant_attachments() {
+            self.assistant.attachment_error = Some(error.to_string());
+            cx.notify();
+            return;
+        }
+        self.assistant.attachment_error = None;
         self.assistant.input.update(cx, |input, cx| input.clear(cx));
-        self.emit_event(cx, AppEvent::AssistantMessageSubmitted { message });
+        self.emit_event(
+            cx,
+            AppEvent::AssistantMessageSubmitted {
+                message,
+                attachments: pending_attachments,
+            },
+        );
     }
 
     fn ui_callback_copy_response(
@@ -2039,6 +2232,29 @@ impl AssistantState {
         }
     }
 
+    fn pending_attachments_total_bytes(&self) -> u64 {
+        self.pending_attachments
+            .iter()
+            .map(|attachment| attachment.size_bytes)
+            .sum()
+    }
+
+    /// Validation precedes text clearing so an oversize draft can be reduced, not discarded.
+    fn validate_assistant_attachments(&self) -> Result<()> {
+        const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
+        let total_bytes = self.pending_attachments_total_bytes();
+        if total_bytes > MAX_ATTACHMENT_BYTES {
+            return Err(anyhow!(
+                "File references exceed the 20 MB total selection limit (currently {}). Remove one or send fewer files.",
+                assistant_file_size(total_bytes)
+            ));
+        }
+        if let Some(error) = &self.attachment_error {
+            return Err(anyhow!(error.clone()));
+        }
+        Ok(())
+    }
+
     fn push_entry(&mut self, entry: AssistantEntry) {
         const MAX_ENTRIES: usize = 400;
         if self.entries.len() >= MAX_ENTRIES {
@@ -2048,6 +2264,15 @@ impl AssistantState {
             self.group_overrides = shift_group_overrides(&self.group_overrides);
             self.copied_turn = self.copied_turn.and_then(|index| index.checked_sub(1));
             self.expanded_user_messages = shift_expansion_indices(&self.expanded_user_messages);
+            self.session_attachments = self
+                .session_attachments
+                .iter()
+                .filter_map(|(index, attachments)| {
+                    index
+                        .checked_sub(1)
+                        .map(|new_index| (new_index, attachments.clone()))
+                })
+                .collect();
         }
         self.entries.push(entry);
     }
@@ -2586,10 +2811,14 @@ fn assistant_entry_view(
     entry: &AssistantEntry,
     index: usize,
     assistant: &AssistantState,
+    saved_attachments: Option<&HashMap<usize, Vec<AssistantAttachment>>>,
     cx: &mut Context<Editor>,
 ) -> gpui::AnyElement {
     match entry {
         AssistantEntry::User(message) => {
+            let confirmed_references = saved_attachments
+                .unwrap_or(&assistant.session_attachments)
+                .get(&index);
             let is_long = user_message_is_long(message);
             let expanded = assistant.expanded_user_messages.contains(&index);
             let shown_message = if is_long && !expanded {
@@ -2612,6 +2841,15 @@ fn assistant_entry_view(
                         .text_size(px(11.0))
                         .line_height(px(20.0))
                         .text_color(rgb(TEXT))
+                        .when_some(confirmed_references, |this, attachments| {
+                            this.child(
+                                div().flex().flex_wrap().gap_1().mb_2().children(
+                                    attachments
+                                        .iter()
+                                        .map(assistant_confirmed_attachment_chip_view),
+                                ),
+                            )
+                        })
                         .child(shown_message)
                         .when(is_long, move |this| {
                             this.child(
@@ -2690,6 +2928,201 @@ fn assistant_entry_view(
             .into_any_element(),
         AssistantEntry::Thought(_) | AssistantEntry::Tool { .. } => div().into_any_element(),
     }
+}
+
+/// Inspects just the selected file's location and size; no media decoding or copying happens.
+fn inspect_assistant_attachment(path: &Path) -> Result<AssistantAttachment> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let metadata = std::fs::metadata(&canonical)?;
+    if !metadata.is_file() {
+        return Err(anyhow!("Choose a file, not a directory."));
+    }
+    let name = canonical
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| canonical.display().to_string());
+    let extension = canonical
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let kind = match extension.as_str() {
+        "mp4" | "mov" | "m4v" | "mkv" | "avi" | "webm" => AssistantAttachmentKind::Video,
+        "mp3" | "wav" | "aac" | "flac" | "ogg" => AssistantAttachmentKind::Audio,
+        "png" | "jpg" | "jpeg" | "webp" => AssistantAttachmentKind::Image,
+        _ => AssistantAttachmentKind::File,
+    };
+    Ok(AssistantAttachment {
+        path: canonical,
+        name,
+        kind,
+        size_bytes: metadata.len(),
+    })
+}
+
+fn assistant_file_size(bytes: u64) -> String {
+    match bytes {
+        value if value >= 1024 * 1024 * 1024 => {
+            format!("{:.1} GB", value as f64 / (1024.0 * 1024.0 * 1024.0))
+        }
+        value if value >= 1024 * 1024 => format!("{:.1} MB", value as f64 / (1024.0 * 1024.0)),
+        value if value >= 1024 => format!("{:.0} KB", value / 1024),
+        value => format!("{value} B"),
+    }
+}
+
+fn assistant_confirmed_attachment_chip_view(attachment: &AssistantAttachment) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .max_w(px(200.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .px(px(6.0))
+        .h(px(22.0))
+        .child(assistant_attachment_icon(attachment.kind))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .text_size(px(9.0))
+                .text_color(rgb(TEXT))
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(attachment.name.clone()),
+        )
+        .child(
+            div()
+                .font_family("monospace")
+                .text_size(px(9.0))
+                .text_color(rgb(MUTED))
+                .child(assistant_file_size(attachment.size_bytes)),
+        )
+}
+
+fn assistant_attachment_button_view(busy: bool, cx: &mut Context<Editor>) -> Stateful<gpui::Div> {
+    div()
+        .id("assistant-attach-files")
+        .h(px(28.0))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .opacity(if busy {
+            0.4
+        } else {
+            1.0
+        })
+        .when(!busy, |this| {
+            this.cursor(CursorStyle::PointingHand)
+                .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                .on_click(cx.listener(|editor, _, _, cx| {
+                    editor.ui_callback_select_assistant_attachments(cx);
+                }))
+        })
+        .child(
+            svg()
+                .path(IconName::Plus.path())
+                .size(px(13.0))
+                .text_color(rgb(MUTED)),
+        )
+}
+
+fn assistant_attachment_chip_view(
+    attachment: &AssistantAttachment,
+    cx: &mut Context<Editor>,
+) -> gpui::AnyElement {
+    let path = attachment.path.clone();
+    div()
+        .id(format!(
+            "assistant-attachment-{}",
+            attachment.path.display()
+        ))
+        .flex()
+        .items_center()
+        .gap_1()
+        .max_w(px(220.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .px(px(6.0))
+        .h(px(24.0))
+        .child(assistant_attachment_icon(attachment.kind))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .text_size(px(10.0))
+                .text_color(rgb(TEXT))
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(attachment.name.clone()),
+        )
+        .child(
+            div()
+                .font_family("monospace")
+                .text_size(px(9.0))
+                .text_color(rgb(MUTED))
+                .child(assistant_file_size(attachment.size_bytes)),
+        )
+        .child(
+            div()
+                .id(format!(
+                    "assistant-remove-attachment-{}",
+                    attachment.path.display()
+                ))
+                .size(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(3.0))
+                .cursor(CursorStyle::PointingHand)
+                .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                .on_click(cx.listener(move |editor, _, _, cx| {
+                    editor.ui_callback_remove_assistant_attachment(path.clone(), cx);
+                }))
+                .child(
+                    svg()
+                        .path(IconName::Close.path())
+                        .size(px(10.0))
+                        .text_color(rgb(MUTED)),
+                ),
+        )
+        .into_any_element()
+}
+
+fn assistant_attachment_icon(kind: AssistantAttachmentKind) -> gpui::Svg {
+    let icon = match kind {
+        AssistantAttachmentKind::Video => IconName::Video,
+        AssistantAttachmentKind::Audio => IconName::Mic,
+        AssistantAttachmentKind::Image => IconName::PickerGlow,
+        AssistantAttachmentKind::File => IconName::Text,
+    };
+    svg().path(icon.path()).size(px(11.0)).text_color(rgb(LINK))
+}
+
+/// Converts the user's selected files into explicit textual references for text-only providers.
+fn assistant_references_context(attachments: &[AssistantAttachment]) -> String {
+    let references = attachments
+        .iter()
+        .map(|attachment| {
+            format!(
+                "- {} · path: {} · {} bytes",
+                attachment.name,
+                attachment.path.display(),
+                attachment.size_bytes
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "User-provided file references (not uploaded file contents; files were not copied or imported):\n{references}\nUse these paths for any inspection or approved editor operation. If a referenced file is missing or you lack permission to read it, report that instead of inventing its contents."
+    )
 }
 
 /// Only visibly long prompts take an expansion control; short messages stay compact.
@@ -4236,7 +4669,7 @@ fn assistant_sessions_sidebar_view(
                 "assistant-live-session".to_string(),
                 None,
                 provider.hue,
-                &session_title(&assistant.entries),
+                &session_title(&assistant.entries, &assistant.session_attachments),
                 format!(
                     "{} · {} messages",
                     provider.display_name,

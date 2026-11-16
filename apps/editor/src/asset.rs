@@ -10,6 +10,7 @@ pub(crate) enum IconName {
     CheckCircle,
     ChevronDown,
     ChevronRight,
+    Close,
     Copy,
     Edit,
     Expand,
@@ -56,6 +57,7 @@ impl IconName {
             Self::CheckCircle => "icons/check-circle.svg",
             Self::ChevronDown => "icons/chevron-down.svg",
             Self::ChevronRight => "icons/chevron-right.svg",
+            Self::Close => "icons/close.svg",
             Self::Copy => "icons/copy.svg",
             Self::Edit => "icons/edit.svg",
             Self::Expand => "icons/expand.svg",
@@ -116,7 +118,7 @@ impl AssetSource for EditorAssets {
 
 // Private APIs only
 impl IconName {
-    const ALL: [Self; 40] = [
+    const ALL: [Self; 41] = [
         Self::AlertTriangle,
         Self::App,
         Self::ArrowDown,
@@ -124,6 +126,7 @@ impl IconName {
         Self::CheckCircle,
         Self::ChevronDown,
         Self::ChevronRight,
+        Self::Close,
         Self::Copy,
         Self::Edit,
         Self::Expand,
@@ -168,6 +171,7 @@ impl IconName {
             Self::CheckCircle => include_bytes!("../../../icons/check-circle.svg"),
             Self::ChevronDown => include_bytes!("../../../icons/chevron-down.svg"),
             Self::ChevronRight => include_bytes!("../../../icons/chevron-right.svg"),
+            Self::Close => include_bytes!("../../../icons/close.svg"),
             Self::Copy => include_bytes!("../../../icons/copy.svg"),
             Self::Edit => include_bytes!("../../../icons/edit.svg"),
             Self::Expand => include_bytes!("../../../icons/expand.svg"),
