@@ -2,6 +2,7 @@ use crate::assistant::AssistantEntry;
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Datelike, Local, TimeZone};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,10 +18,32 @@ pub(crate) struct AssistantSession {
     /// Reasoning-effort variant the transcript ran with; None means the model default.
     #[serde(default)]
     pub(crate) effort: Option<String>,
+    /// Provider-owned conversation id; absent in older, non-resumable transcripts.
+    #[serde(default)]
+    pub(crate) native_session_id: Option<String>,
     pub(crate) created_at_ms: u64,
     pub(crate) updated_at_ms: u64,
     pub(crate) title: String,
     pub(crate) entries: Vec<AssistantEntry>,
+    /// Confirmed references attached to user turns. Older text-only sessions have none.
+    #[serde(default)]
+    pub(crate) attachments: HashMap<usize, Vec<AssistantAttachment>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct AssistantAttachment {
+    pub(crate) path: PathBuf,
+    pub(crate) name: String,
+    pub(crate) kind: AssistantAttachmentKind,
+    pub(crate) size_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) enum AssistantAttachmentKind {
+    Video,
+    Audio,
+    Image,
+    File,
 }
 
 #[derive(Clone)]
@@ -52,17 +75,30 @@ pub(crate) fn now_ms() -> u64 {
     }
 }
 
-pub(crate) fn session_title(entries: &[AssistantEntry]) -> String {
-    for entry in entries {
+pub(crate) fn session_title(
+    entries: &[AssistantEntry],
+    attachments: &HashMap<usize, Vec<AssistantAttachment>>,
+) -> String {
+    for (index, entry) in entries.iter().enumerate() {
         if let AssistantEntry::User(message) = entry {
             let trimmed = message.trim();
-            if trimmed.is_empty() {
-                continue;
+            if !trimmed.is_empty() {
+                return match trimmed.char_indices().nth(48) {
+                    Some((cut, _)) => format!("{}…", &trimmed[..cut]),
+                    None => trimmed.to_string(),
+                };
             }
-            return match trimmed.char_indices().nth(48) {
-                Some((cut, _)) => format!("{}…", &trimmed[..cut]),
-                None => trimmed.to_string(),
-            };
+            if let Some(attachments) = attachments.get(&index) {
+                let names = attachments
+                    .iter()
+                    .map(|attachment| attachment.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if names.chars().count() > 48 {
+                    return names.chars().take(48).collect::<String>() + "…";
+                }
+                return names;
+            }
         }
     }
     "New chat".to_string()
@@ -82,14 +118,20 @@ pub(crate) fn load_session_metas(project_root: &Path) -> Vec<AssistantSessionMet
         let contents = match fs::read_to_string(&path) {
             Ok(contents) => contents,
             Err(error) => {
-                log::warn!("Skipping unreadable assistant session {}: {error:?}", path.display());
+                log::warn!(
+                    "Skipping unreadable assistant session {}: {error:?}",
+                    path.display()
+                );
                 continue;
             }
         };
         let session: AssistantSession = match serde_json::from_str(&contents) {
             Ok(session) => session,
             Err(error) => {
-                log::warn!("Skipping invalid assistant session {}: {error:?}", path.display());
+                log::warn!(
+                    "Skipping invalid assistant session {}: {error:?}",
+                    path.display()
+                );
                 continue;
             }
         };
@@ -103,8 +145,10 @@ pub(crate) fn load_session(project_root: &Path, id: Ulid) -> Result<AssistantSes
     let path = session_path(project_root, id);
     let contents = fs::read_to_string(&path)
         .with_context(|| format!("could not read assistant session {}", path.display()))?;
-    serde_json::from_str(&contents)
-        .with_context(|| format!("could not parse assistant session {}", path.display()))
+    let session: AssistantSession = serde_json::from_str(&contents)
+        .with_context(|| format!("could not parse assistant session {}", path.display()))?;
+    let entries = clean_legacy_approval_entries(session.entries);
+    Ok(AssistantSession { entries, ..session })
 }
 
 pub(crate) fn save_session(project_root: &Path, session: &AssistantSession) -> Result<()> {
@@ -151,4 +195,27 @@ fn session_path(project_root: &Path, id: Ulid) -> PathBuf {
 
 fn local_datetime(ms: u64) -> Option<DateTime<Local>> {
     Local.timestamp_millis_opt(ms as i64).single()
+}
+
+/// Shortens legacy approval-request JSON dumps to the tool label and drops redundant decision echoes.
+fn clean_legacy_approval_entries(entries: Vec<AssistantEntry>) -> Vec<AssistantEntry> {
+    entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            AssistantEntry::Info(info) => {
+                if info == "The agent received the approval."
+                    || info == "The agent received the rejection."
+                {
+                    return None;
+                }
+                if info.starts_with("Approval requested for ")
+                    && let Some((prefix, _)) = info.split_once(": {")
+                {
+                    return Some(AssistantEntry::Info(prefix.to_string()));
+                }
+                Some(AssistantEntry::Info(info))
+            }
+            other => Some(other),
+        })
+        .collect()
 }

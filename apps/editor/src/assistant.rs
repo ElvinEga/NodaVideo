@@ -1,55 +1,74 @@
 //! AI assistant window: provider cycling, streamed conversation, and approval cards.
 
+use crate::actions::ToggleTerminal;
 use crate::asset::IconName;
 use crate::assistant_history::{
-    AssistantSession, AssistantSessionMeta, load_session, load_session_metas, now_ms, save_session,
-    session_day_label, session_title,
+    AssistantAttachment, AssistantAttachmentKind, AssistantSession, AssistantSessionMeta,
+    load_session, load_session_metas, now_ms, save_session, session_day_label, session_title,
 };
-use crate::edit_action::EditAction;
+use crate::clip_placement::{DEFAULT_IMAGE_DURATION_SECONDS, validate_clip_placement};
+use crate::dialog_missing_media::missing_media_dialog;
+use crate::edit_action::{EditAction, edit_timeline};
 use crate::editor::Editor;
 use crate::event_bus::AppEvent;
+use crate::explorer::save_imported_media;
+use crate::preview::{PreviewTarget, timeline_preview_target};
+use crate::property_panel::current_property_panel;
+use crate::terminal::terminal_dock_view;
 use crate::theme::{
     ACCENT, ACCENT_BACKGROUND, BACKGROUND, BORDER, ERROR, LINK, MUTED, PANEL, SUCCESS, SURFACE,
     SURFACE_HOVER, TEXT, WARNING,
 };
+use crate::timeline::{TimelineFrameIndex, TimelineRuntimeState};
+use crate::track::TrackKind;
 use crate::ui_components::TextInput;
 use crate::ui_components::cyberpunk_button::{
     button_cyberpunk_primary, button_cyberpunk_secondary,
 };
-use anyhow::Result;
-use futures::StreamExt;
+use anyhow::{Result, anyhow, bail};
 use futures::channel::mpsc;
+use futures::future::Shared;
+use futures::{FutureExt, StreamExt};
 use gpui::prelude::*;
 use gpui::{
-    AsyncApp, Context, CursorStyle, Entity, FontWeight, ScrollHandle, Stateful, WeakEntity, Window,
-    div, px, rgb, svg,
+    AsyncApp, ClipboardItem, Context, CursorStyle, Entity, FontWeight, ScrollHandle, Stateful,
+    Task, WeakEntity, Window, div, img, px, rgb, svg,
 };
 use nodavideo_agent_acp::AcpAgentProvider;
 use nodavideo_agent_claude::ClaudeAgentProvider;
 use nodavideo_agent_codex::CodexAgentProvider;
 use nodavideo_agent_opencode::OpenCodeAgentProvider;
+use nodavideo_agent_qoder::QoderAgentProvider;
 use nodavideo_agent_runtime::{
-    AgentConfig, AgentEvent, AgentModel, AgentRuntime, MockAgentProvider, PermissionMode, SessionId,
+    AgentConfig, AgentEvent, AgentModel, AgentRuntime, AgentTool, MockAgentProvider,
+    PermissionMode, SessionId, ToolCallAuthorization,
 };
 use nodavideo_hyperframes_bridge::{CompositionAsset, load_compositions};
-use nodavideo_mcp_server::{ExplorerChange, McpError, McpExecutor};
+use nodavideo_mcp_server::{ExplorerChange, McpError, McpExecutor, McpToolDefinition};
 use nodavideo_skill_registry::{SkillPackage, SkillRegistry};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use timeline::{Asset, TimelineEditingState};
+use timeline::{Asset, MediaKind, TimelineEditingState};
 use ulid::Ulid;
 
 pub(crate) struct AssistantState {
     runtime: AgentRuntime,
     provider_index: usize,
     session: Option<SessionId>,
-    /// Incremented when the provider changes so a stale event pump stops applying events.
+    native_session_id: Option<String>, // 提供方的持久会话标识；Stop 后保留以便续聊。
+    pending_cancellation: Option<Shared<Task<()>>>, // 启动与关闭串行，避免两个进程恢复同一原生会话。
+    /// Incremented when the session resets so a stale event pump stops applying events.
     session_generation: u64,
     entries: Vec<AssistantEntry>,
+    /// Paths the picker has validated but not sent yet; not a media-library import.
+    pending_attachments: Vec<AssistantAttachment>,
+    /// Confirmed references keyed by user-entry position, persisted alongside older text sessions.
+    session_attachments: HashMap<usize, Vec<AssistantAttachment>>,
+    attachment_error: Option<String>,
     pending_approval: Option<AssistantApproval>,
     input: Entity<TextInput>,
     scroll: ScrollHandle,
@@ -57,6 +76,7 @@ pub(crate) struct AssistantState {
     provider_menu_open: bool,
     /// Per-provider readiness probe: None until `is_available` answers. 与 entries 无关，可跨会话缓存。
     provider_readiness: Vec<Option<bool>>,
+    provider_details: Vec<Option<String>>,
     /// Per-provider model catalog, queried from the provider itself; cached across sessions.
     model_catalogs: Vec<ModelCatalog>,
     /// Per-provider chosen model id; None means the provider's default model.
@@ -87,6 +107,10 @@ pub(crate) struct AssistantState {
     turn_started_at: Option<Instant>,
     /// How long the most recent finished turn took; shown in its speaker header.
     last_turn_elapsed: Option<Duration>,
+    /// Turn start index whose Copy action just fired; drives the transient "Copied" label.
+    copied_turn: Option<usize>,
+    /// Original entry positions of expanded user messages; only long copies can expand.
+    expanded_user_messages: HashSet<usize>,
     /// Saved sessions of the open project, newest first; refreshed after every save.
     history: Vec<AssistantSessionMeta>,
     /// A saved transcript replayed read-only; None shows the live thread.
@@ -97,6 +121,10 @@ pub(crate) struct AssistantState {
 }
 
 pub(crate) fn register_assistant_providers(runtime: &AgentRuntime, cx: &mut Context<Editor>) {
+    let qoder = match std::env::var("NODAVIDEO_QODER_BIN") {
+        Ok(binary) => QoderAgentProvider::new("qoder", "Qoder (CLI)", binary),
+        Err(_) => QoderAgentProvider::default(),
+    };
     let runtime = runtime.clone();
     gpui_tokio::Tokio::spawn(cx, async move {
         runtime
@@ -117,6 +145,7 @@ pub(crate) fn register_assistant_providers(runtime: &AgentRuntime, cx: &mut Cont
         runtime
             .register_provider(Arc::new(OpenCodeAgentProvider::default()))
             .await;
+        runtime.register_provider(Arc::new(qoder)).await;
     })
     .detach();
 }
@@ -128,14 +157,20 @@ impl AssistantState {
             runtime: AgentRuntime::new(),
             provider_index: 0,
             session: None,
+            native_session_id: None,
+            pending_cancellation: None,
             session_generation: 0,
             entries: Vec::new(),
+            pending_attachments: Vec::new(),
+            session_attachments: HashMap::new(),
+            attachment_error: None,
             pending_approval: None,
             input,
             scroll: ScrollHandle::new(),
             busy: false,
             provider_menu_open: false,
             provider_readiness: vec![None; ASSISTANT_PROVIDERS.len()],
+            provider_details: vec![None; ASSISTANT_PROVIDERS.len()],
             model_catalogs: vec![ModelCatalog::NotProbed; ASSISTANT_PROVIDERS.len()],
             model_choices: vec![None; ASSISTANT_PROVIDERS.len()],
             effort_choices: vec![None; ASSISTANT_PROVIDERS.len()],
@@ -152,6 +187,8 @@ impl AssistantState {
             expanded_approvals: HashSet::new(),
             turn_started_at: None,
             last_turn_elapsed: None,
+            copied_turn: None,
+            expanded_user_messages: HashSet::new(),
             history: Vec::new(),
             viewing: None,
             transcript_id: None,
@@ -188,6 +225,7 @@ impl Editor {
             Some(session) => session.title.clone(),
             None => match assistant.session {
                 Some(_) => provider.display_name.to_string(),
+                None if assistant.native_session_id.is_some() => provider.display_name.to_string(),
                 None => "New chat".to_string(),
             },
         };
@@ -325,39 +363,25 @@ impl Editor {
             .id("assistant-messages")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&assistant.scroll)
-            .p_3()
-            .flex()
-            .flex_col()
-            .gap_2()
+            .overflow_hidden()
+            .when(!entries.is_empty(), |this| {
+                this.overflow_y_scroll()
+                    .track_scroll(&assistant.scroll)
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+            })
             .when(entries.is_empty(), |this| {
                 this.child(
                     div()
-                        .flex_1()
+                        .py(px(24.0))
                         .flex()
-                        .flex_col()
-                        .items_center()
                         .justify_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_size(px(16.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(TEXT))
-                                .child("What are you making?"),
-                        )
-                        .child(
-                            div()
-                                .max_w(px(420.0))
-                                .text_size(px(12.0))
-                                .line_height(px(18.0))
-                                .text_color(rgb(MUTED))
-                                .child(
-                                    "Ask the assistant to inspect the timeline, propose an edit, or \
-                                     explain a clip. Edits that need approval appear here as cards.",
-                                ),
-                        ),
+                        .text_size(px(16.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(TEXT))
+                        .child("What are you making?"),
                 )
             })
             .children(items.into_iter().map(|(start, end, is_group)| {
@@ -371,7 +395,7 @@ impl Editor {
                 } else {
                     None
                 };
-                let content = if is_group {
+                let entry_content = if is_group {
                     let is_live = viewing.is_none() && assistant.busy && end == entries.len();
                     let collapsed = assistant_group_collapsed(
                         &entries[start..end],
@@ -379,9 +403,51 @@ impl Editor {
                         is_live,
                         &assistant.group_overrides,
                     );
-                    assistant_activity_group_view(assistant, &entries[start..end], start, collapsed, cx)
+                    assistant_activity_group_view(self, &entries[start..end], start, collapsed, cx)
                 } else {
-                    assistant_entry_view(first)
+                    assistant_entry_view(
+                        first,
+                        start,
+                        assistant,
+                        viewing.map(|session| &session.attachments),
+                        cx,
+                    )
+                };
+                // 完成回合的末尾挂动作行；进行中的尾部回合不显示，避免复制到半截回复。
+                let turn_completed = match entries.get(end) {
+                    Some(AssistantEntry::User(_)) => true,
+                    Some(_) => false,
+                    None => viewing.is_some() || !assistant.busy,
+                };
+                let actions = if turn_completed {
+                    let turn_start = entries[..start]
+                        .iter()
+                        .rposition(|entry| matches!(entry, AssistantEntry::User(_)))
+                        .map(|index| index + 1)
+                        .unwrap_or(0);
+                    assistant_turn_actions(
+                        &entries[turn_start..end],
+                        &self.project_root,
+                        viewing.is_none(),
+                    )
+                    .map(|actions| (turn_start, actions))
+                } else {
+                    None
+                };
+                let content = match actions {
+                    Some((turn_start, actions)) => div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(entry_content)
+                        .child(assistant_turn_actions_view(
+                            turn_start,
+                            &actions,
+                            assistant.copied_turn == Some(turn_start),
+                            cx,
+                        ))
+                        .into_any_element(),
+                    None => entry_content,
                 };
                 if show_header {
                     div()
@@ -405,6 +471,10 @@ impl Editor {
         };
 
         let input_empty = assistant.input.read(cx).text().trim().is_empty();
+        let awaiting_decision = assistant.pending_approval.is_some();
+        let can_send = (!input_empty || !assistant.pending_attachments.is_empty())
+            && viewing.is_none()
+            && !awaiting_decision;
         let composer = div()
             .flex_shrink_0()
             .mx_3()
@@ -413,13 +483,54 @@ impl Editor {
             .border_1()
             .border_color(rgb(BORDER))
             .bg(rgb(BACKGROUND))
+            .opacity(if awaiting_decision {
+                0.55
+            } else {
+                1.0
+            })
             .flex()
             .flex_col()
+            .when_some(assistant.attachment_error.as_ref(), |this, error| {
+                this.child(
+                    div()
+                        .px(px(10.0))
+                        .pt(px(8.0))
+                        .text_size(px(10.0))
+                        .line_height(px(16.0))
+                        .text_color(rgb(WARNING))
+                        .child(error.clone()),
+                )
+            })
+            .when(!assistant.pending_attachments.is_empty(), |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_1()
+                        .px(px(8.0))
+                        .pt(px(8.0))
+                        .children(
+                            assistant
+                                .pending_attachments
+                                .iter()
+                                .map(|attachment| assistant_attachment_chip_view(attachment, cx)),
+                        ),
+                )
+            })
             .child(
                 div()
                     .px(px(10.0))
                     .pt(px(10.0))
-                    .child(assistant.input.clone()),
+                    .when(awaiting_decision, |this| {
+                        this.text_color(rgb(MUTED))
+                            .text_size(px(11.0))
+                            .h(px(40.0))
+                            .child("Resolve the pending approval before sending another message.")
+                    })
+                    .when(!awaiting_decision, |this| {
+                        this.child(assistant.input.clone())
+                    }),
             )
             .child(
                 div()
@@ -428,41 +539,42 @@ impl Editor {
                     .gap_1()
                     .px(px(8.0))
                     .py(px(8.0))
-                    .child(assistant_skill_button_view(assistant, cx))
-                    .child(assistant_model_button_view(assistant, cx))
-                    .child(assistant_model_picker_view(assistant, cx))
-                    .when(!assistant.effort_options().is_empty(), |this| {
-                        this.child(assistant_effort_picker_view(assistant, cx))
-                    })
-                    .when(assistant.provider().supports_permissions, |this| {
-                        this.child(assistant_permission_picker_view(assistant, cx))
+                    .when(!awaiting_decision, |this| {
+                        this.child(assistant_attachment_button_view(assistant.busy, cx))
+                            .child(assistant_skill_button_view(assistant, cx))
+                            .child(assistant_model_button_view(assistant, cx))
+                            .child(assistant_model_picker_view(assistant, cx))
+                            .when(!assistant.effort_options().is_empty(), |this| {
+                                this.child(assistant_effort_picker_view(assistant, cx))
+                            })
+                            .when(assistant.provider().supports_permissions, |this| {
+                                this.child(assistant_permission_picker_view(assistant, cx))
+                            })
                     })
                     .child(div().flex_1())
-                    .child(if assistant.busy {
-                        button_cyberpunk_secondary("assistant-stop", "Stop", true, window, cx)
-                            .on_click(cx.listener(|editor, _, _, cx| {
-                                editor.emit_event(cx, AppEvent::AssistantStopped);
-                            }))
-                    } else {
-                        button_cyberpunk_primary(
-                            "assistant-send",
-                            "Send",
-                            !input_empty && viewing.is_none(),
-                            window,
-                            cx,
+                    .when(assistant.busy, |this| {
+                        this.child(
+                            button_cyberpunk_secondary("assistant-stop", "Stop", true, window, cx)
+                                .on_click(cx.listener(|editor, _, _, cx| {
+                                    editor.emit_event(cx, AppEvent::AssistantStopped);
+                                })),
                         )
-                        .on_click(cx.listener(|editor, _, _, cx| {
-                            let message =
-                                editor.assistant.input.read(cx).text().trim().to_string();
-                            if message.is_empty() {
-                                return;
-                            }
-                            editor
-                                .assistant
-                                .input
-                                .update(cx, |input, cx| input.clear(cx));
-                            editor.emit_event(cx, AppEvent::AssistantMessageSubmitted { message });
-                        }))
+                    })
+                    .when(!assistant.busy, |this| {
+                        this.child(
+                            button_cyberpunk_primary(
+                                "assistant-send",
+                                "Send",
+                                can_send,
+                                window,
+                                cx,
+                            )
+                            .on_click(cx.listener(
+                                |editor, _, _, cx| {
+                                    editor.ui_callback_submit_assistant_message(cx);
+                                },
+                            )),
+                        )
                     }),
             );
 
@@ -471,10 +583,24 @@ impl Editor {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Project".to_string());
+        let sequence_label = self.timeline.as_ref().and_then(|timeline| {
+            timeline
+                .path
+                .file_stem()
+                .map(|name| format!(" · {}", name.to_string_lossy()))
+        });
+        let project_label = sequence_label.map_or_else(
+            || project_name.clone(),
+            |sequence| format!("{project_name}{sequence}"),
+        );
         let state_label = if viewing.is_some() {
             "Viewing saved session · New chat to continue"
         } else if assistant.busy {
             "Working…"
+        } else if assistant.pending_approval.is_some() {
+            "Waiting for your decision"
+        } else if !assistant.pending_attachments.is_empty() {
+            "File references · not uploaded or copied"
         } else {
             "Ready"
         };
@@ -484,7 +610,7 @@ impl Editor {
             .py(px(6.0))
             .text_size(px(10.0))
             .text_color(rgb(MUTED))
-            .child(format!("{project_name} · {state_label}"));
+            .child(format!("{project_label} · {state_label}"));
 
         let (approval_label, approval_color) = match assistant.pending_approval {
             Some(_) => ("1 approval pending", WARNING),
@@ -513,6 +639,16 @@ impl Editor {
                 }
             }
         };
+        let mut composer_stack = div()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .child(composer)
+            .child(context_line);
+        if entries.is_empty() {
+            composer_stack = composer_stack.mt_auto().mb_auto();
+        }
+
         let status_bar = div()
             .h(px(28.0))
             .flex_shrink_0()
@@ -547,13 +683,82 @@ impl Editor {
                             .text_color(rgb(MUTED))
                             .child(format!("{} · {}", thread_provider.transport, model_status)),
                     )
-                    .child(div().text_color(rgb(approval_color)).child(approval_label)),
+                    .child(div().text_color(rgb(approval_color)).child(approval_label))
+                    .child(
+                        div()
+                            .id("assistant-terminal-toggle")
+                            .h(px(20.0))
+                            .px(px(7.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .cursor(CursorStyle::PointingHand)
+                            .bg(rgb(if self.terminal.visible {
+                                SURFACE
+                            } else {
+                                PANEL
+                            }))
+                            .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                            .on_click(cx.listener(|editor, _, window, cx| {
+                                editor.action_toggle_terminal(&ToggleTerminal, window, cx);
+                            }))
+                            .child(
+                                svg()
+                                    .path(IconName::Terminal.path())
+                                    .size(px(11.0))
+                                    .text_color(rgb(if self.terminal.visible {
+                                        TEXT
+                                    } else {
+                                        MUTED
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(if self.terminal.visible {
+                                        TEXT
+                                    } else {
+                                        MUTED
+                                    }))
+                                    .child("Terminal"),
+                            ),
+                    ),
             );
 
         div()
             .id("editor-assistant-window")
             .relative()
             .size_full()
+            .capture_key_down(
+                cx.listener(|editor, event: &gpui::KeyDownEvent, window, cx| {
+                    let terminal_focused = editor.terminal.visible
+                        && editor
+                            .terminal
+                            .tabs
+                            .get(editor.terminal.active)
+                            .is_some_and(|tab| tab.focus_handle.is_focused(window));
+                    if terminal_focused {
+                        return; // 终端聚焦时 Enter/Esc 属于 shell，不属于助手。
+                    }
+                    match event.keystroke.key.as_str() {
+                        "enter" if !event.keystroke.modifiers.modified() => {
+                            if editor.assistant.busy {
+                                return;
+                            }
+                            editor.ui_callback_submit_assistant_message(cx);
+                            cx.stop_propagation();
+                        }
+                        "escape" if editor.assistant.busy => {
+                            editor.emit_event(cx, AppEvent::AssistantStopped);
+                            cx.stop_propagation();
+                        }
+                        _ => {}
+                    }
+                }),
+            )
             .flex()
             .overflow_hidden()
             .bg(rgb(PANEL))
@@ -571,9 +776,11 @@ impl Editor {
                     .child(tab_bar)
                     .child(messages)
                     .when_some(approval, |this, approval| this.child(approval))
-                    .child(composer)
-                    .child(context_line)
-                    .child(status_bar),
+                    .child(composer_stack)
+                    .child(status_bar)
+                    .when(self.terminal.visible, |this| {
+                        this.child(terminal_dock_view(self, cx))
+                    }),
             )
             .when(assistant.provider_menu_open, |this| {
                 this.child(assistant_provider_menu_view(assistant, cx))
@@ -593,12 +800,28 @@ impl Editor {
             .into_any_element()
     }
 
-    pub(super) fn send_assistant_message(&mut self, message: String, cx: &mut Context<Self>) {
-        if self.assistant.busy || self.assistant.viewing.is_some() {
+    pub(super) fn send_assistant_message(
+        &mut self,
+        message: String,
+        pending_attachments: Vec<AssistantAttachment>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.assistant.busy
+            || self.assistant.viewing.is_some()
+            || self.assistant.pending_approval.is_some()
+        {
             return;
         }
         self.assistant
             .push_entry(AssistantEntry::User(message.clone()));
+        self.assistant.pending_attachments.clear();
+        self.assistant.attachment_error = None;
+        if !pending_attachments.is_empty() {
+            self.assistant.session_attachments.insert(
+                self.assistant.entries.len() - 1,
+                pending_attachments.clone(),
+            );
+        }
         if self.assistant.transcript_id.is_none() {
             self.assistant.transcript_id = Some(Ulid::generate());
             self.assistant.transcript_created_at_ms = now_ms();
@@ -612,23 +835,73 @@ impl Editor {
         let runtime = self.assistant.runtime.clone();
         let provider_id = self.assistant.provider_id().to_string();
         let existing_session = self.assistant.session;
+        let pending_cancellation = self.assistant.pending_cancellation.clone();
         let generation = self.assistant.session_generation;
-        let working_dir = self.project_root.clone();
-        let model = self.assistant.active_model().map(|model| model.id.clone());
-        let effort = self.assistant.active_effort().map(str::to_string);
+        let project_root = self.project_root.clone();
+        let index = self.assistant.provider_index;
+        let model = match &self.assistant.model_choices[index] {
+            Some(choice) if provider_id == "qoder" => Some(choice.clone()),
+            Some(_) | None => self.assistant.active_model().map(|model| model.id.clone()),
+        };
+        let effort = if provider_id == "qoder" {
+            self.assistant.effort_choices[index].clone()
+        } else {
+            self.assistant.active_effort().map(str::to_string)
+        };
+        let resume_session_id = if provider_id == "qoder" {
+            self.assistant.native_session_id.clone()
+        } else {
+            None
+        };
+        let editor_tools = if provider_id == "qoder" {
+            McpToolDefinition::all_tools()
+                .into_iter()
+                .map(|tool| AgentTool {
+                    name: tool.name,
+                    description: tool.description,
+                    input_schema: tool.input_schema,
+                    is_mutation: tool.is_mutation,
+                    requires_approval: tool.requires_approval,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let permission_mode = self.assistant.permission_mode;
 
         // Providers deliver only the message string, so the active skill's instructions ride
         // along on the first message of a session. A reused session already carries them; a
         // skill change resets the session, so this never disagrees with the composer button.
         let instructions = self.assistant.skills.build_combined_instructions();
-        let outgoing_message = if existing_session.is_none() && !instructions.is_empty() {
-            format!("{}\n\n{}", instructions.trim_end(), message)
+        // Providers accept text rather than binary uploads; do not copy media or claim an upload.
+        let message_with_references = if pending_attachments.is_empty() {
+            message.clone()
         } else {
-            message
+            format!(
+                "{message}\n\n{}",
+                assistant_references_context(&pending_attachments)
+            )
+        };
+        let outgoing_message = if existing_session.is_none()
+            && resume_session_id.is_none()
+            && !instructions.is_empty()
+        {
+            format!("{}\n\n{}", instructions.trim_end(), message_with_references)
+        } else {
+            message_with_references
         };
 
-        cx.spawn(async move |editor, cx| {
+        let startup = cx.spawn(async move |editor, cx| {
+            if let Some(cancellation) = pending_cancellation {
+                cancellation.await;
+            }
+            let current = editor.update(cx, |editor, _| {
+                editor.assistant.session_generation == generation
+                    && editor.project_root == project_root
+            });
+            if current.ok() != Some(true) {
+                return;
+            }
             let session = match existing_session {
                 Some(session) => session,
                 None => {
@@ -637,7 +910,9 @@ impl Editor {
                         model,
                         effort,
                         permission_mode,
-                        working_dir: Some(working_dir),
+                        editor_tools,
+                        resume_session_id,
+                        working_dir: Some(project_root.clone()),
                         ..AgentConfig::default()
                     };
                     let started = gpui_tokio::Tokio::spawn(cx, {
@@ -651,6 +926,8 @@ impl Editor {
                             assistant_failed(
                                 &editor,
                                 cx,
+                                generation,
+                                &project_root,
                                 format!("Could not start the agent session: {error}"),
                             );
                             return;
@@ -659,6 +936,8 @@ impl Editor {
                             assistant_failed(
                                 &editor,
                                 cx,
+                                generation,
+                                &project_root,
                                 format!("Starting the agent session failed: {error}"),
                             );
                             return;
@@ -666,15 +945,30 @@ impl Editor {
                     };
                     let subscribed = gpui_tokio::Tokio::spawn(cx, {
                         let runtime = runtime.clone();
-                        async move { runtime.subscribe(session).await }
+                        async move {
+                            match runtime.subscribe(session).await {
+                                Ok(receiver) => {
+                                    let native_id = runtime.native_session_id(session).await;
+                                    Ok((receiver, native_id))
+                                }
+                                Err(error) => {
+                                    if let Err(cancel_error) = runtime.cancel(session).await {
+                                        log::warn!("Could not cancel the unsubscribed session: {cancel_error:?}");
+                                    }
+                                    Err(error)
+                                }
+                            }
+                        }
                     })
                     .await;
-                    let receiver = match subscribed {
-                        Ok(Ok(receiver)) => receiver,
+                    let (receiver, native_session_id) = match subscribed {
+                        Ok(Ok(subscribed_session)) => subscribed_session,
                         Ok(Err(error)) => {
                             assistant_failed(
                                 &editor,
                                 cx,
+                                generation,
+                                &project_root,
                                 format!("Could not subscribe to the agent session: {error}"),
                             );
                             return;
@@ -683,31 +977,44 @@ impl Editor {
                             assistant_failed(
                                 &editor,
                                 cx,
+                                generation,
+                                &project_root,
                                 format!("Subscribing to the agent session failed: {error}"),
                             );
                             return;
                         }
                     };
                     let stored = editor.update(cx, |editor, cx| {
-                        if editor.assistant.session_generation != generation {
+                        if editor.assistant.session_generation != generation
+                            || editor.project_root != project_root
+                        {
                             return false;
                         }
                         editor.assistant.session = Some(session);
+                        editor.assistant.native_session_id =
+                            native_session_id.filter(|id| !id.trim().is_empty());
+                        editor.persist_assistant_transcript(cx);
                         cx.notify();
                         true
                     });
                     if stored.ok() != Some(true) {
                         // The provider changed while the session was starting.
-                        gpui_tokio::Tokio::spawn(cx, {
+                        let cancelled = gpui_tokio::Tokio::spawn(cx, {
                             let runtime = runtime.clone();
-                            async move {
-                                let _ = runtime.cancel(session).await;
-                            }
-                        })
-                        .detach();
+                            async move { runtime.cancel(session).await }
+                        }).await;
+                        if !matches!(cancelled, Ok(Ok(()))) {
+                            log::warn!("Could not clean up a superseded agent startup: {cancelled:?}");
+                        }
                         return;
                     }
-                    start_assistant_event_pump(receiver, generation, editor.clone(), cx);
+                    start_assistant_event_pump(
+                        receiver,
+                        generation,
+                        project_root.clone(),
+                        editor.clone(),
+                        cx,
+                    );
                     session
                 }
             };
@@ -720,14 +1027,20 @@ impl Editor {
             match sent {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
-                    assistant_failed(&editor, cx, format!("Could not send the message: {error}"));
+                    assistant_failed(
+                        &editor, cx, generation, &project_root,
+                        format!("Could not send the message: {error}"),
+                    );
                 }
                 Err(error) => {
-                    assistant_failed(&editor, cx, format!("Sending the message failed: {error}"));
+                    assistant_failed(
+                        &editor, cx, generation, &project_root,
+                        format!("Sending the message failed: {error}"),
+                    );
                 }
             }
-        })
-        .detach();
+        });
+        self.assistant.pending_cancellation = Some(startup.shared());
     }
 
     pub(super) fn submit_assistant_approval(&mut self, approved: bool, cx: &mut Context<Self>) {
@@ -741,20 +1054,43 @@ impl Editor {
             cx.notify();
             return;
         };
-        self.assistant.push_entry(AssistantEntry::Info(if approved {
-            format!("Approved: {}", approval.title)
-        } else {
-            format!("Rejected: {}", approval.title)
-        }));
+        self.assistant.push_entry(AssistantEntry::ApprovalDecision {
+            request_id: approval.request_id.clone(),
+            title: approval.title.clone(),
+            tool_name: approval.tool_name.clone(),
+            parameters: approval.parameters.clone(),
+            approved,
+            automatic: false,
+        });
         self.assistant.scroll.scroll_to_bottom();
         cx.notify();
 
         let runtime = self.assistant.runtime.clone();
-        let request_id = approval.request_id;
-        gpui_tokio::Tokio::spawn(cx, async move {
-            if let Err(error) = runtime.submit_approval(session, request_id, approved).await {
-                log::error!("Could not submit the approval decision: {error:?}");
-            }
+        let request_id = approval.request_id.clone();
+        let generation = self.assistant.session_generation;
+        let project_root = self.project_root.clone();
+        cx.spawn(async move |editor, cx| {
+            let submitted = gpui_tokio::Tokio::spawn(cx, async move {
+                runtime.submit_approval(session, request_id, approved).await
+            })
+            .await;
+            let message = match submitted {
+                Ok(Ok(())) => return,
+                Ok(Err(error)) => format!("Could not submit the approval decision: {error}"),
+                Err(error) => format!("Submitting the approval decision failed: {error}"),
+            };
+            let _ = editor.update(cx, |editor, cx| {
+                if editor.assistant.session_generation != generation
+                    || editor.project_root != project_root
+                    || editor.assistant.session != Some(session)
+                {
+                    return;
+                }
+                editor.assistant.push_entry(AssistantEntry::Error(message));
+                editor.assistant.scroll.scroll_to_bottom();
+                editor.persist_assistant_transcript(cx);
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -768,15 +1104,10 @@ impl Editor {
             cx.notify();
             return;
         }
+        self.new_assistant_chat(cx);
         let previous_session = self.assistant.select_provider(index);
-        let runtime = self.assistant.runtime.clone();
         if let Some(session) = previous_session {
-            gpui_tokio::Tokio::spawn(cx, async move {
-                if let Err(error) = runtime.cancel(session).await {
-                    log::debug!("Could not cancel the previous agent session: {error:?}");
-                }
-            })
-            .detach();
+            self.cancel_assistant_session(session, cx);
         }
         self.assistant.push_entry(AssistantEntry::Info(format!(
             "Provider: {}",
@@ -807,7 +1138,7 @@ impl Editor {
         {
             self.assistant.effort_choices[index] = None;
         }
-        let previous_session = self.assistant.reset_session();
+        let previous_session = self.assistant.restart_session();
         let label = match model {
             Some(_) => self.assistant.model_label(),
             None => format!("{} (default)", self.assistant.model_label()),
@@ -818,13 +1149,7 @@ impl Editor {
         self.persist_assistant_transcript(cx);
         cx.notify();
         if let Some(session) = previous_session {
-            let runtime = self.assistant.runtime.clone();
-            gpui_tokio::Tokio::spawn(cx, async move {
-                if let Err(error) = runtime.cancel(session).await {
-                    log::debug!("Could not cancel the previous agent session: {error:?}");
-                }
-            })
-            .detach();
+            self.cancel_assistant_session(session, cx);
         }
     }
 
@@ -841,7 +1166,7 @@ impl Editor {
             return;
         }
         self.assistant.effort_choices[index] = effort.clone();
-        let previous_session = self.assistant.reset_session();
+        let previous_session = self.assistant.restart_session();
         let label = match effort {
             Some(effort) => effort_display_name(&effort),
             None => format!("{} (default)", self.assistant.effort_label()),
@@ -852,13 +1177,7 @@ impl Editor {
         self.persist_assistant_transcript(cx);
         cx.notify();
         if let Some(session) = previous_session {
-            let runtime = self.assistant.runtime.clone();
-            gpui_tokio::Tokio::spawn(cx, async move {
-                if let Err(error) = runtime.cancel(session).await {
-                    log::debug!("Could not cancel the previous agent session: {error:?}");
-                }
-            })
-            .detach();
+            self.cancel_assistant_session(session, cx);
         }
     }
 
@@ -875,7 +1194,7 @@ impl Editor {
             return;
         }
         self.assistant.permission_mode = mode;
-        let previous_session = self.assistant.reset_session();
+        let previous_session = self.assistant.restart_session();
         self.assistant.push_entry(AssistantEntry::Info(format!(
             "Permissions: {}",
             permission_mode_label(mode)
@@ -884,13 +1203,7 @@ impl Editor {
         self.persist_assistant_transcript(cx);
         cx.notify();
         if let Some(session) = previous_session {
-            let runtime = self.assistant.runtime.clone();
-            gpui_tokio::Tokio::spawn(cx, async move {
-                if let Err(error) = runtime.cancel(session).await {
-                    log::debug!("Could not cancel the previous agent session: {error:?}");
-                }
-            })
-            .detach();
+            self.cancel_assistant_session(session, cx);
         }
     }
 
@@ -931,20 +1244,14 @@ impl Editor {
             return;
         }
         self.assistant.finish_turn_timing();
-        let previous_session = self.assistant.reset_session();
+        let previous_session = self.assistant.restart_session();
         self.assistant
             .push_entry(AssistantEntry::Info("Stopped.".to_string()));
         self.assistant.scroll.scroll_to_bottom();
         self.persist_assistant_transcript(cx);
         cx.notify();
         if let Some(session) = previous_session {
-            let runtime = self.assistant.runtime.clone();
-            gpui_tokio::Tokio::spawn(cx, async move {
-                if let Err(error) = runtime.cancel(session).await {
-                    log::debug!("Could not cancel the assistant session: {error:?}");
-                }
-            })
-            .detach();
+            self.cancel_assistant_session(session, cx);
         }
     }
 
@@ -953,11 +1260,16 @@ impl Editor {
         self.persist_assistant_transcript(cx);
         let previous_session = self.assistant.reset_session();
         self.assistant.entries.clear();
+        self.assistant.pending_attachments.clear();
+        self.assistant.session_attachments.clear();
+        self.assistant.attachment_error = None;
         self.assistant.expanded_tools.clear();
         self.assistant.expanded_thoughts.clear();
         self.assistant.group_overrides.clear();
         self.assistant.expanded_approvals.clear();
         self.assistant.last_turn_elapsed = None;
+        self.assistant.copied_turn = None;
+        self.assistant.expanded_user_messages.clear();
         self.assistant.transcript_id = None;
         self.assistant.provider_menu_open = false;
         self.assistant.skill_menu_open = false;
@@ -965,28 +1277,17 @@ impl Editor {
         self.assistant.effort_menu_open = false;
         cx.notify();
         if let Some(session) = previous_session {
-            let runtime = self.assistant.runtime.clone();
-            gpui_tokio::Tokio::spawn(cx, async move {
-                if let Err(error) = runtime.cancel(session).await {
-                    log::debug!("Could not cancel the assistant session: {error:?}");
-                }
-            })
-            .detach();
+            self.cancel_assistant_session(session, cx);
         }
     }
 
     pub(super) fn select_assistant_skill(&mut self, id: String, cx: &mut Context<Self>) {
+        self.new_assistant_chat(cx);
         let previous_session = self.assistant.select_skill(&id);
         self.persist_assistant_transcript(cx);
         cx.notify();
         if let Some(session) = previous_session {
-            let runtime = self.assistant.runtime.clone();
-            gpui_tokio::Tokio::spawn(cx, async move {
-                if let Err(error) = runtime.cancel(session).await {
-                    log::debug!("Could not cancel the previous agent session: {error:?}");
-                }
-            })
-            .detach();
+            self.cancel_assistant_session(session, cx);
         }
     }
 
@@ -1007,10 +1308,12 @@ impl Editor {
             provider_id: self.assistant.provider_id().to_string(),
             model: self.assistant.model_choices[self.assistant.provider_index].clone(),
             effort: self.assistant.effort_choices[self.assistant.provider_index].clone(),
+            native_session_id: self.assistant.native_session_id.clone(),
             created_at_ms: self.assistant.transcript_created_at_ms,
             updated_at_ms: now_ms(),
-            title: session_title(&self.assistant.entries),
+            title: session_title(&self.assistant.entries, &self.assistant.session_attachments),
             entries: self.assistant.entries.clone(),
+            attachments: self.assistant.session_attachments.clone(),
         };
         let project_root = self.project_root.clone();
         cx.spawn(async move |editor, cx| {
@@ -1054,21 +1357,73 @@ impl Editor {
         .detach();
     }
 
-    /// Opens a saved transcript read-only. The live session, if any, keeps running untouched.
+    /// Qoder transcripts with a native id can resume on the next send; all others are read-only.
     pub(super) fn select_assistant_session(&mut self, id: Ulid, cx: &mut Context<Self>) {
         let project_root = self.project_root.clone();
+        let generation = self.assistant.session_generation;
         cx.spawn(async move |editor, cx| {
+            let load_root = project_root.clone();
             let loaded = cx
                 .background_executor()
-                .spawn(async move { load_session(&project_root, id) })
+                .spawn(async move { load_session(&load_root, id) })
                 .await;
             match loaded {
                 Ok(session) => {
                     if let Err(error) = editor.update(cx, |editor, cx| {
-                        editor.assistant.viewing = Some(session);
+                        if editor.assistant.session_generation != generation
+                            || editor.project_root != project_root
+                        {
+                            return;
+                        }
+                        let resumable_provider = ASSISTANT_PROVIDERS.iter().position(|provider| {
+                            provider.id == "qoder"
+                                && session.provider_id == provider.id
+                                && session
+                                    .native_session_id
+                                    .as_ref()
+                                    .is_some_and(|native_id| !native_id.trim().is_empty())
+                        });
+                        match resumable_provider {
+                            Some(index) => {
+                                let AssistantSession {
+                                    model,
+                                    effort,
+                                    native_session_id,
+                                    id,
+                                    created_at_ms,
+                                    entries,
+                                    attachments,
+                                    ..
+                                } = session;
+                                editor.assistant.viewing = None;
+                                editor.persist_assistant_transcript(cx);
+                                let previous_session = editor.assistant.reset_session();
+                                editor.assistant.provider_index = index;
+                                editor.assistant.model_choices[index] = model;
+                                editor.assistant.effort_choices[index] = effort;
+                                editor.assistant.entries = entries;
+                                editor.assistant.session_attachments = attachments;
+                                editor.assistant.transcript_id = Some(id);
+                                editor.assistant.transcript_created_at_ms = created_at_ms;
+                                editor.assistant.native_session_id = native_session_id;
+                                editor.assistant.last_turn_elapsed = None;
+                                editor.assistant.provider_menu_open = false;
+                                editor.assistant.model_menu_open = false;
+                                editor.assistant.effort_menu_open = false;
+                                editor.assistant.permission_menu_open = false;
+                                editor.assistant.skill_menu_open = false;
+                                if let Some(previous) = previous_session {
+                                    editor.cancel_assistant_session(previous, cx);
+                                }
+                            }
+                            None => editor.assistant.viewing = Some(session),
+                        }
+                        editor.assistant.expanded_tools.clear();
                         editor.assistant.expanded_thoughts.clear();
                         editor.assistant.group_overrides.clear();
+                        editor.assistant.expanded_user_messages.clear();
                         editor.assistant.expanded_approvals.clear();
+                        editor.assistant.copied_turn = None;
                         editor.assistant.scroll.scroll_to_bottom();
                         cx.notify();
                     }) {
@@ -1084,6 +1439,8 @@ impl Editor {
     pub(super) fn resume_live_assistant(&mut self, cx: &mut Context<Self>) {
         self.assistant.viewing = None;
         self.assistant.expanded_thoughts.clear();
+        self.assistant.expanded_user_messages.clear();
+        self.assistant.copied_turn = None;
         self.assistant.group_overrides.clear();
         self.assistant.expanded_approvals.clear();
         self.assistant.scroll.scroll_to_bottom();
@@ -1093,6 +1450,30 @@ impl Editor {
 
 // Private APIs only
 impl Editor {
+    /// Keep cancellation awaitable across resets so a resumed daemon never races its predecessor.
+    fn cancel_assistant_session(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        let pending = self.assistant.pending_cancellation.take();
+        let runtime = self.assistant.runtime.clone();
+        self.assistant.pending_cancellation = Some(
+            cx.spawn(async move |_, cx| {
+                if let Some(previous) = pending {
+                    previous.await;
+                }
+                let cancelled =
+                    gpui_tokio::Tokio::spawn(cx, async move { runtime.cancel(session).await })
+                        .await;
+                match cancelled {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        log::warn!("Could not cancel the assistant session: {error:?}")
+                    }
+                    Err(error) => log::warn!("Cancelling the assistant session failed: {error:?}"),
+                }
+            })
+            .shared(),
+        );
+    }
+
     /// Probes each provider's real readiness via `is_available`, off the UI thread.
     /// Results cache across sessions; an unanswered probe stays `None` and retries next open.
     fn probe_assistant_providers(&mut self, cx: &mut Context<Self>) {
@@ -1105,14 +1486,26 @@ impl Editor {
             cx.spawn(async move |editor, cx| {
                 let probed = gpui_tokio::Tokio::spawn(cx, async move {
                     match runtime.get_provider(provider_id).await {
-                        Some(provider) => provider.is_available().await,
-                        None => false,
+                        Some(provider) => {
+                            let available = provider.is_available().await;
+                            let detail = if available {
+                                match provider.status_detail().await {
+                                    Ok(detail) => detail,
+                                    Err(error) => Some(format!("Status unavailable: {error}")),
+                                }
+                            } else {
+                                None
+                            };
+                            (available, detail)
+                        }
+                        None => (false, None),
                     }
                 })
                 .await;
-                if let Ok(available) = probed {
+                if let Ok((available, detail)) = probed {
                     let _ = editor.update(cx, |editor, cx| {
                         editor.assistant.provider_readiness[index] = Some(available);
+                        editor.assistant.provider_details[index] = detail;
                         cx.notify();
                     });
                 }
@@ -1153,7 +1546,10 @@ impl Editor {
             };
             let _ = editor.update(cx, |editor, cx| {
                 editor.assistant.model_catalogs[index] = catalog;
-                if index == editor.assistant.provider_index {
+                if index == editor.assistant.provider_index
+                    && !(editor.assistant.provider_id() == "qoder"
+                        && editor.assistant.native_session_id.is_some())
+                {
                     let supported = match editor.assistant.active_model() {
                         Some(model) => model.efforts.clone(),
                         None => Vec::new(),
@@ -1170,16 +1566,34 @@ impl Editor {
         .detach();
     }
 
-    /// Runs an in-process provider's tool call off the UI thread, then applies the result.
-    /// Approval-required tools were already gated by the provider's ApprovalRequested card,
-    /// so execution here is approved; the executor still validates before committing.
+    /// Runs an editor tool off-thread, whether from Mock or the approved Qoder MCP gateway.
+    /// Native tool activity never reaches this path. The provider has already gated approvals;
+    /// the executor validates the edit and the editor rejects stale snapshots before commit.
     fn begin_assistant_tool_call(
         &mut self,
         call_id: String,
         tool_name: String,
         arguments: Value,
+        authorization: Option<ToolCallAuthorization>,
         cx: &mut Context<Self>,
     ) {
+        let Some(session) = self.assistant.session else {
+            self.assistant.push_entry(AssistantEntry::Error(
+                "Cannot execute an editor tool without an active agent session.".to_string(),
+            ));
+            cx.notify();
+            return;
+        };
+        let snapshot = AssistantToolSnapshot {
+            authorization: authorization.clone(),
+            session,
+            generation: self.assistant.session_generation,
+            project_root: self.project_root.clone(),
+            timeline: self
+                .timeline
+                .as_ref()
+                .map(|timeline| (timeline.path.clone(), timeline.revision)),
+        };
         self.assistant.push_entry(AssistantEntry::Tool {
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
@@ -1206,8 +1620,7 @@ impl Editor {
                 media_library,
             )
         });
-        let project_root = self.project_root.clone();
-        let generation = self.assistant.session_generation;
+        let project_root = snapshot.project_root.clone();
 
         cx.spawn(async move |editor, cx| {
             let background_tool_name = tool_name.clone();
@@ -1219,14 +1632,12 @@ impl Editor {
                         &arguments,
                         seed,
                         &project_root,
+                        authorization.as_ref(),
                     )
                 })
                 .await;
             let _ = editor.update(cx, |editor, cx| {
-                if editor.assistant.session_generation != generation {
-                    return;
-                }
-                editor.finish_assistant_tool_call(call_id, tool_name, outcome, cx);
+                editor.finish_assistant_tool_call(snapshot, call_id, tool_name, outcome, cx);
             });
         })
         .detach();
@@ -1234,13 +1645,116 @@ impl Editor {
 
     fn finish_assistant_tool_call(
         &mut self,
+        snapshot: AssistantToolSnapshot,
         call_id: String,
         tool_name: String,
         mut outcome: AssistantToolOutcome,
         cx: &mut Context<Self>,
     ) {
-        if let Some(timeline) = outcome.mutated_timeline {
-            self.emit_event(cx, AppEvent::Edit(EditAction::ApplyAgentEdit { timeline }));
+        let same_session = self.assistant.session_generation == snapshot.generation
+            && self.assistant.session == Some(snapshot.session)
+            && self.project_root == snapshot.project_root;
+        let stale = if snapshot
+            .authorization
+            .as_ref()
+            .is_some_and(|authorization| !authorization.is_valid())
+        {
+            Some(McpError::ExecutionFailed(
+                "The editor tool was cancelled or timed out; no timeline changes were applied."
+                    .into(),
+            ))
+        } else if !same_session {
+            Some(McpError::ExecutionFailed(
+                "The agent session or project changed while the tool was running; no editor changes were applied.".to_string(),
+            ))
+        } else {
+            match (&snapshot.timeline, &self.timeline) {
+                (Some((path, expected)), Some(current)) if path == &current.path => {
+                    if *expected != current.revision {
+                        Some(McpError::StaleRevision { expected: *expected, actual: current.revision })
+                    } else {
+                        None
+                    }
+                }
+                (None, None) => None,
+                _ => Some(McpError::ExecutionFailed(
+                    "The open timeline changed while the tool was running; re-read state before retrying.".to_string(),
+                )),
+            }
+        };
+        if let Some(error) = stale {
+            outcome.result = Err(error);
+            outcome.mutated_timeline = None;
+            outcome.reloaded_compositions = None;
+            outcome.explorer_change = None;
+        }
+        if let Some(updated) = outcome.mutated_timeline.take() {
+            // 先验证、准备预览并保存；无异步间隙地提交后才回传 MCP 成功，避免覆盖用户的新编辑。
+            let applied = (|| -> Result<()> {
+                let timeline = self
+                    .timeline
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("No timeline is open"))?;
+                let mut new_timeline = TimelineRuntimeState::from_serialize(
+                    timeline.to_serialize(),
+                    timeline.path.clone(),
+                )?;
+                if let PreviewTarget::Timeline { path, player, .. } = &self.preview.target
+                    && self.project_root.join(path) == timeline.path
+                {
+                    new_timeline.set_playhead(player.read(cx).backend().frame_index());
+                }
+                edit_timeline(
+                    &mut new_timeline,
+                    EditAction::ApplyAgentEdit { timeline: updated },
+                )?;
+                let new_preview = match self.preview.target {
+                    PreviewTarget::Timeline { .. } | PreviewTarget::None => Some(
+                        timeline_preview_target(&new_timeline, &self.project_root, cx)?,
+                    ),
+                    _ => None,
+                };
+                let commit = match &snapshot.authorization {
+                    Some(authorization) => Some(
+                        authorization
+                            .lock_for_commit()
+                            .ok_or_else(|| anyhow!("Editor tool cancelled before commit"))?,
+                    ),
+                    None => None,
+                };
+                new_timeline.save()?;
+                let new_playhead = new_timeline.playhead();
+                timeline.record_editing_history();
+                timeline.offline_asset_ids = new_timeline.offline_asset_ids;
+                timeline.commit_editing_state(new_timeline.editing_state);
+                timeline.set_playhead(new_playhead);
+                if let Some(commit) = commit {
+                    commit.complete();
+                }
+                if let Some(preview) = new_preview {
+                    self.preview.target = preview;
+                }
+                self.property_panel = current_property_panel(self);
+                if self.missing_media_dialog.is_some()
+                    && let Some(current) = self.timeline.as_ref()
+                {
+                    let dialog = missing_media_dialog(current);
+                    self.missing_media_dialog = if dialog.files.is_empty() {
+                        None
+                    } else {
+                        Some(dialog)
+                    };
+                }
+                self.schedule_composition_thumbnails(cx);
+                Ok(())
+            })();
+            if let Err(error) = applied {
+                outcome.result = Err(McpError::ExecutionFailed(format!("{error:#}")));
+            }
+        }
+        if outcome.result.is_err() {
+            outcome.reloaded_compositions = None;
+            outcome.explorer_change = None;
         }
         if let Some(compositions) = outcome.reloaded_compositions {
             self.explorer.compositions = compositions;
@@ -1248,16 +1762,27 @@ impl Editor {
         }
         if let Some(change) = outcome.explorer_change.take() {
             // 媒体库写请求由编辑器权威应用；失败时把工具结果改写为真实错误，避免上报虚假成功。
-            let applied = match change {
-                ExplorerChange::Import { paths } => {
-                    self.import_external_paths(&paths, cx);
-                    Ok(())
+            let applied = (|| -> Result<()> {
+                let commit = match &snapshot.authorization {
+                    Some(authorization) => {
+                        Some(authorization.lock_for_commit().ok_or_else(|| {
+                            anyhow!("Editor tool cancelled before library update")
+                        })?)
+                    }
+                    None => None,
+                };
+                match change {
+                    ExplorerChange::Import { paths } => self.import_external_paths(&paths, cx),
+                    ExplorerChange::Remove { asset_id } => self.remove_media_asset(asset_id, cx)?,
+                    ExplorerChange::Rename { asset_id, name } => {
+                        self.rename_media_asset(asset_id, name)?;
+                    }
                 }
-                ExplorerChange::Remove { asset_id } => self.remove_media_asset(asset_id, cx),
-                ExplorerChange::Rename { asset_id, name } => {
-                    self.rename_media_asset(asset_id, name)
+                if let Some(commit) = commit {
+                    commit.complete();
                 }
-            };
+                Ok(())
+            })();
             if let Err(error) = applied {
                 outcome.result = Err(McpError::ExecutionFailed(format!("{error:#}")));
             }
@@ -1265,16 +1790,26 @@ impl Editor {
 
         let (result, is_error) = match outcome.result {
             Ok(result) => (result, false),
+            Err(error @ McpError::StaleRevision { expected, actual }) => (
+                json!({
+                    "error": error.to_string(),
+                    "code": "StaleRevision",
+                    "expected_revision": expected,
+                    "actual_revision": actual,
+                }),
+                true,
+            ),
             Err(error) => (json!({ "error": error.to_string() }), true),
         };
-        self.assistant
-            .complete_tool_call(&call_id, &tool_name, result.to_string(), is_error);
-        self.assistant.scroll.scroll_to_bottom();
-        cx.notify();
+        if same_session {
+            self.assistant
+                .complete_tool_call(&call_id, &tool_name, result.to_string(), is_error);
+            self.assistant.scroll.scroll_to_bottom();
+            cx.notify();
+        }
 
-        let Some(session) = self.assistant.session else {
-            return;
-        };
+        // 结果只交还原会话；切换后的会话不能收到旧工具的完成通知。
+        let session = snapshot.session;
         let runtime = self.assistant.runtime.clone();
         gpui_tokio::Tokio::spawn(cx, async move {
             if let Err(error) = runtime
@@ -1285,6 +1820,320 @@ impl Editor {
             }
         })
         .detach();
+    }
+
+    fn ui_callback_select_assistant_attachments(&mut self, cx: &mut Context<Self>) {
+        if self.assistant.busy || self.assistant.viewing.is_some() {
+            return;
+        }
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Reference files in your assistant message (they are not copied)".into()),
+        });
+        cx.spawn(async move|editor,cx| {
+            let paths = match receiver.await {
+                Ok(Ok(Some(paths))) => paths,
+                Ok(Ok(None)) => return,
+                Ok(Err(error)) => {
+                    log::error!("Attachment picker failed: {error:?}");
+                    return;
+                }
+                Err(error) => {
+                    log::error!("Attachment picker failed: {error:?}");
+                    return;
+                }
+            };
+            if paths.is_empty() {
+                return;
+            }
+            let inspected: Vec<(PathBuf, Result<AssistantAttachment>)> = cx
+                .background_executor()
+                .spawn(async move {
+                    paths
+                        .into_iter()
+                        .map(|path| {
+                            let inspected = inspect_assistant_attachment(&path);
+                            (path, inspected)
+                        })
+                        .collect()
+                })
+                .await;
+            if let Err(error) = editor.update(cx, |editor, cx| {
+                if editor.assistant.busy || editor.assistant.viewing.is_some() {
+                    return;
+                }
+                let mut errors: Vec<String> = Vec::new();
+                for (path, inspected) in inspected {
+                    match inspected {
+                        Ok(attachment) => {
+                            if !editor
+                                .assistant
+                                .pending_attachments
+                                .iter()
+                                .any(|existing| existing.path == attachment.path)
+                            {
+                                editor.assistant.pending_attachments.push(attachment);
+                            }
+                        }
+                        Err(error) => errors.push(format!("{}: {error}", path.display())),
+                    }
+                }
+                let total_bytes = editor.assistant.pending_attachments_total_bytes();
+                const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
+                if total_bytes > MAX_ATTACHMENT_BYTES {
+                    errors.push(format!(
+                        "File references exceed the 20 MB total selection limit (currently {}). Remove one or send fewer files.",
+                        assistant_file_size(total_bytes)
+                    ));
+                }
+                editor.assistant.attachment_error = match errors.is_empty() {
+                    true => None,
+                    false => Some(errors.join(" ")),
+                };
+                cx.notify();
+            }) {
+                log::debug!("editor released: {error:?}");
+            }
+        })
+        .detach();
+    }
+
+    fn ui_callback_remove_assistant_attachment(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.assistant
+            .pending_attachments
+            .retain(|attachment| attachment.path != path);
+        self.assistant.attachment_error = self
+            .assistant
+            .validate_assistant_attachments()
+            .err()
+            .map(|error| error.to_string());
+        cx.notify();
+    }
+
+    fn ui_callback_submit_assistant_message(&mut self, cx: &mut Context<Self>) {
+        if self.assistant.busy || self.assistant.pending_approval.is_some() {
+            return;
+        }
+        let message = self.assistant.input.read(cx).text().trim().to_string();
+        if message.is_empty() && self.assistant.pending_attachments.is_empty() {
+            return;
+        }
+        let provider_unavailable =
+            self.assistant.provider_readiness[self.assistant.provider_index] == Some(false);
+        if provider_unavailable {
+            self.assistant.push_entry(AssistantEntry::Error(format!(
+                "{} is not available. Choose a ready provider or install and sign in before sending.",
+                self.assistant.provider_display_name()
+            )));
+            self.assistant.scroll.scroll_to_bottom();
+            cx.notify();
+            return;
+        }
+        let pending_attachments = self.assistant.pending_attachments.clone();
+        if let Err(error) = self.assistant.validate_assistant_attachments() {
+            self.assistant.attachment_error = Some(error.to_string());
+            cx.notify();
+            return;
+        }
+        self.assistant.attachment_error = None;
+        self.assistant.input.update(cx, |input, cx| input.clear(cx));
+        self.emit_event(
+            cx,
+            AppEvent::AssistantMessageSubmitted {
+                message,
+                attachments: pending_attachments,
+            },
+        );
+    }
+
+    fn ui_callback_copy_response(
+        &mut self,
+        turn_start: usize,
+        markdown: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.write_to_clipboard(ClipboardItem::new_string(markdown));
+        self.assistant.copied_turn = Some(turn_start);
+        cx.notify();
+        cx.spawn(async move |editor, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            if let Err(error) = editor.update(cx, |editor, cx| {
+                if editor.assistant.copied_turn == Some(turn_start) {
+                    editor.assistant.copied_turn = None;
+                    cx.notify();
+                }
+            }) {
+                log::debug!("editor released: {error:?}");
+            }
+        })
+        .detach();
+    }
+
+    fn ui_callback_add_response_media(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let absolute_path = if path.is_absolute() {
+            path.clone()
+        } else {
+            self.project_root.join(&path)
+        };
+        let label = path.display().to_string();
+        let canonical = match absolute_path.canonicalize() {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                log::error!("Could not resolve generated media {label}: {error:?}");
+                self.assistant.push_entry(AssistantEntry::Error(format!(
+                    "Could not add {label} to the timeline: {error}"
+                )));
+                cx.notify();
+                return;
+            }
+        };
+        if let Some(asset) = self.explorer.media_metadata.get(&canonical).cloned() {
+            self.add_response_media_to_timeline(canonical, asset, cx);
+            return;
+        }
+        // 探测会打开解码器，必须离开 UI 线程；完成后回到编辑器走与拖放相同的落轨流程。
+        let probe_path = canonical.clone();
+        cx.spawn(async move |editor, cx| {
+            let probed = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut asset = engine::media_asset::probe_media_asset(&probe_path)?;
+                    asset.set_id(Ulid::generate());
+                    Ok::<_, anyhow::Error>(asset)
+                })
+                .await;
+            if let Err(error) = editor.update(cx, |editor, cx| match probed {
+                Ok(asset) => {
+                    editor
+                        .explorer
+                        .media_metadata
+                        .insert(canonical.clone(), asset.clone());
+                    editor.add_response_media_to_timeline(canonical, asset, cx);
+                }
+                Err(error) => {
+                    log::error!("Could not probe generated media {label}: {error:?}");
+                    editor.assistant.push_entry(AssistantEntry::Error(format!(
+                        "Could not add {label} to the timeline: {error:#}"
+                    )));
+                    cx.notify();
+                }
+            }) {
+                log::debug!("editor released: {error:?}");
+            }
+        })
+        .detach();
+    }
+
+    /// Imports one generated media file into the library and places it on the open timeline,
+    /// or creates a timeline for it when none is open. Reports the real outcome in the transcript.
+    fn add_response_media_to_timeline(
+        &mut self,
+        canonical: PathBuf,
+        asset: Asset,
+        cx: &mut Context<Self>,
+    ) {
+        let applied = (|| -> Result<()> {
+            // 预填的元数据会让导入队列跳过入库，这里按 auto_create 的方式手动登记媒体库。
+            if !self.explorer.imported_paths.contains(&canonical) {
+                self.explorer.imported_paths.insert(canonical.clone());
+                self.explorer.rebuild_imported_media();
+                let assets: Vec<Asset> = self
+                    .explorer
+                    .imported_paths
+                    .iter()
+                    .filter_map(|path| self.explorer.media_metadata.get(path))
+                    .cloned()
+                    .collect();
+                if let Err(error) = save_imported_media(&self.project_root, &assets) {
+                    log::error!("Could not save media library: {error:?}");
+                }
+                self.schedule_project_waveforms(cx);
+                self.schedule_media_thumbnails(cx);
+            }
+            let (track_id, start) = {
+                let Some(timeline) = self.timeline.as_ref() else {
+                    return self.auto_create_timeline_and_insert_asset(&canonical, cx);
+                };
+                let expected_kind = if asset.kind() == MediaKind::Audio {
+                    TrackKind::Audio
+                } else {
+                    TrackKind::Video
+                };
+                let playhead = timeline.playhead();
+                let duration = timeline
+                    .editing_state
+                    .nearest_time(asset.duration().unwrap_or(DEFAULT_IMAGE_DURATION_SECONDS))
+                    .max(TimelineFrameIndex::ONE_FRAME);
+                let playhead_track = timeline
+                    .editing_state
+                    .tracks
+                    .iter()
+                    .filter(|track| track.kind == expected_kind && !track.locked)
+                    .find(|track| {
+                        validate_clip_placement(
+                            &timeline.editing_state,
+                            track.id,
+                            asset.kind(),
+                            duration,
+                            playhead,
+                            &HashSet::new(),
+                        )
+                        .is_ok()
+                    })
+                    .map(|track| track.id);
+                match playhead_track {
+                    Some(track_id) => (Some(track_id), playhead),
+                    None => {
+                        let end_track = timeline
+                            .editing_state
+                            .tracks
+                            .iter()
+                            .find(|track| track.kind == expected_kind && !track.locked)
+                            .map(|track| track.id);
+                        match end_track {
+                            Some(track_id) => {
+                                (Some(track_id), timeline.editing_state.content_duration())
+                            }
+                            None => {
+                                if timeline
+                                    .editing_state
+                                    .tracks
+                                    .iter()
+                                    .any(|track| track.kind == expected_kind)
+                                {
+                                    bail!(
+                                        "No unlocked {expected_kind:?} track is available for placement"
+                                    );
+                                }
+                                (None, playhead) // 没有同类轨道：新建轨道并连同片段一起提交。
+                            }
+                        }
+                    }
+                }
+            };
+            self.place_explorer_asset(canonical.clone(), track_id, start, asset, None, cx)
+        })();
+        match applied {
+            Ok(()) => {
+                self.assistant.push_entry(AssistantEntry::Info(format!(
+                    "Added {} to the timeline.",
+                    canonical.display()
+                )));
+            }
+            Err(error) => {
+                log::error!("Could not add generated media to the timeline: {error:?}");
+                self.assistant.push_entry(AssistantEntry::Error(format!(
+                    "Could not add {} to the timeline: {error:#}",
+                    canonical.display()
+                )));
+            }
+        }
+        self.assistant.scroll.scroll_to_bottom();
+        cx.notify();
     }
 }
 
@@ -1332,6 +2181,9 @@ impl AssistantState {
     }
 
     fn model_label(&self) -> String {
+        if self.provider_id() == "qoder" && self.model_choices[self.provider_index].is_some() {
+            return self.provider_model_label(self.provider_index);
+        }
         match self.active_model() {
             Some(model) => model.display_name.clone(),
             None => match self.catalog() {
@@ -1411,11 +2263,16 @@ impl AssistantState {
         self.skills.get(id)
     }
 
-    /// Drops the live session so a stale event pump stops applying events. Returns the old
-    /// session for the caller to cancel off-thread. Shared by provider switch, skill change
-    /// and Stop.
+    fn restart_session(&mut self) -> Option<SessionId> {
+        let native_session_id = self.native_session_id.take();
+        let previous_session = self.reset_session();
+        self.native_session_id = native_session_id;
+        previous_session
+    }
+
     fn reset_session(&mut self) -> Option<SessionId> {
         self.session_generation += 1;
+        self.native_session_id = None;
         self.pending_approval = None;
         self.busy = false;
         self.turn_started_at = None;
@@ -1430,6 +2287,29 @@ impl AssistantState {
         }
     }
 
+    fn pending_attachments_total_bytes(&self) -> u64 {
+        self.pending_attachments
+            .iter()
+            .map(|attachment| attachment.size_bytes)
+            .sum()
+    }
+
+    /// Validation precedes text clearing so an oversize draft can be reduced, not discarded.
+    fn validate_assistant_attachments(&self) -> Result<()> {
+        const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
+        let total_bytes = self.pending_attachments_total_bytes();
+        if total_bytes > MAX_ATTACHMENT_BYTES {
+            return Err(anyhow!(
+                "File references exceed the 20 MB total selection limit (currently {}). Remove one or send fewer files.",
+                assistant_file_size(total_bytes)
+            ));
+        }
+        if let Some(error) = &self.attachment_error {
+            return Err(anyhow!(error.clone()));
+        }
+        Ok(())
+    }
+
     fn push_entry(&mut self, entry: AssistantEntry) {
         const MAX_ENTRIES: usize = 400;
         if self.entries.len() >= MAX_ENTRIES {
@@ -1437,6 +2317,17 @@ impl AssistantState {
             // 前截断使所有下标减一；同步移动按下标键控的展开集合，避免展开行错位。
             self.expanded_thoughts = shift_expansion_indices(&self.expanded_thoughts);
             self.group_overrides = shift_group_overrides(&self.group_overrides);
+            self.copied_turn = self.copied_turn.and_then(|index| index.checked_sub(1));
+            self.expanded_user_messages = shift_expansion_indices(&self.expanded_user_messages);
+            self.session_attachments = self
+                .session_attachments
+                .iter()
+                .filter_map(|(index, attachments)| {
+                    index
+                        .checked_sub(1)
+                        .map(|new_index| (new_index, attachments.clone()))
+                })
+                .collect();
         }
         self.entries.push(entry);
     }
@@ -1493,6 +2384,7 @@ impl AssistantState {
                     Some(AssistantEntry::Thought(_))
                     | Some(AssistantEntry::User(_))
                     | Some(AssistantEntry::Tool { .. })
+                    | Some(AssistantEntry::ApprovalDecision { .. })
                     | Some(AssistantEntry::Info(_))
                     | Some(AssistantEntry::Error(_))
                     | None => false,
@@ -1510,6 +2402,7 @@ impl AssistantState {
                     Some(AssistantEntry::Message(_))
                     | Some(AssistantEntry::User(_))
                     | Some(AssistantEntry::Tool { .. })
+                    | Some(AssistantEntry::ApprovalDecision { .. })
                     | Some(AssistantEntry::Info(_))
                     | Some(AssistantEntry::Error(_))
                     | None => false,
@@ -1522,6 +2415,12 @@ impl AssistantState {
                 call_id,
                 tool_name,
                 arguments,
+            }
+            | AgentEvent::EditorToolCallRequested {
+                call_id,
+                tool_name,
+                arguments,
+                ..
             } => {
                 self.push_entry(AssistantEntry::Tool {
                     call_id,
@@ -1548,8 +2447,9 @@ impl AssistantState {
                 description,
                 tool_name,
                 command_summary,
-                parameters: _,
+                parameters,
             } => {
+                let parameters = parameters.to_string();
                 // In-process providers have no permission backend of their own, so the
                 // editor applies the selected mode here instead of showing a card.
                 let auto_decision = if self.provider_executes_in_process() {
@@ -1566,14 +2466,14 @@ impl AssistantState {
                 };
                 match auto_decision {
                     Some(approved) => {
-                        self.push_entry(AssistantEntry::Info(format!(
-                            "{}: {title} ({tool_name})",
-                            if approved {
-                                "Auto-approved"
-                            } else {
-                                "Auto-rejected"
-                            }
-                        )));
+                        self.push_entry(AssistantEntry::ApprovalDecision {
+                            request_id: request_id.clone(),
+                            title,
+                            tool_name: tool_name.clone(),
+                            parameters,
+                            approved,
+                            automatic: true,
+                        });
                         if let Some(session) = self.session {
                             let runtime = self.runtime.clone();
                             gpui_tokio::Tokio::spawn(cx, async move {
@@ -1589,15 +2489,13 @@ impl AssistantState {
                         }
                     }
                     None => {
-                        self.push_entry(AssistantEntry::Info(format!(
-                            "Approval requested for {tool_name}"
-                        )));
                         self.pending_approval = Some(AssistantApproval {
                             request_id,
                             title,
                             description,
                             tool_name,
                             command_summary,
+                            parameters,
                         });
                     }
                 }
@@ -1606,6 +2504,29 @@ impl AssistantState {
                 request_id,
                 approved,
             } => {
+                let existing = self.entries.iter_mut().find(|entry| {
+                    matches!(entry, AssistantEntry::ApprovalDecision { request_id: id, .. } if id == &request_id)
+                });
+                if let Some(AssistantEntry::ApprovalDecision {
+                    approved: existing, ..
+                }) = existing
+                {
+                    *existing = approved;
+                } else if let Some(approval) = &self.pending_approval
+                    && approval.request_id == request_id
+                {
+                    let title = approval.title.clone();
+                    let tool_name = approval.tool_name.clone();
+                    let parameters = approval.parameters.clone();
+                    self.push_entry(AssistantEntry::ApprovalDecision {
+                        request_id: request_id.clone(),
+                        title,
+                        tool_name,
+                        parameters,
+                        approved,
+                        automatic: false,
+                    });
+                }
                 if self
                     .pending_approval
                     .as_ref()
@@ -1613,13 +2534,9 @@ impl AssistantState {
                 {
                     self.pending_approval = None;
                 }
-                self.push_entry(AssistantEntry::Info(if approved {
-                    "The agent received the approval.".to_string()
-                } else {
-                    "The agent received the rejection.".to_string()
-                }));
             }
             AgentEvent::SessionCompleted { summary } => {
+                self.pending_approval = None;
                 self.busy = false;
                 self.finish_turn_timing();
                 if let Some(summary) = summary {
@@ -1627,6 +2544,7 @@ impl AssistantState {
                 }
             }
             AgentEvent::SessionError { code, message } => {
+                self.pending_approval = None;
                 self.busy = false;
                 self.finish_turn_timing();
                 self.push_entry(AssistantEntry::Error(format!("{code}: {message}")));
@@ -1653,6 +2571,14 @@ pub(crate) enum AssistantEntry {
     },
     Info(String),
     Error(String),
+    ApprovalDecision {
+        request_id: String,
+        title: String,
+        tool_name: String,
+        parameters: String,
+        approved: bool,
+        automatic: bool,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -1668,6 +2594,31 @@ struct AssistantApproval {
     description: String,
     tool_name: String,
     command_summary: String,
+    parameters: String,
+}
+
+struct CompositionPreview<'a> {
+    name: &'a str,
+    template_id: &'a str,
+    thumbnail: Option<&'a Path>,
+    rendered_path: PathBuf,
+}
+
+/// Actions offered under a finished turn, derived from its transcript entries.
+struct AssistantTurnActions {
+    /// The turn's response markdown, joined across message entries; None when it said nothing.
+    markdown: Option<String>,
+    /// Real media files the turn's tools produced, in first-seen order.
+    media: Vec<PathBuf>,
+}
+
+/// Identity and revision of the editor snapshot used by one off-thread tool call.
+struct AssistantToolSnapshot {
+    authorization: Option<ToolCallAuthorization>,
+    session: SessionId,
+    generation: u64,
+    project_root: PathBuf,
+    timeline: Option<(PathBuf, u64)>,
 }
 
 /// Result of an off-thread MCP tool call, applied back on the UI thread.
@@ -1699,14 +2650,14 @@ struct AssistantProvider {
     transport: &'static str,
     /// Brand dot hue; identifies the agent without tinting the chrome.
     hue: u32,
-    /// True when the editor executes the provider's tool calls in-process (offline Mock).
-    /// Self-executing providers (ACP/Codex/Claude) run their own tools and only stream results.
+    /// True when legacy ToolCallRequested events execute in the editor (offline Mock).
+    /// Other providers report native activity; EditorToolCallRequested always uses the gateway.
     executes_in_process: bool,
     /// True when the provider has a real permission backend the mode picker can drive.
     supports_permissions: bool,
 }
 
-const ASSISTANT_PROVIDERS: [AssistantProvider; 6] = [
+const ASSISTANT_PROVIDERS: [AssistantProvider; 7] = [
     AssistantProvider {
         id: "mock",
         display_name: "Mock Assistant (Offline)",
@@ -1755,11 +2706,20 @@ const ASSISTANT_PROVIDERS: [AssistantProvider; 6] = [
         executes_in_process: false,
         supports_permissions: true,
     },
+    AssistantProvider {
+        id: "qoder",
+        display_name: "Qoder CLI SDK",
+        transport: "CLI SDK",
+        hue: ACCENT,
+        executes_in_process: false,
+        supports_permissions: true,
+    },
 ];
 
 fn start_assistant_event_pump(
     receiver: tokio::sync::broadcast::Receiver<AgentEvent>,
     generation: u64,
+    project_root: PathBuf,
     editor: WeakEntity<Editor>,
     cx: &mut AsyncApp,
 ) {
@@ -1781,16 +2741,41 @@ fn start_assistant_event_pump(
                 AgentEvent::SessionCompleted { .. } | AgentEvent::SessionError { .. }
             );
             let applied = editor.update(cx, |editor, cx| {
-                if editor.assistant.session_generation != generation {
+                if editor.assistant.session_generation != generation
+                    || editor.project_root != project_root
+                {
                     return false;
                 }
                 match event {
+                    AgentEvent::EditorToolCallRequested {
+                        call_id,
+                        tool_name,
+                        arguments,
+                        authorization,
+                    } => {
+                        editor.begin_assistant_tool_call(
+                            call_id,
+                            tool_name,
+                            arguments,
+                            Some(authorization),
+                            cx,
+                        );
+                    }
                     AgentEvent::ToolCallRequested {
                         call_id,
                         tool_name,
                         arguments,
                     } if editor.assistant.provider_executes_in_process() => {
-                        editor.begin_assistant_tool_call(call_id, tool_name, arguments, cx);
+                        editor.begin_assistant_tool_call(call_id, tool_name, arguments, None, cx);
+                    }
+                    event @ AgentEvent::SessionError { .. }
+                        if editor.assistant.provider_id() == "qoder" =>
+                    {
+                        editor.assistant.apply_agent_event(event, cx);
+                        let previous = editor.assistant.restart_session();
+                        if let Some(session) = previous {
+                            editor.cancel_assistant_session(session, cx);
+                        }
                     }
                     event => editor.assistant.apply_agent_event(event, cx),
                 }
@@ -1808,10 +2793,29 @@ fn start_assistant_event_pump(
     .detach();
 }
 
-fn assistant_failed(editor: &WeakEntity<Editor>, cx: &mut AsyncApp, message: String) {
+fn assistant_failed(
+    editor: &WeakEntity<Editor>,
+    cx: &mut AsyncApp,
+    generation: u64,
+    project_root: &Path,
+    message: String,
+) {
     let _ = editor.update(cx, |editor, cx| {
+        if editor.assistant.session_generation != generation || editor.project_root != project_root
+        {
+            return;
+        }
         editor.assistant.busy = false;
+        editor.assistant.pending_approval = None;
+        editor.assistant.finish_turn_timing();
+        if editor.assistant.provider_id() == "qoder"
+            && let Some(session) = editor.assistant.restart_session()
+        {
+            editor.cancel_assistant_session(session, cx);
+        }
         editor.assistant.push_entry(AssistantEntry::Error(message));
+        editor.assistant.scroll.scroll_to_bottom();
+        editor.persist_assistant_transcript(cx);
         cx.notify();
     });
 }
@@ -1824,7 +2828,18 @@ fn run_assistant_tool_background(
     arguments: &Value,
     seed: Option<(TimelineEditingState, HashSet<Ulid>, u64, Vec<Asset>)>,
     project_root: &Path,
+    authorization: Option<&ToolCallAuthorization>,
 ) -> AssistantToolOutcome {
+    if authorization.is_some_and(|authorization| !authorization.is_valid()) {
+        return AssistantToolOutcome {
+            result: Err(McpError::ExecutionFailed(
+                "Editor tool cancelled before execution".into(),
+            )),
+            mutated_timeline: None,
+            reloaded_compositions: None,
+            explorer_change: None,
+        };
+    }
     let Some((editing_state, selected_clips, revision, media_library)) = seed else {
         return AssistantToolOutcome {
             result: Err(McpError::Unsupported {
@@ -1887,32 +2902,102 @@ fn run_assistant_tool_background(
 
 /// Renders a single non-activity transcript entry. Tool and thought runs are grouped by
 /// [`assistant_activity_group_view`] instead, so they never reach this function.
-fn assistant_entry_view(entry: &AssistantEntry) -> gpui::AnyElement {
+fn assistant_entry_view(
+    entry: &AssistantEntry,
+    index: usize,
+    assistant: &AssistantState,
+    saved_attachments: Option<&HashMap<usize, Vec<AssistantAttachment>>>,
+    cx: &mut Context<Editor>,
+) -> gpui::AnyElement {
     match entry {
-        AssistantEntry::User(message) => div()
-            .flex()
-            .justify_end()
-            .child(
-                div()
-                    .min_w_0()
-                    .max_w(px(340.0))
-                    .rounded(px(8.0))
-                    .rounded_br(px(2.0))
-                    .bg(rgb(ACCENT_BACKGROUND))
-                    .px(px(10.0))
-                    .py(px(8.0))
-                    .text_size(px(11.0))
-                    .line_height(px(20.0))
-                    .text_color(rgb(TEXT))
-                    .child(message.clone()),
-            )
-            .into_any_element(),
+        AssistantEntry::User(message) => {
+            let confirmed_references = saved_attachments
+                .unwrap_or(&assistant.session_attachments)
+                .get(&index);
+            let is_long = user_message_is_long(message);
+            let expanded = assistant.expanded_user_messages.contains(&index);
+            let shown_message = if is_long && !expanded {
+                abbreviate_user_message(message)
+            } else {
+                message.clone()
+            };
+            div()
+                .flex()
+                .justify_end()
+                .child(
+                    div()
+                        .min_w_0()
+                        .max_w(px(340.0))
+                        .rounded(px(8.0))
+                        .rounded_br(px(2.0))
+                        .bg(rgb(ACCENT_BACKGROUND))
+                        .px(px(10.0))
+                        .py(px(8.0))
+                        .text_size(px(11.0))
+                        .line_height(px(20.0))
+                        .text_color(rgb(TEXT))
+                        .when_some(confirmed_references, |this, attachments| {
+                            this.child(
+                                div().flex().flex_wrap().gap_1().mb_2().children(
+                                    attachments
+                                        .iter()
+                                        .map(assistant_confirmed_attachment_chip_view),
+                                ),
+                            )
+                        })
+                        .child(shown_message)
+                        .when(is_long, move |this| {
+                            this.child(
+                                div()
+                                    .id(format!("assistant-user-message-{index}"))
+                                    .mt_1()
+                                    .text_color(rgb(LINK))
+                                    .cursor(CursorStyle::PointingHand)
+                                    .on_click(cx.listener(move |editor, _, _, cx| {
+                                        match editor
+                                            .assistant
+                                            .expanded_user_messages
+                                            .contains(&index)
+                                        {
+                                            true => {
+                                                editor
+                                                    .assistant
+                                                    .expanded_user_messages
+                                                    .remove(&index);
+                                            }
+                                            false => {
+                                                editor
+                                                    .assistant
+                                                    .expanded_user_messages
+                                                    .insert(index);
+                                            }
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(if expanded {
+                                        "Show less"
+                                    } else {
+                                        "Show more"
+                                    }),
+                            )
+                        }),
+                )
+                .into_any_element()
+        }
         AssistantEntry::Message(message) => div()
             .text_size(px(11.0))
             .line_height(px(20.0))
             .text_color(rgb(TEXT))
             .child(message.clone())
             .into_any_element(),
+        AssistantEntry::ApprovalDecision {
+            title,
+            tool_name,
+            parameters,
+            approved,
+            automatic,
+            ..
+        } => assistant_decision_card_view(title, tool_name, parameters, *approved, *automatic),
         AssistantEntry::Info(info) => div()
             .text_size(px(11.0))
             .line_height(px(16.0))
@@ -1948,6 +3033,300 @@ fn assistant_entry_view(entry: &AssistantEntry) -> gpui::AnyElement {
     }
 }
 
+/// Inspects just the selected file's location and size; no media decoding or copying happens.
+fn inspect_assistant_attachment(path: &Path) -> Result<AssistantAttachment> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let metadata = std::fs::metadata(&canonical)?;
+    if !metadata.is_file() {
+        return Err(anyhow!("Choose a file, not a directory."));
+    }
+    let name = canonical
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| canonical.display().to_string());
+    let extension = canonical
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let kind = match extension.as_str() {
+        "mp4" | "mov" | "m4v" | "mkv" | "avi" | "webm" => AssistantAttachmentKind::Video,
+        "mp3" | "wav" | "aac" | "flac" | "ogg" => AssistantAttachmentKind::Audio,
+        "png" | "jpg" | "jpeg" | "webp" => AssistantAttachmentKind::Image,
+        _ => AssistantAttachmentKind::File,
+    };
+    Ok(AssistantAttachment {
+        path: canonical,
+        name,
+        kind,
+        size_bytes: metadata.len(),
+    })
+}
+
+fn assistant_file_size(bytes: u64) -> String {
+    match bytes {
+        value if value >= 1024 * 1024 * 1024 => {
+            format!("{:.1} GB", value as f64 / (1024.0 * 1024.0 * 1024.0))
+        }
+        value if value >= 1024 * 1024 => format!("{:.1} MB", value as f64 / (1024.0 * 1024.0)),
+        value if value >= 1024 => format!("{:.0} KB", value / 1024),
+        value => format!("{value} B"),
+    }
+}
+
+fn assistant_confirmed_attachment_chip_view(attachment: &AssistantAttachment) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .max_w(px(200.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .px(px(6.0))
+        .h(px(22.0))
+        .child(assistant_attachment_icon(attachment.kind))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .text_size(px(9.0))
+                .text_color(rgb(TEXT))
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(attachment.name.clone()),
+        )
+        .child(
+            div()
+                .font_family("monospace")
+                .text_size(px(9.0))
+                .text_color(rgb(MUTED))
+                .child(assistant_file_size(attachment.size_bytes)),
+        )
+}
+
+fn assistant_attachment_button_view(busy: bool, cx: &mut Context<Editor>) -> Stateful<gpui::Div> {
+    div()
+        .id("assistant-attach-files")
+        .h(px(28.0))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .opacity(if busy {
+            0.4
+        } else {
+            1.0
+        })
+        .when(!busy, |this| {
+            this.cursor(CursorStyle::PointingHand)
+                .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                .on_click(cx.listener(|editor, _, _, cx| {
+                    editor.ui_callback_select_assistant_attachments(cx);
+                }))
+        })
+        .child(
+            svg()
+                .path(IconName::Plus.path())
+                .size(px(13.0))
+                .text_color(rgb(MUTED)),
+        )
+}
+
+fn assistant_attachment_chip_view(
+    attachment: &AssistantAttachment,
+    cx: &mut Context<Editor>,
+) -> gpui::AnyElement {
+    let path = attachment.path.clone();
+    div()
+        .id(format!(
+            "assistant-attachment-{}",
+            attachment.path.display()
+        ))
+        .flex()
+        .items_center()
+        .gap_1()
+        .max_w(px(220.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .px(px(6.0))
+        .h(px(24.0))
+        .child(assistant_attachment_icon(attachment.kind))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .text_size(px(10.0))
+                .text_color(rgb(TEXT))
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(attachment.name.clone()),
+        )
+        .child(
+            div()
+                .font_family("monospace")
+                .text_size(px(9.0))
+                .text_color(rgb(MUTED))
+                .child(assistant_file_size(attachment.size_bytes)),
+        )
+        .child(
+            div()
+                .id(format!(
+                    "assistant-remove-attachment-{}",
+                    attachment.path.display()
+                ))
+                .size(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(3.0))
+                .cursor(CursorStyle::PointingHand)
+                .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                .on_click(cx.listener(move |editor, _, _, cx| {
+                    editor.ui_callback_remove_assistant_attachment(path.clone(), cx);
+                }))
+                .child(
+                    svg()
+                        .path(IconName::Close.path())
+                        .size(px(10.0))
+                        .text_color(rgb(MUTED)),
+                ),
+        )
+        .into_any_element()
+}
+
+fn assistant_attachment_icon(kind: AssistantAttachmentKind) -> gpui::Svg {
+    let icon = match kind {
+        AssistantAttachmentKind::Video => IconName::Video,
+        AssistantAttachmentKind::Audio => IconName::Mic,
+        AssistantAttachmentKind::Image => IconName::PickerGlow,
+        AssistantAttachmentKind::File => IconName::Text,
+    };
+    svg().path(icon.path()).size(px(11.0)).text_color(rgb(LINK))
+}
+
+/// Converts the user's selected files into explicit textual references for text-only providers.
+fn assistant_references_context(attachments: &[AssistantAttachment]) -> String {
+    let references = attachments
+        .iter()
+        .map(|attachment| {
+            format!(
+                "- {} · path: {} · {} bytes",
+                attachment.name,
+                attachment.path.display(),
+                attachment.size_bytes
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "User-provided file references (not uploaded file contents; files were not copied or imported):\n{references}\nUse these paths for any inspection or approved editor operation. If a referenced file is missing or you lack permission to read it, report that instead of inventing its contents."
+    )
+}
+
+fn assistant_decision_detail(parameters: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(parameters).ok()?;
+    if parsed.is_null() || parsed == json!({}) {
+        return None;
+    }
+    let Value::Object(fields) = parsed else {
+        return Some(parameters.to_string());
+    };
+    let flattened = fields
+        .into_iter()
+        .map(|(key, value)| format!("{key}: {value}"))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    Some(flattened)
+}
+
+fn assistant_decision_card_view(
+    title: &str,
+    tool_name: &str,
+    parameters: &str,
+    approved: bool,
+    automatic: bool,
+) -> gpui::AnyElement {
+    let (color, label) = if approved {
+        (SUCCESS, "Approved")
+    } else {
+        (ERROR, "Rejected")
+    };
+    let header = if automatic {
+        format!("{label} automatically · {title}")
+    } else {
+        format!("{label} · {title}")
+    };
+    div()
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .p(px(8.0))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .child(
+                    svg()
+                        .path(if approved {
+                            IconName::CheckCircle.path()
+                        } else {
+                            IconName::Close.path()
+                        })
+                        .size(px(12.0))
+                        .text_color(rgb(color)),
+                )
+                .child(div().text_size(px(10.0)).text_color(rgb(color)).child(header))
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .font_family("monospace")
+                        .text_size(px(9.0))
+                        .text_color(rgb(MUTED))
+                        .child(tool_name.to_string()),
+                ),
+        )
+        .when_some(assistant_decision_detail(parameters), |this, detail| {
+            this.child(
+                div()
+                    .font_family("monospace")
+                    .text_size(px(9.0))
+                    .line_height(px(14.0))
+                    .text_color(rgb(MUTED))
+                    .child(detail),
+            )
+        })
+        .child(
+            div()
+                .text_size(px(9.0))
+                .text_color(rgb(MUTED))
+                .child(match (approved, automatic) {
+                    (false, _) => "No editor change was applied by this decision.",
+                    (true, false) => "You permitted the agent to proceed; tool outcomes are shown in its activity above.",
+                    (true, true) => "The configured permission mode permitted the agent to proceed; tool outcomes are shown in its activity above.",
+                }),
+        )
+        .into_any_element()
+}
+
+/// Only visibly long prompts take an expansion control; short messages stay compact.
+fn user_message_is_long(message: &str) -> bool {
+    message.chars().count() > 240
+}
+
+fn abbreviate_user_message(message: &str) -> String {
+    let abbreviated = message.chars().take(240).collect::<String>();
+    format!("{}…", abbreviated.trim_end())
+}
+
 /// Assistant-generated content that belongs to one speaker turn. User and Info entries
 /// break the turn, so the next assistant block gets a fresh speaker header.
 fn assistant_entry_is_prose(entry: &AssistantEntry) -> bool {
@@ -1956,6 +3335,7 @@ fn assistant_entry_is_prose(entry: &AssistantEntry) -> bool {
         AssistantEntry::Message(_)
             | AssistantEntry::Thought(_)
             | AssistantEntry::Tool { .. }
+            | AssistantEntry::ApprovalDecision { .. }
             | AssistantEntry::Error(_)
     )
 }
@@ -2021,12 +3401,13 @@ fn assistant_group_collapsed(
 /// A run of consecutive tool/thought entries under one "Ran N tools" / "Thinking" header.
 /// The header collapses the whole run; each row inside expands independently.
 fn assistant_activity_group_view(
-    assistant: &AssistantState,
+    assistant_editor: &Editor,
     entries: &[AssistantEntry],
     start: usize,
     collapsed: bool,
     cx: &mut Context<Editor>,
 ) -> gpui::AnyElement {
+    let assistant = &assistant_editor.assistant;
     let tool_count = entries
         .iter()
         .filter(|entry| matches!(entry, AssistantEntry::Tool { .. }))
@@ -2091,24 +3472,29 @@ fn assistant_activity_group_view(
                         AssistantEntry::Tool {
                             call_id,
                             tool_name,
-                            arguments,
                             status,
                             result,
+                            ..
                         } => {
                             let expanded = assistant.expanded_tools.contains(call_id);
-                            assistant_tool_row_view(
-                                call_id,
+                            let composition_preview = assistant_composition_preview(
+                                result.as_deref(),
+                                assistant_editor,
                                 tool_name,
-                                arguments,
+                            );
+                            assistant_tool_row_view(
+                                entry,
                                 *status,
                                 result.as_deref(),
                                 expanded,
+                                composition_preview,
                                 cx,
                             )
                         }
                         AssistantEntry::User(_)
                         | AssistantEntry::Message(_)
                         | AssistantEntry::Info(_)
+                        | AssistantEntry::ApprovalDecision { .. }
                         | AssistantEntry::Error(_) => div().into_any_element(),
                     }
                 }),
@@ -2117,23 +3503,73 @@ fn assistant_activity_group_view(
         .into_any_element()
 }
 
+fn assistant_composition_preview<'a>(
+    result: Option<&str>,
+    editor: &'a Editor,
+    tool_name: &str,
+) -> Option<CompositionPreview<'a>> {
+    if tool_name != "render_composition" {
+        return None;
+    }
+    let result: Value = serde_json::from_str(result?).ok()?;
+    let composition_id = Ulid::from_string(result.get("composition_id")?.as_str()?).ok()?;
+    let asset = editor
+        .explorer
+        .compositions
+        .iter()
+        .find(|asset| asset.id == composition_id)?;
+    let raw_path = result.get("asset_path")?.as_str()?;
+    let path = Path::new(raw_path);
+    let rendered_path = match path.is_absolute() {
+        true => path.to_path_buf(),
+        false => editor.project_root.join(path),
+    };
+    if !assistant_generated_media_path(&rendered_path) {
+        return None;
+    }
+    let thumbnail = editor
+        .explorer
+        .composition_thumbs
+        .get(&composition_id)
+        .map(PathBuf::as_path);
+    Some(CompositionPreview {
+        name: &asset.name,
+        template_id: &asset.template_id,
+        thumbnail,
+        rendered_path,
+    })
+}
+
 /// One tool row: status icon, human label, a summary chip and a chevron. Clicking expands
 /// the real arguments and result in place — never a fabricated preview.
 fn assistant_tool_row_view(
-    call_id: &str,
-    tool_name: &str,
-    arguments: &str,
+    entry: &AssistantEntry,
     status: ToolStatus,
     result: Option<&str>,
     expanded: bool,
-    cx: &mut Context<Editor>,
+    composition_preview: Option<CompositionPreview<'_>>,
+    cx: &mut gpui::Context<Editor>,
 ) -> gpui::AnyElement {
+    let AssistantEntry::Tool {
+        call_id,
+        tool_name,
+        arguments,
+        ..
+    } = entry
+    else {
+        return div().into_any_element();
+    };
     let (icon, icon_color) = assistant_tool_status_icon(status);
     let (label, summary) = assistant_tool_label_and_summary(tool_name, arguments);
     let result_color = if status == ToolStatus::Failed {
         ERROR
     } else {
         MUTED
+    };
+    let (status_label, status_color) = match status {
+        ToolStatus::Running => ("Running", WARNING),
+        ToolStatus::Done => ("Done", SUCCESS),
+        ToolStatus::Failed => ("Failed", ERROR),
     };
     let toggle_id = call_id.to_string();
     div()
@@ -2177,6 +3613,15 @@ fn assistant_tool_row_view(
                                 .text_size(px(11.0))
                                 .text_color(rgb(TEXT))
                                 .child(label),
+                        )
+                        .child(
+                            div()
+                                .rounded(px(3.0))
+                                .bg(rgb(SURFACE))
+                                .px(px(5.0))
+                                .text_size(px(9.0))
+                                .text_color(rgb(status_color))
+                                .child(status_label),
                         )
                         .when(!summary.is_empty(), |this| {
                             this.child(
@@ -2231,6 +3676,45 @@ fn assistant_tool_row_view(
                                 .line_height(px(16.0))
                                 .text_color(rgb(result_color))
                                 .child(result.to_string()),
+                        )
+                    })
+                    .when_some(composition_preview, |this, preview| {
+                        this.child(
+                            div()
+                                .overflow_hidden()
+                                .rounded(px(4.0))
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgb(BACKGROUND))
+                                .child(
+                                    div()
+                                        .px(px(8.0))
+                                        .py(px(4.0))
+                                        .text_size(px(9.0))
+                                        .text_color(rgb(TEXT))
+                                        .child(preview.name.to_string()),
+                                )
+                                .when_some(preview.thumbnail, |this, path| {
+                                    this.child(
+                                        img(path.to_path_buf())
+                                            .w_full()
+                                            .h(px(120.0))
+                                            .bg(rgb(BACKGROUND))
+                                            .object_fit(gpui::ObjectFit::Contain),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .px(px(8.0))
+                                        .pb(px(5.0))
+                                        .text_size(px(9.0))
+                                        .text_color(rgb(MUTED))
+                                        .child(format!(
+                                            "{} · transparent still · {}",
+                                            preview.template_id,
+                                            preview.rendered_path.display()
+                                        )),
+                                ),
                         )
                     }),
             )
@@ -2404,6 +3888,186 @@ fn shift_group_overrides(overrides: &HashMap<usize, bool>) -> HashMap<usize, boo
         .collect()
 }
 
+/// Derives a finished turn's actions from its entries: the response markdown to copy, and
+/// generated media files that actually exist on disk. `include_media` is false for read-only
+/// saved transcripts, which never mutate the open project.
+fn assistant_turn_actions(
+    entries: &[AssistantEntry],
+    project_root: &Path,
+    include_media: bool,
+) -> Option<AssistantTurnActions> {
+    let text = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            AssistantEntry::Message(text) => Some(text.as_str()),
+            AssistantEntry::User(_)
+            | AssistantEntry::Thought(_)
+            | AssistantEntry::Tool { .. }
+            | AssistantEntry::Info(_)
+            | AssistantEntry::ApprovalDecision { .. }
+            | AssistantEntry::Error(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let trimmed_text = text.trim();
+    let markdown = if trimmed_text.is_empty() {
+        None
+    } else {
+        Some(trimmed_text.to_string())
+    };
+    let mut media: Vec<PathBuf> = Vec::new();
+    if include_media {
+        for entry in entries {
+            let AssistantEntry::Tool {
+                tool_name,
+                status: ToolStatus::Done,
+                result: Some(result),
+                ..
+            } = entry
+            else {
+                continue;
+            };
+            if !matches!(tool_name.as_str(), "render_composition" | "export_video") {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(result) else {
+                continue;
+            };
+            let Some(path_text) = value
+                .get("asset_path")
+                .or_else(|| value.get("output_path"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let path = if Path::new(path_text).is_absolute() {
+                PathBuf::from(path_text)
+            } else {
+                project_root.join(path_text)
+            };
+            if assistant_generated_media_path(&path) && !media.contains(&path) {
+                media.push(path);
+            }
+        }
+    }
+    if markdown.is_none() && media.is_empty() {
+        return None;
+    }
+    Some(AssistantTurnActions { markdown, media })
+}
+
+/// True only for an existing file with a media extension the timeline can place.
+fn assistant_generated_media_path(path: &Path) -> bool {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let is_media = matches!(
+        extension.as_str(),
+        "mp4"
+            | "mov"
+            | "m4v"
+            | "mkv"
+            | "avi"
+            | "webm"
+            | "mp3"
+            | "wav"
+            | "aac"
+            | "flac"
+            | "ogg"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
+    );
+    is_media && path.is_file()
+}
+
+/// The action row under a finished response: Copy markdown, plus one Add-to-timeline button
+/// per real generated media file.
+fn assistant_turn_actions_view(
+    turn_start: usize,
+    actions: &AssistantTurnActions,
+    copied: bool,
+    cx: &mut Context<Editor>,
+) -> gpui::AnyElement {
+    let (copy_icon, copy_label, copy_color) = if copied {
+        (IconName::CheckCircle, "Copied", SUCCESS)
+    } else {
+        (IconName::Copy, "Copy", MUTED)
+    };
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(4.0))
+        .when_some(actions.markdown.as_ref(), |this, markdown| {
+            let markdown = markdown.clone();
+            this.child(
+                div()
+                    .id(("assistant-copy-response", turn_start))
+                    .h(px(22.0))
+                    .px(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .rounded(px(4.0))
+                    .cursor(CursorStyle::PointingHand)
+                    .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                    .on_click(cx.listener(move |editor, _, _, cx| {
+                        editor.ui_callback_copy_response(turn_start, markdown.clone(), cx);
+                    }))
+                    .child(
+                        svg()
+                            .path(copy_icon.path())
+                            .size(px(12.0))
+                            .text_color(rgb(copy_color)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(rgb(copy_color))
+                            .child(copy_label),
+                    ),
+            )
+        })
+        .children(actions.media.iter().enumerate().map(|(index, path)| {
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("media")
+                .to_string();
+            let media_path = path.clone();
+            div()
+                .id(format!("assistant-add-media-{turn_start}-{index}"))
+                .h(px(22.0))
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .rounded(px(4.0))
+                .cursor(CursorStyle::PointingHand)
+                .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                .on_click(cx.listener(move |editor, _, _, cx| {
+                    editor.ui_callback_add_response_media(media_path.clone(), cx);
+                }))
+                .child(
+                    svg()
+                        .path(IconName::Plus.path())
+                        .size(px(12.0))
+                        .text_color(rgb(MUTED)),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(rgb(MUTED))
+                        .child(format!("Add {file_name} to timeline")),
+                )
+        }))
+        .into_any_element()
+}
+
 fn assistant_approval_card_view(
     approval: &AssistantApproval,
     expanded: bool,
@@ -2517,12 +4181,14 @@ fn assistant_approval_card_view(
                                 window,
                                 cx,
                             )
-                            .on_click(cx.listener(|editor, _, _, cx| {
-                                editor.emit_event(
-                                    cx,
-                                    AppEvent::AssistantApprovalDecided { approved: true },
-                                );
-                            })),
+                            .on_click(cx.listener(
+                                |editor, _, _, cx| {
+                                    editor.emit_event(
+                                        cx,
+                                        AppEvent::AssistantApprovalDecided { approved: true },
+                                    );
+                                },
+                            )),
                         )
                         .child(
                             button_cyberpunk_secondary(
@@ -2532,12 +4198,14 @@ fn assistant_approval_card_view(
                                 window,
                                 cx,
                             )
-                            .on_click(cx.listener(|editor, _, _, cx| {
-                                editor.emit_event(
-                                    cx,
-                                    AppEvent::AssistantApprovalDecided { approved: false },
-                                );
-                            })),
+                            .on_click(cx.listener(
+                                |editor, _, _, cx| {
+                                    editor.emit_event(
+                                        cx,
+                                        AppEvent::AssistantApprovalDecided { approved: false },
+                                    );
+                                },
+                            )),
                         ),
                 ),
         )
@@ -3299,7 +4967,7 @@ fn assistant_sessions_sidebar_view(
                 "assistant-live-session".to_string(),
                 None,
                 provider.hue,
-                &session_title(&assistant.entries),
+                &session_title(&assistant.entries, &assistant.session_attachments),
                 format!(
                     "{} · {} messages",
                     provider.display_name,
@@ -3436,9 +5104,7 @@ fn assistant_session_row_view(
         .px(px(10.0))
         .py(px(8.0))
         .when(selected, |this| {
-            this.bg(rgb(SURFACE))
-                .border_1()
-                .border_color(rgb(ACCENT))
+            this.bg(rgb(SURFACE)).border_1().border_color(rgb(ACCENT))
         })
         .when(!selected, |this| {
             this.cursor(CursorStyle::PointingHand)
@@ -3478,7 +5144,10 @@ fn assistant_session_row_view(
 }
 
 fn assistant_provider_for_id(id: &str) -> &'static AssistantProvider {
-    match ASSISTANT_PROVIDERS.iter().find(|provider| provider.id == id) {
+    match ASSISTANT_PROVIDERS
+        .iter()
+        .find(|provider| provider.id == id)
+    {
         Some(provider) => provider,
         None => &ASSISTANT_PROVIDERS[0],
     }
@@ -3516,10 +5185,7 @@ fn assistant_new_chat_button_view(
 
 /// The provider dropdown: a click-away backdrop plus every registered agent with its
 /// transport, model and real readiness. Choosing a row emits one AssistantProviderSelected.
-fn assistant_provider_menu_view(
-    assistant: &AssistantState,
-    cx: &mut Context<Editor>,
-) -> gpui::Div {
+fn assistant_provider_menu_view(assistant: &AssistantState, cx: &mut Context<Editor>) -> gpui::Div {
     let menu = div()
         .absolute()
         .bottom(px(96.0))
@@ -3580,7 +5246,11 @@ fn assistant_provider_row_view(
     let selected = index == assistant.provider_index;
     let readiness = assistant.provider_readiness[index];
     let unavailable = readiness == Some(false);
-    let (readiness_label, readiness_color) = assistant_readiness_label(readiness);
+    let (readiness_label, readiness_color) = if provider.id == "qoder" && readiness == Some(true) {
+        ("Installed", SUCCESS)
+    } else {
+        assistant_readiness_label(readiness)
+    };
     let name_color = if unavailable {
         MUTED
     } else {
@@ -3640,7 +5310,10 @@ fn assistant_provider_row_view(
                         .text_size(px(10.0))
                         .text_color(rgb(MUTED))
                         .text_ellipsis()
-                        .child(assistant.provider_model_label(index)),
+                        .child(match &assistant.provider_details[index] {
+                            Some(detail) => detail.clone(),
+                            None => assistant.provider_model_label(index),
+                        }),
                 ),
         )
         .child(
@@ -3741,10 +5414,7 @@ fn assistant_skill_button_view(
 
 /// The skill dropdown: a click-away backdrop plus every discovered production skill with
 /// its real description. Choosing a row emits one AssistantSkillSelected.
-fn assistant_skill_menu_view(
-    assistant: &AssistantState,
-    cx: &mut Context<Editor>,
-) -> gpui::Div {
+fn assistant_skill_menu_view(assistant: &AssistantState, cx: &mut Context<Editor>) -> gpui::Div {
     let mut skills = assistant.skills.list();
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     let empty = skills.is_empty();
@@ -3832,10 +5502,7 @@ fn assistant_skill_row_view(
         .hover(|style| style.bg(rgb(SURFACE_HOVER)))
         .when(active, |this| this.bg(rgb(SURFACE_HOVER)))
         .on_click(cx.listener(move |editor, _, _, cx| {
-            editor.emit_event(
-                cx,
-                AppEvent::AssistantSkillSelected { id: id.clone() },
-            );
+            editor.emit_event(cx, AppEvent::AssistantSkillSelected { id: id.clone() });
         }))
         .child(
             svg()

@@ -58,13 +58,18 @@ Located in `crates/`:
 - **`crates/agent-acp/`** — ACP JSON-RPC 2.0 stdio adapter (Antigravity, Gemini CLI).
 - **`crates/agent-codex/`** — Codex app-server JSON-RPC 2.0 adapter.
 - **`crates/agent-claude/`** — Claude Code CLI streaming adapter.
+- **`crates/agent-opencode/`** — OpenCode HTTP/SSE adapter.
+- **`crates/agent-qoder/`** — Native Rust adapter for the Qoder CLI SDK daemon
+  (NDJSON protocol v2, not ACP; no Node sidecar). Borrows the local CLI login
+  without reading tokens. Supplies host-owned once-only approvals and the editor's
+  canonical tools through virtual SDK MCP. See `docs/QODER_PROVIDER.md`.
 - **`crates/mcp-server/`** — MCP editor tool schemas and executor.
   Rewired directly to OpenCut's `TimelineEditingState` mutation API (`add_clip`, `move_clip`,
   `trim_clip`, `split_clip`, `delete_clip`, `add_text_overlay`, `generate_captions`, etc.)
   with atomic transaction rollback and approval gating.
 - **`apps/editor/`** — Multi-track NLE editor with integrated dockable AI Assistant panel
   (right dock tab next to Inspector with `cmd-shift-a` shortcut), supporting multi-provider
-  cycling (Antigravity ACP, Gemini ACP, Codex, Claude Code, Mock), streamed conversation,
+  selection (Antigravity ACP, Gemini ACP, Codex, Claude Code, OpenCode, Qoder, Mock), streamed conversation,
   real-time thought inspection, and interactive approval cards.
 - **`crates/skill-registry/`** — `SKILL.md` parser, recursive directory scanner,
   dynamic prompt instruction composer.
@@ -75,8 +80,11 @@ Located in `crates/`:
 
 - **Two separate engines:** The editor owns all project state; the agent runtime
   launches installed/authenticated CLIs. Never make a CLI the editor.
-- **OpenCut's mutation model:** `EditAction` → `EditingState`. The MCP server will
-  be rewritten to target this API (Phase 2).
+- **OpenCut's mutation model:** `EditAction` → `EditingState`. Mock and Qoder
+  editor-tool calls use the shared `McpExecutor` and `ApplyAgentEdit` gateway.
+  Native CLI tool activity is display-only; never execute it a second time.
+  Reject stale project/session/revision snapshots and revoked tool authorizations
+  before committing, and send success only after the editor commits.
 - **GPUI:** Uses vendored Zed GPUI at `vendor/zed/crates/gpui`, NOT gpui-kit.
 - **FFmpeg:** Uses `ffmpeg-next` FFI bindings linked against vendored FFmpeg 8.1.2
   libraries, NOT CLI process spawning.
@@ -139,9 +147,11 @@ streamed messages and thoughts, tool-call display, and approval cards. The
 panel displays agent tool activity; tool execution still belongs to the MCP
 server.
 
-**Phase 3 (pending):** HyperFrames bridge integration, production skills
-activation, executing MCP tools from panel tool calls, approval gating of
-timeline mutations, transitions, snapping refinements.
+**Phase 3 (in progress):** Mock and Qoder can execute the shared editor and
+HyperFrames tools with approval gating. Qoder supports live models, streamed
+turns, Stop, and native resume from saved NodaVideo transcripts. Other native
+providers currently report tool activity but are not wired to this in-process
+editor gateway. Transitions, snapping refinements, and other migration work remain.
 
 ## 7. Agent guidelines
 
@@ -155,3 +165,7 @@ timeline mutations, transitions, snapping refinements.
    deleted NodaVideo crates (media-engine, timeline, command-system, project,
    editor-core, audio-engine, gpu-renderer).
 5. `unsafe_code` is allowed in the workspace — required for macOS FFI.
+6. Qoder auth stays inside the CLI. Never collect or log its credentials, enable
+   bypass permissions by default, or invent model/session catalogs. Offline tests
+   must not require a CLI account or network access. Native resume needs an actual
+   provider session ID; a saved transcript alone is not a resumed conversation.

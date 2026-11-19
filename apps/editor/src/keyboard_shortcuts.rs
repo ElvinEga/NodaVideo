@@ -67,7 +67,15 @@ const SECTIONS: &[(&str, &[(&str, &[&str])])] = &[
             ("Debug inspector", &["⌘", "⌥", "I"]),
         ],
     ),
-    ("Window", &[("Minimize", &["⌘", "M"])]),
+    (
+        "Window",
+        &[
+            ("Minimize", &["⌘", "M"]),
+            ("Send assistant message", &["↩"]),
+            ("Stop assistant", &["Esc"]),
+            ("Toggle terminal", &["⌃", "`"]),
+        ],
+    ),
 ];
 
 pub(crate) fn keyboard_shortcuts_view(cx: &mut Context<Editor>) -> AnyElement {

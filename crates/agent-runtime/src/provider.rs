@@ -43,6 +43,12 @@ pub struct AgentConfig {
     /// Optional custom system instructions or context.
     pub system_prompt: Option<String>,
 
+    #[serde(default)]
+    pub editor_tools: Vec<AgentTool>,
+
+    #[serde(default)]
+    pub resume_session_id: Option<String>,
+
     /// List of enabled skill names for this session.
     pub skills: Vec<String>,
 
@@ -61,11 +67,22 @@ impl Default for AgentConfig {
             effort: None,
             permission_mode: PermissionMode::default(),
             system_prompt: None,
+            editor_tools: Vec::new(),
+            resume_session_id: None,
             skills: Vec::new(),
             environment: HashMap::new(),
             working_dir: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTool {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+    pub is_mutation: bool,
+    pub requires_approval: bool,
 }
 
 /// One model a provider can run, as reported by the provider itself.
@@ -113,8 +130,16 @@ pub trait AgentProvider: Send + Sync {
         Ok(Vec::new())
     }
 
+    async fn status_detail(&self) -> Result<Option<String>, AgentRuntimeError> {
+        Ok(None)
+    }
+
     /// Start a new conversation or task session with the provider.
     async fn start_session(&self, config: AgentConfig) -> Result<SessionId, AgentRuntimeError>;
+
+    fn native_session_id(&self, _session: SessionId) -> Option<String> {
+        None
+    }
 
     /// Send a user message or instruction into an existing session.
     async fn send_message(

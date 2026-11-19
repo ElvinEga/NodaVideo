@@ -19,6 +19,7 @@ members = [
     "crates/agent-codex",
     "crates/agent-claude",
     "crates/agent-opencode",
+    "crates/agent-qoder",
     "crates/mcp-server",
     "crates/skill-registry",
     "crates/hyperframes-bridge",
@@ -34,6 +35,9 @@ authors = ["NodaVideo Contributors"]
 publish = false
 
 [workspace.dependencies]
+portable-pty = "0.9.0"
+alacritty_terminal = { version = "0.26.0", default-features = false }
+
 # OpenCut libs (editor core)
 timeline = { path = "libs/timeline" }
 engine = { path = "libs/engine" }
@@ -49,6 +53,7 @@ nodavideo-agent-acp = { path = "crates/agent-acp" }
 nodavideo-agent-codex = { path = "crates/agent-codex" }
 nodavideo-agent-claude = { path = "crates/agent-claude" }
 nodavideo-agent-opencode = { path = "crates/agent-opencode" }
+nodavideo-agent-qoder = { path = "crates/agent-qoder" }
 nodavideo-mcp-server = { path = "crates/mcp-server" }
 nodavideo-skill-registry = { path = "crates/skill-registry" }
 nodavideo-hyperframes-bridge = { path = "crates/hyperframes-bridge" }

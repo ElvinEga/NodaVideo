@@ -10,7 +10,7 @@ use gpui::{App, KeyBinding, Menu, MenuItem, SystemMenuType, Window, actions};
 use std::path::PathBuf;
 
 pub(crate) const EDITOR_KEY_CONTEXT: &str = "Editor";
-const EDITOR_SHORTCUT_CONTEXT: &str = "Editor && !TextInput && !TextArea";
+const EDITOR_SHORTCUT_CONTEXT: &str = "Editor && !TextInput && !TextArea && !Terminal";
 
 actions!(
     nodavideo_editor,
@@ -34,6 +34,7 @@ actions!(
         ToggleFullscreen,
         ExitFullscreen,
         ToggleInspector,
+        ToggleTerminal,
         RevealInFinder,
         OpenInDefaultApp,
         QuitApp,
@@ -111,6 +112,7 @@ pub(crate) fn set_app_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Toggle Media Browser", ToggleMediaBrowser),
             MenuItem::action("Toggle Inspector", ToggleInspector),
+            MenuItem::action("Toggle Terminal", ToggleTerminal),
             MenuItem::action("Open AI Assistant", SwitchToAiStudioWorkspace),
             MenuItem::separator(),
             MenuItem::action("Edit Workspace", SwitchToEditWorkspace),
@@ -159,8 +161,12 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("backspace", DeleteSelected, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("delete", DeleteSelected, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("cmd-b", SplitClip, Some(EDITOR_SHORTCUT_CONTEXT)),
-        KeyBinding::new("cmd-z", Undo, Some("Editor && !TextInput")),
-        KeyBinding::new("cmd-shift-z", Redo, Some("Editor && !TextInput")),
+        KeyBinding::new("cmd-z", Undo, Some("Editor && !TextInput && !Terminal")),
+        KeyBinding::new(
+            "cmd-shift-z",
+            Redo,
+            Some("Editor && !TextInput && !Terminal"),
+        ),
         KeyBinding::new("cmd-d", DuplicateSelected, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("cmd-c", CopySelectedClips, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("cmd-x", CutSelectedClips, Some(EDITOR_SHORTCUT_CONTEXT)),
@@ -195,6 +201,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-f", ToggleFullscreen, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("escape", ExitFullscreen, Some(EDITOR_SHORTCUT_CONTEXT)),
         KeyBinding::new("cmd-alt-i", ToggleDebugInspector, None),
+        KeyBinding::new("ctrl-`", ToggleTerminal, None),
         KeyBinding::new("cmd-shift-a", SwitchToAiStudioWorkspace, None),
         KeyBinding::new("cmd-alt-a", SwitchToAiStudioWorkspace, None),
         KeyBinding::new("cmd-i", ImportMedia, Some(EDITOR_SHORTCUT_CONTEXT)),

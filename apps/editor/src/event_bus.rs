@@ -1,3 +1,4 @@
+use crate::assistant_history::AssistantAttachment;
 use crate::clip_placement::{
     DEFAULT_IMAGE_DURATION_SECONDS, validate_clip_placement, validate_text_clip_placement,
 };
@@ -152,6 +153,7 @@ pub(crate) enum AppEvent {
     /// The user sent a message from the AI assistant dock.
     AssistantMessageSubmitted {
         message: String,
+        attachments: Vec<AssistantAttachment>,
     },
     /// The user chose a provider from the AI assistant dock's model selector.
     AssistantProviderSelected {
@@ -175,7 +177,7 @@ pub(crate) enum AppEvent {
     AssistantApprovalDecided {
         approved: bool,
     },
-    /// The user stopped the running assistant turn from the composer.
+    /// The user stopped the running assistant turn from the composer's Stop button or Esc.
     AssistantStopped,
     /// The user chose a production skill from the composer's skill picker.
     AssistantSkillSelected {
@@ -707,8 +709,13 @@ async fn handle_app_event(
         | AppEvent::ExportTimeline { .. } => {
             editor.update(cx, |_, cx| cx.notify());
         }
-        AppEvent::AssistantMessageSubmitted { message } => {
-            editor.update(cx, |editor, cx| editor.send_assistant_message(message, cx));
+        AppEvent::AssistantMessageSubmitted {
+            message,
+            attachments,
+        } => {
+            editor.update(cx, |editor, cx| {
+                editor.send_assistant_message(message, attachments, cx)
+            });
         }
         AppEvent::AssistantProviderSelected { index } => {
             editor.update(cx, |editor, cx| editor.select_assistant_provider(index, cx));

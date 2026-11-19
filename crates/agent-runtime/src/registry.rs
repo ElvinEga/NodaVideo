@@ -75,6 +75,16 @@ impl AgentRuntime {
         Ok(session_id)
     }
 
+    /// Retrieve the provider-owned conversation id for a resumable session.
+    pub async fn native_session_id(&self, session: SessionId) -> Option<String> {
+        let provider_id = {
+            let lock = self.session_providers.read().await;
+            lock.get(&session)?.clone()
+        };
+        let provider = self.get_provider(&provider_id).await?;
+        provider.native_session_id(session)
+    }
+
     /// Send a message to an active session, routing to the correct provider.
     pub async fn send_message(
         &self,
