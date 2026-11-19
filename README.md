@@ -2,110 +2,240 @@
 
 *Your timeline. Your creativity. Your AI.*
 
-An AI-powered desktop video editor built with native Rust + GPUI. Cross-platform
-(macOS, Windows, Linux), featuring a professional multi-track timeline, real-time
-GPU-accelerated playback, and pluggable AI agents.
+NodaVideo is a native desktop video editor for macOS and Windows, written in
+Rust with [GPUI](https://github.com/zed-industries/zed). It pairs a professional
+multi-track timeline with an AI assistant that can work through the agent CLI
+you already use — Antigravity, Gemini CLI, Codex, Claude Code, OpenCode, or
+Qoder — without locking you into a single provider.
 
-## Architecture
+The editor is the product. The AI workspace is a mode you can enter and leave;
+everything you can do by hand is available with the assistant closed.
 
-NodaVideo combines two codebases:
+## Highlights
 
-- **Editor core** — from [OpenCut](https://github.com/opencut/opencut): working
-  video engine with `ffmpeg-next` FFI decoding, VideoToolbox on macOS, Metal GPU
-  compositing, `cpal` audio output, and a shared decoder path for preview + export.
-- **AI layer** — NodaVideo's original agent system: pluggable `AgentProvider`
-  trait, ACP/Codex/Claude/OpenCode/Qoder adapters, MCP tool executor, skill registry, and
-  HyperFrames motion graphics bridge.
-
-## Product Direction
-
-1. **Professional video editor first**, AI assistant second. Hiding the AI
-   workspace leaves a fully featured desktop NLE.
-2. **Complete user control.** Agents propose actions; the user reviews, approves,
-   or undoes them.
-3. **Provider independence.** Antigravity, Codex, Gemini CLI, Claude Code,
-   OpenCode, Qoder CLI, and ACP-compatible agents share one provider interface.
-4. **Extensible AI skills** system for video-production capabilities.
+- **Native performance.** No Electron or web view. FFmpeg is linked directly
+  through `ffmpeg-next`, decoding and playback run off the UI thread, and
+  macOS uses VideoToolbox for decode and Metal for GPU frame conversion.
+- **Frame-accurate timeline.** Multi-track video, audio, and text editing on
+  integer frames with rational frame rates — never floating-point seconds.
+- **Real preview, real export.** One shared decoder path drives both the
+  preview and the export encoder, so what you see is what is rendered.
+- **Provider-independent AI assistant.** A single `AgentProvider` interface
+  fronts six agent CLIs plus an offline mock. Model and effort choices come
+  from each provider's live catalog.
+- **Approval-gated tool use.** Agents propose timeline edits through the
+  editor's MCP gateway. Every mutation requires your approval, commits through
+  one shared editing path, and is undoable.
+- **Integrated terminal.** A real project-scoped PTY shell lives beside the
+  assistant. Toggle it with Ctrl + \`.
+- **Extensible skills.** Production skills such as smart cuts, auto captions,
+  social formatting, and animated titles live as plain `SKILL.md` packages.
 
 ## Requirements
 
-- Latest stable Rust (edition 2024, MSRV 1.92.0)
-- Vendored FFmpeg 8.1.2 development libraries in `vendor/ffmpeg-8.1.2/`
-- Vendored Zed GPUI at `vendor/zed/` (git clone or submodule)
-- On macOS: Xcode command line tools and `pkg-config` (`brew install pkg-config`)
-- On Windows: Visual Studio 2022 C++ Build Tools and Windows SDK
+| Requirement | Notes |
+| --- | --- |
+| Rust 1.92 or newer | Edition 2024. Install with [rustup](https://rustup.rs). |
+| Zed GPUI source | Must be present at `vendor/zed` (not tracked in git). |
+| FFmpeg 8.1.2 development libraries | Must be present at `vendor/ffmpeg-8.1.2` (not tracked in git). |
+| macOS | Xcode command line tools and `pkg-config` (`brew install pkg-config`). |
+| Windows | Visual Studio 2022 C++ Build Tools and the Windows SDK. |
+
+macOS is the primary, continuously tested platform. A Windows build
+configuration (aliases plus the wrapper scripts under `scripts/`) is included;
+other platforms are not verified.
+
+## Setup
+
+NodaVideo links FFmpeg and GPUI from vendored sources. Neither is committed, so
+clone or place them before building:
+
+```sh
+# Zed's GPUI, at the revision this workspace was built against.
+git clone https://github.com/zed-industries/zed.git vendor/zed
+git -C vendor/zed checkout 48741fd17d0dec28be6ad664b0a06dc7202086be
+```
+
+Place the FFmpeg 8.1.2 development libraries so that pkg-config files exist at
+`vendor/ffmpeg-8.1.2/lib/pkgconfig` (headers under `vendor/ffmpeg-8.1.2/include`).
+The build links these libraries directly; it never builds FFmpeg itself.
+
+The repository's Cargo aliases supply the required environment
+(`FFMPEG_DIR`, `PKG_CONFIG_PATH`) through the files in `.cargo/`. Plain
+`cargo build` and `cargo test` do not load them — use the aliases below, or
+pass `--config` explicitly.
 
 ## Build and run
 
-Run commands from the repository root. Each command selects a platform explicitly:
+Run all commands from the repository root.
 
 ```sh
-cargo editor-mac                 # Windows: cargo editor-win
-cargo player-mac <file>          # Windows: cargo player-win <file>
-cargo build-editor-mac
-cargo test-mac                   # Windows: cargo test-win
+cargo editor-mac          # build and launch the editor (Windows: cargo editor-win)
+cargo build-editor-mac    # build only (Windows: cargo build-editor-win)
+cargo test-mac            # editor and library tests (Windows: cargo test-win)
 ```
 
-For other Cargo operations, pass the platform configuration:
+For any other Cargo operation, select the platform configuration explicitly:
 
 ```sh
-cargo check --config .cargo/macos.toml -p editor   # Windows: .cargo/windows.toml
+cargo check --config .cargo/macos.toml -p editor --all-targets
+cargo clippy --config .cargo/macos.toml -p editor --all-targets
+```
+
+To produce a standalone release binary:
+
+```sh
+cargo build --release --config .cargo/macos.toml -p editor
+# binary: target/release/editor
+```
+
+On first launch the editor opens a project picker. A project is a folder; the
+editor stores its timelines, media library, and settings inside it. The last
+opened project is restored on the next launch.
+
+## Using the editor
+
+- **Media.** Import files with `Cmd + I` (they are referenced in place, not
+  copied), or drag them from the file explorer into the media pool or onto the
+  timeline.
+- **Timeline.** Drag clips between tracks, trim edges, split at the playhead,
+  and edit text clips from the Inspector. Undo and redo cover every edit.
+- **Export.** `Cmd + E` renders the active timeline to MP4 with H.264 video and
+  AAC audio, using the timeline's own dimensions, frame rate, and sample rate.
+- **AI Studio.** `Cmd + Shift + A` (or `Cmd + Alt + A`) opens the assistant
+  workspace. Pick a provider, start a chat, and review any proposed timeline
+  change in an approval card before it applies.
+- **Terminal.** Ctrl + \` toggles a real shell in the project root, with tabs,
+  selection, copy and paste, and scrollback.
+
+Frequently used shortcuts:
+
+| Shortcut | Action |
+| --- | --- |
+| `Space` | Play / pause |
+| `Cmd + I` | Import media |
+| `Cmd + E` | Export the active timeline |
+| `Cmd + S` | Save |
+| `Cmd + O` | Open another project folder |
+| `Cmd + ,` | Settings |
+| `Cmd + Shift + A` | AI Studio workspace |
+| Ctrl + \` | Toggle the terminal |
+
+The full list is available from **Help → Keyboard Shortcuts**.
+
+## AI assistant
+
+Providers are interchangeable and optional. NodaVideo launches whichever local
+CLI you select; authentication stays inside that CLI, and NodaVideo never
+reads, stores, or logs its tokens.
+
+| Provider | Connection | Prerequisite |
+| --- | --- | --- |
+| Mock | Built in, fully offline | None (used for development) |
+| Antigravity | ACP over stdio (`agy acp`) | Antigravity CLI installed and signed in |
+| Gemini CLI | ACP over stdio (`gemini --acp`) | Gemini CLI installed and configured |
+| Codex | App-server JSON-RPC (`codex`) | Codex CLI installed and signed in |
+| Claude Code | Streaming CLI (`claude`) | Claude Code CLI installed and signed in |
+| OpenCode | Local HTTP/SSE server (`opencode`) | OpenCode CLI installed |
+| Qoder | Qoder CLI SDK daemon (native Rust) | Qoder CLI installed and logged in |
+
+The Qoder provider additionally supports `NODAVIDEO_QODER_BIN` to select a
+custom CLI executable. See [docs/QODER_PROVIDER.md](docs/QODER_PROVIDER.md) for
+its protocol, approval model, and limitations.
+
+How the assistant stays under your control:
+
+- Every timeline mutation arrives as a typed editor tool call, is validated
+  against the current project revision, and waits for an explicit decision.
+- Approved edit calls commit through the same editing gateway as manual edits,
+  so they are atomic and undoable. Rejected calls change nothing.
+- Native CLI tool activity is displayed for transparency only; it is never
+  executed a second time by the editor.
+- Permission modes default to supervised. Full access is a deliberate opt-in,
+  not a sandbox replacement.
+- Attachments are sent to providers as file references, never uploaded or
+  copied into the project by the editor.
+
+Conversations are saved as transcripts in the project. A transcript restores
+as read-only history unless the provider supplied a real session ID that can be
+resumed.
+
+## Headless CLI
+
+The same engine powers a headless command line tool for scripts and CI:
+
+```sh
+cargo cli --help
+cargo cli probe /path/to/media.mp4 --json
+cargo cli validate timelines/episode.json --json
+cargo cli export timelines/episode.json -o episode.mp4
+cargo cli timeline remove-gaps timelines/episode.json --output compacted.json
+cargo cli transcribe recording.mp4 --format srt -o subtitles.srt
+```
+
+See [apps/cli/README.md](apps/cli/README.md) for the timeline format contract,
+export behavior, and every command.
+
+## Transcription
+
+Transcription uses the MiniMax speech-to-text API. In the editor, add your key
+under **Settings** (`Cmd + ,`). In the CLI, set `MINIMAX_API_KEY` in the
+environment. Audio is decoded locally and uploaded; output can be plain text,
+JSON, SRT, or VTT, and SRT files can be imported into the editor.
+
+## Repository layout
+
+```
+apps/
+  editor/           Multi-track editor and AI Studio
+  player/           Standalone debugging player
+  cli/              Headless probe / validate / export / transcribe
+libs/
+  media-backend/    FFmpeg FFI decoding (VideoToolbox on macOS)
+  timeline/         Timeline model, frame types, project persistence
+  engine/           Playback, decoder caches, GPU conversion, export encoder
+  transcribe/       Speech-to-text client
+  player-ui/        Player components and cpal audio output
+  waveform/         Waveform extraction
+  platform-fs/      Platform file system helpers
+crates/
+  agent-runtime/    AgentProvider trait, runtime, sessions, events, mock
+  agent-acp/        ACP adapter (Antigravity, Gemini CLI)
+  agent-codex/      Codex app-server adapter
+  agent-claude/     Claude Code adapter
+  agent-opencode/   OpenCode server adapter
+  agent-qoder/      Native Qoder SDK daemon adapter
+  mcp-server/       Editor tool schemas, executor, transactional gateway
+  skill-registry/   SKILL.md discovery and prompt composition
+  hyperframes-bridge/  Motion graphics templates and composition rendering
+skills/             Production AI skills
+templates/          Motion graphics template bundles
+sidecars/           HyperFrames renderer sidecar
+design/             Static design system and pages (build output is generated)
+vendor/             Zed GPUI and FFmpeg (obtained separately)
+```
+
+## Development
+
+```sh
+cargo test-mac                                   # all editor and library tests
+cargo check --config .cargo/macos.toml --all-targets
 cargo clippy --config .cargo/macos.toml --all-features
+cargo fmt --check
 ```
 
-## Qoder CLI provider
-
-Install Qoder CLI and authenticate with `qodercli login`, then select **Qoder CLI SDK**
-in the Assistant provider menu. The provider uses native Rust and Qoder's SDK daemon
-protocol; it does not use ACP or a Node sidecar. `NODAVIDEO_QODER_BIN` selects a custom
-CLI executable. The menu reports the installed version and sign-in status without
-reading or storing authentication tokens.
-
-Models come from the live CLI catalog. Qoder receives the editor's canonical MCP tool
-schemas, with host-owned approvals and real gateway results. Saved NodaVideo Qoder
-conversations resume using their native session IDs; older transcripts without IDs
-remain read-only. Supervised mode is the default. Full access is an explicit opt-in,
-not a sandbox. See [Qoder provider details and limitations](docs/QODER_PROVIDER.md).
-
-## Workspace structure
-
-```
-libs/           — Editor core (from OpenCut)
-  media-backend/  FFmpeg FFI video/audio decoding, VideoToolbox
-  timeline/       Timeline model (Clip, Track, FrameRate, serialization)
-  engine/         Playback engine (TimelineBackend, TimelineDecoder, GPU/CPU, export)
-  transcribe/     Audio transcription (Whisper API)
-  player-ui/      Player UI components, cpal audio output
-  waveform/       Audio waveform extraction
-  platform-fs/    Platform-specific file system operations
-
-apps/           — Applications
-  editor/         Multi-track NLE editor
-  player/         Standalone debugging player
-  cli/            Headless CLI for probing, validating, exporting
-
-crates/         — AI layer (NodaVideo-specific)
-  agent-runtime/  AgentProvider trait, AgentRuntime, MockAgentProvider
-  agent-acp/      ACP JSON-RPC adapter (Antigravity, Gemini CLI)
-  agent-codex/    Codex app-server JSON-RPC adapter
-  agent-claude/   Claude Code CLI streaming adapter
-  agent-opencode/ OpenCode HTTP/SSE adapter
-  agent-qoder/    Native Qoder SDK daemon, host approvals and virtual MCP
-  mcp-server/     MCP editor tool schemas and executor
-  skill-registry/ SKILL.md parser, discovery, prompt composer
-  hyperframes-bridge/ Motion graphics templates, HTML/SVG composition
-
-skills/         — Production AI skills (smart-cuts, auto-captions, etc.)
-templates/      — Motion graphics template bundles
-sidecars/       — HyperFrames sidecar renderer
-vendor/         — Vendored Zed GPUI + FFmpeg libraries
-```
+Conventions for contributors and coding agents are documented in
+[AGENTS.md](AGENTS.md) and `.agents/skills/`. In short: integer frames for all
+timeline positions, heavy work off the UI thread, FFmpeg only through the
+vendored libraries, and UI changes start in `design/`.
 
 ## Documentation
 
-- [Migration plan](docs/MIGRATION_PLAN.md): Detailed plan for the OpenCut core replacement
-- [Design spec](design/spec.md): User stories and acceptance criteria (from OpenCut)
+- [Qoder provider details](docs/QODER_PROVIDER.md)
+- [CLI reference](apps/cli/README.md)
+- [Agent and contributor guide](AGENTS.md)
+- [Design spec](design/spec.md)
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE) for details.
+Apache-2.0. See [LICENSE](LICENSE).
